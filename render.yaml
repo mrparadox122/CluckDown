@@ -1,0 +1,19 @@
+# Render.com free tier — deploys the Colyseus server.
+# The free plan sleeps after ~15 min idle; the client pings /wake from the menu
+# so the cold start happens while the player is typing their name.
+services:
+  - type: web
+    name: cluckdown-server
+    runtime: node
+    plan: free
+    region: oregon
+    # --omit=dev skips test-only packages (playwright, colyseus.js). The server
+    # needs none of them at runtime, and it keeps the free-tier build quick.
+    buildCommand: npm install --omit=dev
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: NODE_VERSION
+        value: "20"

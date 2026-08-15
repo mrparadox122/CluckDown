@@ -1,0 +1,14 @@
+# Netlify — deploys the browser client.
+# Set VITE_SERVER_URL in the Netlify UI to your deployed server, e.g.
+#   wss://cluckdown-server.onrender.com
+[build]
+  command = "npm install && npm run build"
+  publish = "client/dist"
+
+[build.environment]
+  NODE_VERSION = "20"
+
+[[headers]]
+  for = "/assets/*"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"

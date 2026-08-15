@@ -1,0 +1,114 @@
+// End-to-end wire smoke test. Boots two real clients against a running server,
+// drives input for ~16s and asserts that state sync, FX events, kill feed and
+// chat all survive the round trip.
+//
+//   npm run dev:server        (in one terminal)
+//   npm run smoke -w @cluckdown/server
+//
+// Exits non-zero on failure so it can gate a deploy.
+
+import { Client } from 'colyseus.js';
+
+const ENDPOINT = process.env.SMOKE_ENDPOINT || 'ws://localhost:2567';
+const DURATION = Number(process.env.SMOKE_SECONDS || 16);
+
+const failures = [];
+const check = (label, cond, detail = '') => {
+  console.log(`${cond ? '  ok  ' : ' FAIL '} ${label}${detail ? ` — ${detail}` : ''}`);
+  if (!cond) failures.push(label);
+};
+
+async function main() {
+  console.log(`→ connecting to ${ENDPOINT}\n`);
+
+  const r1 = await new Client(ENDPOINT).joinOrCreate('arena', { mode: 'casual', name: 'Alice', rating: 1000 });
+
+  const fx = {};
+  const feed = [];
+  const chats = [];
+  let stateChanges = 0;
+  let matchEnd = null;
+
+  // Attach listeners before the second client joins, otherwise Bob's join
+  // broadcast lands before there's anything listening for it.
+  r1.onMessage('fx', (evs) => { for (const e of evs) fx[e.type] = (fx[e.type] || 0) + 1; });
+  r1.onMessage('feed', (f) => feed.push(f.kind));
+  r1.onMessage('chat', (m) => chats.push(`${m.name}: ${m.text}`));
+  r1.onMessage('matchEnd', (m) => { matchEnd = m; });
+  r1.onStateChange(() => stateChanges++);
+
+  const r2 = await new Client(ENDPOINT).joinOrCreate('arena', { mode: 'casual', name: 'Bob', rating: 1000 });
+  r2.onMessage('fx', () => {});
+  r2.onMessage('feed', () => {});
+  r2.onMessage('chat', () => {});
+  r2.onMessage('matchEnd', () => {});
+
+  check('two clients matched into the same room', r1.roomId === r2.roomId, `${r1.roomId} / ${r2.roomId}`);
+
+  let seq = 0;
+  const drive = setInterval(() => {
+    seq++;
+    const t = seq / 20;
+    r1.send('input', { mx: Math.cos(t), mz: Math.sin(t), ax: 1, az: 0, shoot: true, seq });
+    r2.send('input', { mx: -Math.cos(t), mz: -Math.sin(t), ax: -1, az: 0, shoot: true, seq });
+  }, 50);
+
+  // Spaced beyond the server's 900ms per-player chat cooldown.
+  setTimeout(() => r1.send('chat', { preset: 0 }), 1500);
+  setTimeout(() => r1.send('chat', { text: '  hello   from   the   wire  ' }), 3000);
+  // Flood check: the rate limiter should swallow most of these.
+  setTimeout(() => { for (let i = 0; i < 10; i++) r2.send('chat', { text: `spam ${i}` }); }, 4500);
+
+  await new Promise((res) => setTimeout(res, DURATION * 1000));
+  clearInterval(drive);
+
+  const s = r1.state;
+  const me = s.players.get(r1.sessionId);
+  const players = [...s.players.values()];
+
+  console.log('\n--- observed state ---');
+  console.log('mode:', s.mode, '| phase:', s.phase, '| clock:', s.clock?.toFixed(1), '| arena:', s.arenaSize);
+  for (const p of players) {
+    console.log(`  ${p.name}${p.bot ? ' (bot)' : ''} seat${p.seat} pos(${p.x.toFixed(1)}, ${p.z.toFixed(1)}) hp${p.hp} k${p.kills} d${p.deaths} score${p.score} ack${p.ack}`);
+  }
+  console.log('  pickups:', s.pickups.size, '| bomber:', s.bomber?.active ? `${s.bomber.phase} hp${s.bomber.hp} fuse${s.bomber.fuse.toFixed(1)}` : 'inactive');
+  console.log('  fx:', JSON.stringify(fx));
+  console.log('  feed:', JSON.stringify(feed));
+  console.log('  chat:', JSON.stringify(chats));
+
+  // The match clock must track wall-clock time. This guards against a fixed-dt
+  // simulation loop drifting when the OS timer can't hit its target interval —
+  // at 60Hz on Windows that silently ran matches at ~60% speed.
+  const cfgTime = { casual: 240, ranked: 240, deathmatch: 300, duel: 180 }[s.mode];
+  const elapsedSim = cfgTime - s.clock;
+  const drift = Math.abs(elapsedSim - DURATION) / DURATION;
+
+  console.log('\n--- assertions ---');
+  console.log(`  (match clock advanced ${elapsedSim.toFixed(1)}s over ${DURATION}s real)`);
+  check('match clock tracks real time', drift < 0.15,
+    `sim ran at ${((elapsedSim / DURATION) * 100).toFixed(0)}% of real speed`);
+  check('state is streaming', stateChanges > 50, `${stateChanges} patches`);
+  check('match reached live phase', s.phase === 'live' || s.phase === 'over', s.phase);
+  check('bots filled the lobby to 4', players.length === 4, `${players.length} players`);
+  check('own player is present and named', me?.name === 'Alice', me?.name);
+  check('server acknowledged our inputs', (me?.ack ?? 0) > 100, `ack=${me?.ack}`);
+  check('players actually moved', players.some((p) => Math.abs(p.x) > 0.5 || Math.abs(p.z) > 0.5));
+  check('shots were fired', (fx.shot ?? 0) > 0, `${fx.shot ?? 0} shots`);
+  check('bullets resolved (hit or expired)', (fx.bulletEnd ?? 0) > 0, `${fx.bulletEnd ?? 0}`);
+  check('damage was dealt', (fx.hit ?? 0) > 0, `${fx.hit ?? 0} hits`);
+  check('pickups spawned', (fx.pickupSpawn ?? 0) > 0, `${fx.pickupSpawn ?? 0}`);
+  check('bomber spawned', (fx.bomberSpawn ?? 0) > 0, `${fx.bomberSpawn ?? 0}`);
+  check('join events reached the feed', feed.includes('join'));
+  check('quick-chat preset delivered', chats.some((c) => c.startsWith('Alice: GG')), chats[0]);
+  check('free text was whitespace-normalised', chats.some((c) => c === 'Alice: hello from the wire'));
+  check('chat flood was rate limited', chats.filter((c) => c.startsWith('Bob:')).length <= 2,
+    `${chats.filter((c) => c.startsWith('Bob:')).length} of 10 got through`);
+
+  await r1.leave();
+  await r2.leave();
+
+  console.log(failures.length ? `\n✗ ${failures.length} check(s) failed\n` : '\n✓ all checks passed\n');
+  process.exit(failures.length ? 1 : 0);
+}
+
+main().catch((e) => { console.error('FAIL:', e); process.exit(1); });

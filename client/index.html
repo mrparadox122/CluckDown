@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+  <meta name="theme-color" content="#07070c" />
+  <meta name="description" content="Cluckdown — a top-down multiplayer chicken arena shooter." />
+  <title>Cluckdown</title>
+</head>
+<body>
+  <canvas id="stage" touch-action="none"></canvas>
+
+  <!-- ===================== MAIN MENU ===================== -->
+  <section id="menu" class="screen">
+    <div class="menu-card">
+      <h1 class="logo">CLUCK<span>DOWN</span></h1>
+      <p class="tagline">top-down chicken warfare</p>
+
+      <label class="field">
+        <span>Your name</span>
+        <input id="name-input" type="text" maxlength="14" placeholder="Chicken" autocomplete="off" spellcheck="false" />
+      </label>
+
+      <div id="server-status" class="server-status is-checking">
+        <span class="dot"></span>
+        <span id="server-text">Checking server…</span>
+        <span id="server-ping" class="server-ping"></span>
+      </div>
+
+      <div class="rank-row">
+        <span class="rank-label">Rank</span>
+        <strong id="rank-name">Hen</strong>
+        <span id="rank-elo" class="rank-elo">1000</span>
+      </div>
+
+      <div id="mode-grid" class="mode-grid"></div>
+
+      <button id="play-btn" class="play-btn">PLAY</button>
+      <button id="practice-btn" class="ghost-btn">Practice offline vs bots</button>
+
+      <div class="audio-row">
+        <button id="mute-btn" class="icon-btn" type="button" aria-label="Mute">&#128266;</button>
+        <input id="volume" class="volume" type="range" min="0" max="100" step="1" aria-label="Volume" />
+      </div>
+
+      <details class="settings-box">
+        <summary>Graphics</summary>
+        <div class="settings-grid">
+          <label class="setting">
+            <span>Resolution</span>
+            <select id="gfx-resolution"></select>
+          </label>
+          <label class="setting toggle">
+            <span>Glow effects</span>
+            <input id="gfx-glow" type="checkbox" />
+          </label>
+          <label class="setting toggle">
+            <span>Antialiasing</span>
+            <input id="gfx-antialias" type="checkbox" />
+          </label>
+          <p class="settings-hint">Lower resolution and glow off give the biggest speed-up on older phones. Applies to your next match.</p>
+        </div>
+      </details>
+
+      <div id="menu-status" class="menu-status"></div>
+
+      <details class="stats-box">
+        <summary>Career stats</summary>
+        <div id="career-stats" class="career-stats"></div>
+      </details>
+    </div>
+  </section>
+
+  <!-- ===================== MATCHMAKING ===================== -->
+  <section id="finding" class="screen hidden">
+    <div class="finding-card">
+      <div class="chicken-spinner">🐔</div>
+      <h2 id="finding-title">Finding lobby…</h2>
+      <p id="finding-sub">Waiting for chickens</p>
+      <button id="cancel-btn" class="ghost-btn">Cancel</button>
+    </div>
+  </section>
+
+  <!-- ===================== IN-GAME HUD ===================== -->
+  <div id="hud" class="hidden">
+    <div id="world-overlay"></div>
+
+    <div class="hud-top">
+      <div id="killfeed" class="killfeed"></div>
+      <div class="hud-center">
+        <div id="mode-pill" class="mode-pill">Casual</div>
+        <div id="match-clock" class="match-clock">4:00</div>
+        <button id="hud-mute" class="icon-btn hud-mute" type="button" aria-label="Mute">&#128266;</button>
+        <button id="netstats" class="netstats" type="button" title="Network stats (N)"></button>
+      </div>
+      <div id="chat-panel" class="chat-panel">
+        <div id="chat-log" class="chat-log"></div>
+        <div class="chat-controls">
+          <div id="quick-chat" class="quick-chat"></div>
+          <input id="chat-input" class="chat-input" type="text" maxlength="80" placeholder="Press T to chat…" />
+        </div>
+      </div>
+    </div>
+
+    <div id="scoreboard" class="scoreboard"></div>
+    <div id="announcer" class="announcer"></div>
+
+    <div id="respawn-overlay" class="respawn-overlay hidden">
+      <div class="respawn-inner">
+        <div class="respawn-label">You got clucked</div>
+        <div id="respawn-count" class="respawn-count">3</div>
+        <div class="respawn-sub">Spectating…</div>
+      </div>
+    </div>
+
+    <div id="stick-left" class="stick-zone left"></div>
+    <div id="stick-right" class="stick-zone right"></div>
+    <div id="touch-hint" class="touch-hint">Left stick moves · Right stick aims &amp; fires</div>
+  </div>
+
+  <!-- ===================== MATCH RESULTS ===================== -->
+  <section id="results" class="screen hidden">
+    <div class="results-card">
+      <h2 id="results-title">Match over</h2>
+      <div id="podium" class="podium"></div>
+      <table class="results-table">
+        <thead><tr><th>#</th><th>Chicken</th><th>K</th><th>D</th><th>DMG</th><th>Score</th></tr></thead>
+        <tbody id="results-rows"></tbody>
+      </table>
+      <div id="results-rating" class="results-rating"></div>
+      <button id="again-btn" class="play-btn">Play again</button>
+      <button id="menu-btn" class="ghost-btn">Main menu</button>
+    </div>
+  </section>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>

@@ -1,0 +1,15 @@
+node_modules/
+dist/
+.env
+.env.local
+*.log
+npm-debug.log*
+
+# Screenshots produced by the Playwright test scripts
+*.png
+!docs/**/*.png
+
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
