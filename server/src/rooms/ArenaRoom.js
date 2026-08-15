@@ -1,8 +1,9 @@
-import { Room } from 'colyseus';
+import { Room, ServerError } from 'colyseus';
 import {
   createWorld, addPlayer, removePlayer, applyInput, stepWorld,
   stepBots, initBot, botName,
-  MODES, TICK_HZ, TICK_DT, PATCH_MS, MAX_CATCHUP, QUICK_CHAT, PLAYER,
+  MODES, TICK_HZ, TICK_DT, PATCH_MS, MAX_CATCHUP, QUICK_CHAT, PLAYER, cleanRoomCode,
+  hillProgress,
 } from '@cluckdown/shared';
 import { ArenaState, PlayerState, PickupState } from './state.js';
 import { ratingDeltas } from '../rating.js';
@@ -14,13 +15,18 @@ const POST_MATCH_SECONDS = 12;
 export class ArenaRoom extends Room {
   onCreate(options) {
     const mode = MODES[options?.mode] ? options.mode : 'casual';
+    // Rooms are matched on mode AND code (see filterBy in index.js). Public
+    // matches use the empty string, so a public queue can never drop someone
+    // into a friends-only room, and vice versa.
+    this.code = cleanRoomCode(options?.code);
     this.cfg = MODES[mode];
     this.maxClients = this.cfg.maxPlayers;
     this.autoDispose = true;
 
     this.world = createWorld({ mode });
     this.seats = new Array(this.cfg.maxPlayers).fill(null);
-    this.botFillAt = BOT_FILL_DELAY;
+    // Friends need longer to gather than a public queue does.
+    this.botFillAt = this.code ? BOT_FILL_DELAY * 4 : BOT_FILL_DELAY;
     this.postMatch = 0;
     this.fxQueue = [];
     this.fxFlushAt = 0;
@@ -30,13 +36,15 @@ export class ArenaRoom extends Room {
 
     const state = new ArenaState();
     state.mode = mode;
+    state.modifier = this.world.modifier;
     state.phase = this.world.phase;
     state.clock = this.world.clock;
     state.arenaSize = this.cfg.arena;
+    state.safeHalf = this.world.safeHalf;
     state.killLimit = this.cfg.killLimit;
     this.setState(state);
 
-    this.setMetadata({ mode, label: this.cfg.label });
+    this.setMetadata({ mode, label: this.cfg.label, code: this.code });
 
     this.onMessage('input', (client, msg) => {
       if (this.world.phase === 'over') return;
@@ -49,7 +57,7 @@ export class ArenaRoom extends Room {
     // server needs no clock agreement and the client can measure RTT exactly.
     this.onMessage('ping', (client, sentAt) => client.send('pong', sentAt));
 
-    roomOpened(this.roomId, mode);
+    roomOpened(this.roomId, mode, this.code);
 
     // Simulate fast, broadcast slower. Clients interpolate between patches, so
     // pushing state at the full simulation rate would cost them decode work for
@@ -59,6 +67,22 @@ export class ArenaRoom extends Room {
   }
 
   // -------------------------------------------------------------- lifecycle
+
+  /**
+   * Enforces the room code before anyone is let in.
+   *
+   * filterBy('code') alone is NOT enough: a client that simply omits the field
+   * sends `undefined`, which matches any room, so a public queue could drop a
+   * stranger straight into a friends-only match. Matchmaking filters are a
+   * routing hint — this is the actual gate.
+   */
+  onAuth(client, options) {
+    const offered = cleanRoomCode(options?.code);
+    if (offered !== this.code) {
+      throw new ServerError(4001, this.code ? 'Wrong room code' : 'This match is private');
+    }
+    return true;
+  }
 
   onJoin(client, options) {
     const seat = this.takeSeat(client.sessionId);
@@ -107,7 +131,10 @@ export class ArenaRoom extends Room {
     for (const p of this.world.players.values()) {
       if (p.isBot) bots++; else humans++;
     }
-    roomPopulation(this.roomId, humans, bots);
+    roomPopulation(this.roomId, humans, bots, {
+      maxPlayers: this.cfg.maxPlayers,
+      phase: this.world.phase,
+    });
   }
 
   onDispose() {
@@ -351,6 +378,8 @@ export class ArenaRoom extends Room {
   syncPlayer(ps, p) {
     ps.name = p.name;
     ps.seat = p.seat;
+    ps.team = p.team ?? -1;
+    ps.hillPct = Math.round(hillProgress(this.world, p.seat) * 100);
     ps.x = p.x;
     ps.z = p.z;
     ps.aim = p.aim;
@@ -358,6 +387,8 @@ export class ArenaRoom extends Room {
     ps.alive = p.alive;
     ps.invuln = p.invulnUntil > this.world.time;
     ps.rapid = p.rapidUntil > this.world.time;
+    ps.ammo = p.ammoUntil > this.world.time ? p.ammo : '';
+    ps.burning = p.burnUntil > this.world.time;
     ps.kills = p.kills;
     ps.deaths = p.deaths;
     ps.score = p.score;
@@ -370,6 +401,14 @@ export class ArenaRoom extends Room {
     const s = this.state;
     s.phase = this.world.phase;
     s.clock = this.world.clock;
+    s.safeHalf = this.world.safeHalf;
+    if (this.world.teamScores) {
+      [s.teamBlue, s.teamRed] = this.world.teamScores;
+    }
+    if (this.world.hill) {
+      s.hillHolder = this.world.hill.holder ?? '';
+      s.hillContested = this.world.hill.contested;
+    }
 
     for (const [id, p] of this.world.players) {
       let ps = s.players.get(id);

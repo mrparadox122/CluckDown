@@ -1,11 +1,9 @@
 import { MeshBuilder } from '@babylonjs/core/Meshes/meshBuilder';
 import { Mesh } from '@babylonjs/core/Meshes/mesh';
 import { VertexBuffer } from '@babylonjs/core/Buffers/buffer';
-import { Vector3, Color3 } from '@babylonjs/core/Maths/math';
-import { TransformNode } from '@babylonjs/core/Meshes/transformNode';
-import { StandardMaterial } from '@babylonjs/core/Materials/standardMaterial';
+import { Color3 } from '@babylonjs/core/Maths/math';
 import { emissiveMat, litMat } from './scene.js';
-import { PLAYER, BOMBER, PICKUP } from '@cluckdown/shared';
+import { BOMBER, AMMO } from '@cluckdown/shared';
 
 /**
  * A chicken, assembled from boxes then baked down to a SINGLE mesh.
@@ -115,6 +113,13 @@ export class PlayerView {
     this.aura.position.y = 0.12;
     this.aura.isPickable = false;
     this.aura.setEnabled(false);
+
+    this.flame = MeshBuilder.CreateSphere('flame', { diameter: 1.5, segments: 8 }, scene);
+    this.flame.material = emissiveMat(scene, 'flameMat', AMMO.fire.color, { intensity: 1.0, alpha: 0.5 });
+    this.flame.parent = this.root;
+    this.flame.position.y = 1.0;
+    this.flame.isPickable = false;
+    this.flame.setEnabled(false);
   }
 
   setVisible(v) {
@@ -167,6 +172,16 @@ export class PlayerView {
 
     this.shield.setEnabled(!!target.invuln);
     if (target.invuln) this.shield.rotation.y += dt * 2;
+
+    // Fire damage keeps ticking after the shot, so it needs to be visible on
+    // the victim rather than only in the damage numbers.
+    if (this.flame) {
+      this.flame.setEnabled(!!target.burning);
+      if (target.burning) {
+        this.flame.rotation.y += dt * 7;
+        this.flame.scaling.setAll(0.9 + Math.abs(Math.sin(this.bob * 1.7)) * 0.35);
+      }
+    }
 
     this.aura.setEnabled(!!target.rapid);
     if (target.rapid) {
@@ -243,14 +258,15 @@ export class PickupView {
   constructor(scene, pickup) {
     this.id = pickup.id;
     this.type = pickup.type;
-    const isHealth = pickup.type === 'health';
-    this.mesh = MeshBuilder.CreateBox('pickup', { size: isHealth ? 0.85 : 0.75 }, scene);
-    this.mesh.material = emissiveMat(
-      scene,
-      isHealth ? 'pickHealth' : 'pickRapid',
-      isHealth ? '#35e07f' : '#ffcc3d',
-      { intensity: 1.5 },
-    );
+    // Colour comes from the ammo table, so adding a type needs no change here.
+    const COLORS = { health: '#35e07f', rapid: '#ffcc3d' };
+    for (const id of Object.keys(AMMO)) COLORS[id] = AMMO[id].color;
+    const hex = COLORS[pickup.type] ?? '#ffffff';
+
+    this.mesh = MeshBuilder.CreateBox('pickup', {
+      size: pickup.type === 'health' ? 0.85 : 0.75,
+    }, scene);
+    this.mesh.material = emissiveMat(scene, `pick_${pickup.type}`, hex, { intensity: 1.0 });
     this.mesh.position.set(pickup.x, 1, pickup.z);
     this.mesh.isPickable = false;
     this.t = Math.random() * 10;

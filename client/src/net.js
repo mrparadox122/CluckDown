@@ -10,7 +10,8 @@ import { Client } from 'colyseus.js';
 import {
   createWorld, addPlayer, applyInput, stepWorld,
   stepBots, initBot, botName,
-  MODES, SEAT_COLORS, TICK_DT, MAX_CATCHUP, QUICK_CHAT,
+  MODES, SEAT_COLORS, TEAM_COLORS, TICK_DT, MAX_CATCHUP, QUICK_CHAT, cleanRoomCode,
+  hillProgress,
 } from '@cluckdown/shared';
 
 const DEFAULT_ENDPOINT = import.meta.env.VITE_SERVER_URL
@@ -57,6 +58,7 @@ export class OnlineSession extends BaseSession {
     this.selfId = room.sessionId;
     this.mode = room.state.mode || 'casual';
     this.arenaSize = room.state.arenaSize || MODES.casual.arena;
+    this.modifier = room.state.modifier || 'none';
 
     room.onMessage('fx', (evs) => this.emit('fx', evs));
     room.onMessage('feed', (f) => this.emit('feed', f));
@@ -103,6 +105,15 @@ export class OnlineSession extends BaseSession {
 
   get phase() { return this.room.state?.phase ?? 'warmup'; }
   get clock() { return this.room.state?.clock ?? 0; }
+  get safeHalf() { return this.room.state?.safeHalf ?? this.arenaSize / 2; }
+  get teamScores() {
+    const st = this.room.state;
+    return MODES[this.mode]?.teams ? [st?.teamBlue ?? 0, st?.teamRed ?? 0] : null;
+  }
+  get hill() {
+    if (!MODES[this.mode]?.hill) return null;
+    return { holder: this.room.state?.hillHolder || null, contested: !!this.room.state?.hillContested };
+  }
 
   get players() {
     const out = [];
@@ -112,10 +123,13 @@ export class OnlineSession extends BaseSession {
         id,
         name: p.name,
         seat: p.seat,
-        color: SEAT_COLORS[p.seat % SEAT_COLORS.length],
+        team: p.team >= 0 ? p.team : null,
+        hillPct: (p.hillPct ?? 0) / 100,
+        color: p.team >= 0 ? TEAM_COLORS[p.team] : SEAT_COLORS[p.seat % SEAT_COLORS.length],
         x: p.x, z: p.z, aim: p.aim,
         hp: p.hp, alive: p.alive,
         invuln: p.invuln, rapid: p.rapid,
+        ammo: p.ammo || 'none', burning: !!p.burning,
         kills: p.kills, deaths: p.deaths, score: p.score,
         respawnIn: p.respawnIn,
         isBot: p.bot,
@@ -179,7 +193,11 @@ export class LocalSession extends BaseSession {
     const cfg = MODES[mode] ?? MODES.casual;
     this.arenaSize = cfg.arena;
 
-    this.world = createWorld({ mode });
+    // Dev escape hatch: window.__forceMod pins the modifier so a specific twist
+    // can be tested or demoed without rerolling until it turns up.
+    const forced = import.meta.env.DEV ? window.__forceMod : undefined;
+    this.world = createWorld({ mode, modifier: forced });
+    this.modifier = this.world.modifier;
     addPlayer(this.world, { id: this.selfId, name, seat: 0 });
 
     for (let seat = 1; seat < cfg.maxPlayers; seat++) {
@@ -193,17 +211,28 @@ export class LocalSession extends BaseSession {
 
   get phase() { return this.world.phase; }
   get clock() { return this.world.clock; }
+  get safeHalf() { return this.world.safeHalf; }
+  get teamScores() { return this.world.teamScores ? [...this.world.teamScores] : null; }
+  get hill() {
+    return this.world.hill
+      ? { holder: this.world.hill.holder, contested: this.world.hill.contested }
+      : null;
+  }
 
   get players() {
     return [...this.world.players.values()].map((p) => ({
       id: p.id,
       name: p.name,
       seat: p.seat,
+      team: p.team,
+      hillPct: hillProgress(this.world, p.seat),
       color: p.color,
       x: p.x, z: p.z, aim: p.aim,
       hp: p.hp, alive: p.alive,
       invuln: p.invulnUntil > this.world.time,
       rapid: p.rapidUntil > this.world.time,
+      ammo: p.ammoUntil > this.world.time ? p.ammo : 'none',
+      burning: p.burnUntil > this.world.time,
       kills: p.kills, deaths: p.deaths, score: p.score,
       respawnIn: p.alive ? 0 : Math.max(0, p.respawnAt - this.world.time),
       isBot: p.isBot,
@@ -296,9 +325,14 @@ export class LocalSession extends BaseSession {
 
 // -------------------------------------------------------------- connecting
 
-export async function findMatch({ mode, name, rating, endpoint = DEFAULT_ENDPOINT, signal }) {
+/**
+ * @param code optional friends-only room code. Rooms are matched on mode AND
+ *             code, so a code of '' queues publicly and a real code only ever
+ *             meets other people who typed the same one.
+ */
+export async function findMatch({ mode, name, rating, code = '', endpoint = DEFAULT_ENDPOINT, signal }) {
   const client = new Client(endpoint);
-  const room = await client.joinOrCreate('arena', { mode, name, rating });
+  const room = await client.joinOrCreate('arena', { mode, name, rating, code: cleanRoomCode(code) });
 
   // joinOrCreate resolves as soon as the seat is confirmed — the first state
   // patch arrives a tick later. Building the scene before then means reading
@@ -316,6 +350,32 @@ export async function findMatch({ mode, name, rating, endpoint = DEFAULT_ENDPOIN
     throw new DOMException('Cancelled', 'AbortError');
   }
   return new OnlineSession(room);
+}
+
+/** Joins a specific room straight from the server browser. */
+export async function joinRoomById({ roomId, name, rating, endpoint = DEFAULT_ENDPOINT }) {
+  const client = new Client(endpoint);
+  // Public rooms carry an empty code; onAuth checks it either way.
+  const room = await client.joinById(roomId, { name, rating, code: '' });
+  await waitForState(room);
+  return new OnlineSession(room);
+}
+
+/** Public, joinable matches for the server browser. */
+export async function fetchRooms(endpoint = DEFAULT_ENDPOINT, timeoutMs = 4000) {
+  const http = endpoint.replace(/^ws/, 'http');
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await fetch(`${http}/rooms`, { mode: 'cors', signal: ctrl.signal, cache: 'no-store' });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    return Array.isArray(data.rooms) ? data.rooms : [];
+  } catch {
+    return [];
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function waitForState(room, timeoutMs = 10000) {

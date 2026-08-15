@@ -38,6 +38,28 @@
       <button id="play-btn" class="play-btn">PLAY</button>
       <button id="practice-btn" class="ghost-btn">Practice offline vs bots</button>
 
+      <details class="settings-box" id="friends-box">
+        <summary>Play with friends</summary>
+        <div class="settings-grid">
+          <button id="create-private" class="ghost-btn" type="button">Create a private match</button>
+          <div id="code-display" class="code-display hidden">
+            <span class="code-label">Share this code</span>
+            <strong id="room-code" class="room-code"></strong>
+            <button id="copy-code" class="icon-btn" type="button" aria-label="Copy code">&#128203;</button>
+          </div>
+          <div class="join-row">
+            <input id="join-code" type="text" maxlength="4" placeholder="CODE" autocomplete="off" spellcheck="false" />
+            <button id="join-code-btn" class="ghost-btn" type="button">Join</button>
+          </div>
+          <p class="settings-hint">A private match is only reachable with the code — it never appears in the browser below.</p>
+        </div>
+      </details>
+
+      <details class="settings-box" id="browser-box">
+        <summary>Open matches</summary>
+        <div id="room-list" class="room-list"></div>
+      </details>
+
       <div class="audio-row">
         <button id="mute-btn" class="icon-btn" type="button" aria-label="Mute">&#128266;</button>
         <input id="volume" class="volume" type="range" min="0" max="100" step="1" aria-label="Volume" />
@@ -88,9 +110,18 @@
     <div class="hud-top">
       <div id="killfeed" class="killfeed"></div>
       <div class="hud-center">
-        <div id="mode-pill" class="mode-pill">Casual</div>
+        <div class="pill-row">
+          <div id="mode-pill" class="mode-pill">Casual</div>
+          <button id="room-chip" class="room-chip hidden" type="button" title="Tap to copy the invite code"></button>
+        </div>
+        <div id="mod-badge" class="mod-badge hidden"></div>
+        <div id="objective" class="objective hidden"></div>
         <div id="match-clock" class="match-clock">4:00</div>
-        <button id="hud-mute" class="icon-btn hud-mute" type="button" aria-label="Mute">&#128266;</button>
+        <div class="hud-buttons">
+          <button id="hud-mute" class="icon-btn hud-mute" type="button" aria-label="Mute">&#128266;</button>
+          <button id="hud-view" class="icon-btn hud-mute" type="button" aria-label="Camera view" title="Camera view">&#128247;</button>
+          <button id="hud-fullscreen" class="icon-btn hud-mute" type="button" aria-label="Fullscreen" title="Fullscreen">&#9974;</button>
+        </div>
         <button id="netstats" class="netstats" type="button" title="Network stats (N)"></button>
       </div>
       <div id="chat-panel" class="chat-panel">
@@ -132,6 +163,14 @@
       <button id="menu-btn" class="ghost-btn">Main menu</button>
     </div>
   </section>
+
+  <div id="rotate-prompt">
+    <div class="rotate-inner">
+      <div class="rotate-icon">&#128241;</div>
+      <h2>Turn your phone sideways</h2>
+      <p>Cluckdown plays in landscape.</p>
+    </div>
+  </div>
 
   <div id="toast" class="toast hidden"></div>
 

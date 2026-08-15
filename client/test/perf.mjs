@@ -18,12 +18,25 @@ async function run(gfx, label) {
   await page.click('#practice-btn');
   await page.waitForTimeout(6000);
   // Make some debris so the particle path is exercised.
-  await page.evaluate(() => {
+  // Emit debris and sample the live count straight away. Particles only live
+  // ~0.9s, and a fixed wait is real time — so on a faster run more frames elapse
+  // and they have all expired by the time we look, which reads as "no thin
+  // instances" rather than "they came and went".
+  const debrisPeak = await page.evaluate(() => new Promise((resolve) => {
     const g = window.__cluckdown.game;
     for (let i = 0; i < 6; i++) g.debris.emit('red', i - 3, 1, 0, 12, {});
     g.debris.feathers(0, 1.5, 0, 20);
-  });
-  await page.waitForTimeout(500);
+
+    let peak = [0, 0, 0, 0];
+    let frames = 0;
+    const sample = () => {
+      const now = Object.values(g.debris.kinds).map((k) => k.mesh.thinInstanceCount);
+      peak = peak.map((n, i) => Math.max(n, now[i]));
+      if (++frames < 10) return void requestAnimationFrame(sample);
+      resolve(peak);
+    };
+    requestAnimationFrame(sample);
+  }));
   const stats = await page.evaluate(() => {
     const g = window.__cluckdown.game;
     const s = g.scene;
@@ -37,11 +50,12 @@ async function run(gfx, label) {
       hasGlow: !!g.glow,
       scaling: +s.getEngine().getHardwareScalingLevel().toFixed(3),
       debrisThin: Object.values(g.debris.kinds).map((k) => k.mesh.thinInstanceCount),
+      debrisPeak: null, // filled in below from the sampled peak
       debrisIsThin: Object.values(g.debris.kinds).every((k) => typeof k.mesh.thinInstanceCount === 'number'),
     };
   });
   await page.close();
-  return stats;
+  return { ...stats, debrisPeak };
 }
 
 const high = await run({ resolution: 1, glow: true, antialias: true }, 'high');
@@ -53,8 +67,13 @@ console.log('\n--- always-on optimisations ---');
 check('each chicken is a single mesh', high.chickenMeshes > 0 && high.chickenSubMeshes === high.chickenMeshes,
   `${high.chickenMeshes} chickens / ${high.chickenSubMeshes} submeshes`);
 check('debris uses thin instances', high.debrisIsThin, JSON.stringify(high.debrisThin));
-check('debris particles are live', high.debrisThin.some((n) => n > 0), JSON.stringify(high.debrisThin));
-check('material count is lean', high.materials <= 26, `${high.materials} materials`);
+check('debris particles actually render', high.debrisPeak.some((n) => n > 0),
+  `peak thin-instance counts ${JSON.stringify(high.debrisPeak)}`);
+// A ceiling to catch runaway duplication (every chicken minting its own beak
+// material, every muzzle flash its own), not a pinned count. It grows when
+// genuinely new visuals land — four tracer colours, five pickup colours and the
+// burning flame all arrived with the ammo types.
+check('material count stays lean', high.materials <= 34, `${high.materials} materials`);
 
 console.log('\n--- settings ---');
 check('glow disabled when turned off', high.hasGlow === true && low.hasGlow === false);

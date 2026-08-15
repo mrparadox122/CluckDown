@@ -3,7 +3,7 @@
 // offline practice opponents on the client with zero extra code.
 
 import { applyInput } from './sim.js';
-import { PLAYER, BULLET, BOMBER, PICKUP } from './constants.js';
+import { PLAYER, BULLET, BOMBER, PICKUP, HILL } from './constants.js';
 import { norm, len, dist2, clamp, angleDelta } from './math.js';
 
 const BOT_NAMES = [
@@ -102,6 +102,34 @@ function decide(world, p, b) {
     }
   }
 
+  // --- the closing boundary outranks everything: being outside it is fatal
+  if (world.cfg.shrink) {
+    const edge = world.safeHalf - 2.5;
+    if (Math.abs(p.x) > edge || Math.abs(p.z) > edge) {
+      const [tx, tz] = norm(-p.x, -p.z);
+      return { mx: tx, mz: tz, ax: tx, az: tz, shoot: false, seq: 0 };
+    }
+  }
+
+  // --- King of the Coop: bots that ignore the objective are no opposition
+  if (world.cfg.hill) {
+    const d = Math.sqrt(dist2(p.x, p.z, 0, 0));
+    if (d > HILL.radius * 0.6) {
+      const [tx, tz] = norm(-p.x, -p.z);
+      const foeNow = nearestFoe(world, p);
+      let ax = tx;
+      let az = tz;
+      let shoot = false;
+      if (foeNow) {
+        const [fx, fz] = norm(foeNow.x - p.x, foeNow.z - p.z);
+        ax = fx + b.aimJitterX;
+        az = fz + b.aimJitterZ;
+        shoot = aimedAt(p, fx, fz, b.cfg.fireArc);
+      }
+      return { mx: tx, mz: tz, ax, az, shoot, seq: 0 };
+    }
+  }
+
   // --- otherwise: fight
   const foe = nearestFoe(world, p);
   if (!foe) {
@@ -149,6 +177,9 @@ function nearestFoe(world, p) {
   let bestD = Infinity;
   for (const o of world.players.values()) {
     if (o.id === p.id || !o.alive || world.time < o.invulnUntil) continue;
+    // Never hunt a team-mate; friendly fire is off, so it would just be a bot
+    // standing there firing harmlessly at its partner.
+    if (o.team !== null && o.team === p.team) continue;
     const d = dist2(p.x, p.z, o.x, o.z);
     if (d < bestD) { bestD = d; best = o; }
   }

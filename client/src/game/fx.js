@@ -1,7 +1,7 @@
 import { MeshBuilder } from '@babylonjs/core/Meshes/meshBuilder';
-import { Vector3, Color3, Matrix, Quaternion } from '@babylonjs/core/Maths/math';
+import { Vector3, Matrix, Quaternion } from '@babylonjs/core/Maths/math';
 import { emissiveMat } from './scene.js';
-import { BULLET, BOMBER, SEAT_COLORS } from '@cluckdown/shared';
+import { BULLET, BOMBER, AMMO } from '@cluckdown/shared';
 
 const GRAVITY = -26;
 
@@ -21,25 +21,39 @@ export class BulletPool {
   constructor(scene, glow, max = 220) {
     this.scene = scene;
     this.active = new Map(); // id -> tracer
-    this.free = [];
 
-    const proto = MeshBuilder.CreateSphere('bullet', { diameter: BULLET.radius * 2, segments: 6 }, scene);
-    proto.material = emissiveMat(scene, 'bulletMat', '#ff2038', { intensity: 1.0 });
-    proto.isPickable = false;
-    proto.setEnabled(false);
-    this.proto = proto;
+    // One prototype per ammo type. Ammo is readable at a glance from the tracer
+    // colour alone, which matters more than it sounds when three people are
+    // firing at once.
+    this.protos = {};
+    this.pools = {};
+    const kinds = { none: '#ff2038' };
+    for (const id of Object.keys(AMMO)) kinds[id] = AMMO[id].color;
 
-    for (let i = 0; i < max; i++) {
-      const m = proto.createInstance(`b${i}`);
-      m.isPickable = false;
-      m.setEnabled(false);
-      this.free.push(m);
+    for (const [id, hex] of Object.entries(kinds)) {
+      const proto = MeshBuilder.CreateSphere(`bullet_${id}`, {
+        diameter: BULLET.radius * 2, segments: 6,
+      }, scene);
+      proto.material = emissiveMat(scene, `bulletMat_${id}`, hex, { intensity: 1.0 });
+      proto.isPickable = false;
+      proto.setEnabled(false);
+      glow?.addIncludedOnlyMesh(proto);
+
+      const free = [];
+      for (let i = 0; i < Math.ceil(max / 4); i++) {
+        const m = proto.createInstance(`b_${id}_${i}`);
+        m.isPickable = false;
+        m.setEnabled(false);
+        free.push(m);
+      }
+      this.protos[id] = proto;
+      this.pools[id] = free;
     }
-    glow?.addIncludedOnlyMesh(proto);
   }
 
   spawn(ev) {
-    const mesh = this.free.pop();
+    const kind = this.pools[ev.ammo] ? ev.ammo : 'none';
+    const mesh = this.pools[kind].pop();
     if (!mesh) return; // pool exhausted — drop the visual rather than stutter
     mesh.setEnabled(true);
     const dx = Math.sin(ev.aim);
@@ -47,7 +61,25 @@ export class BulletPool {
     mesh.position.set(ev.x, 0.85, ev.z);
     mesh.rotation.y = ev.aim;
     mesh.scaling.set(0.85, 0.85, 3.2); // stretched along travel = tracer streak
-    this.active.set(ev.id, { mesh, vx: dx * BULLET.speed, vz: dz * BULLET.speed, life: BULLET.life });
+    this.active.set(ev.id, {
+      mesh, kind, aim: ev.aim,
+      vx: dx * BULLET.speed, vz: dz * BULLET.speed, life: BULLET.life,
+    });
+  }
+
+  /**
+   * Redirects a live tracer — used when a bouncy round ricochets. Without this
+   * the visual would carry straight on through the wall while the authoritative
+   * bullet went the other way.
+   */
+  redirect(id, x, z) {
+    const t = this.active.get(id);
+    if (!t) return;
+    // Reflect off whichever axis the impact was on, matching the simulation.
+    if (Math.abs(x) > Math.abs(z)) t.vx = -t.vx; else t.vz = -t.vz;
+    t.mesh.position.set(x, 0.85, z);
+    t.aim = Math.atan2(t.vx, t.vz);
+    t.mesh.rotation.y = t.aim;
   }
 
   /** Retire a specific tracer — called when the server says that bullet landed. */
@@ -56,7 +88,7 @@ export class BulletPool {
     if (!t) return null;
     this.active.delete(id);
     t.mesh.setEnabled(false);
-    this.free.push(t.mesh);
+    this.pools[t.kind].push(t.mesh);
     return t;
   }
 
@@ -82,8 +114,9 @@ export class BulletPool {
  * is the maths we genuinely need and nothing else.
  */
 export class DebrisPool {
-  constructor(scene, glow, perColour = 90) {
+  constructor(scene, glow, perColour = 90, gravityMul = 1) {
     this.kinds = {};
+    this.gravity = GRAVITY * gravityMul;
 
     for (const [key, hex, intensity] of [
       ['white', '#ffffff', 0.32],
@@ -168,7 +201,7 @@ export class DebrisPool {
         const damp = Math.exp(-d.drag * dt);
         d.vx *= damp;
         d.vz *= damp;
-        d.vy += GRAVITY * dt * (d.flutter ? 0.16 : 1);
+        d.vy += this.gravity * dt * (d.flutter ? 0.16 : 1);
         if (d.flutter) {
           // Sideways wobble so feathers spiral down rather than drop straight.
           d.vx += Math.sin(d.life * 9 + d.ry) * 2.2 * dt;
@@ -284,9 +317,4 @@ export class MuzzleFlash {
       it.m.scaling.setAll(Math.max(0.05, it.m.scaling.x - dt * 14));
     }
   }
-}
-
-export function seatColorKey(color) {
-  const idx = SEAT_COLORS.indexOf(color);
-  return idx === 1 ? 'gold' : idx === 2 ? 'white' : 'white';
 }

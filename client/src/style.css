@@ -26,7 +26,31 @@ html, body {
   user-select: none;
   -webkit-tap-highlight-color: transparent;
   overscroll-behavior: none;
+  /*
+   * pan-y, NOT none.
+   *
+   * touch-action is evaluated up the ancestor chain: a `none` here blocks
+   * panning for every descendant no matter what they declare, so `none` on the
+   * root silently killed scrolling on the menu and the end-of-match scoreboard.
+   * It only showed up in fullscreen, because that's when the viewport is short
+   * enough for those screens to actually overflow.
+   *
+   * pan-y still forbids pinch-zoom (it isn't in the list), which is the reason
+   * this rule exists — and mobile.js cancels the gestures outright regardless.
+   */
+  touch-action: pan-y;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
 }
+
+/* Gameplay surfaces opt out of panning entirely. Descendants may restrict
+   further than the root, just not loosen. */
+#stage,
+#hud,
+.stick-zone { touch-action: none; }
+
+/* Menu, results and matchmaking screens scroll vertically. */
+.screen { touch-action: pan-y; overscroll-behavior: contain; }
 
 #stage {
   position: fixed;
@@ -322,6 +346,7 @@ input[type="text"]:focus { border-color: var(--hot); box-shadow: 0 0 0 3px rgba(
 }
 .dmg-number.crit { color: var(--gold); font-size: 20px; }
 .dmg-number.heal { color: var(--good); }
+.dmg-number.burn { color: #ff8a3d; font-size: 13px; }
 @keyframes floatUp {
   0% { opacity: 0; transform: translate(-50%, -50%) scale(0.6); }
   18% { opacity: 1; transform: translate(-50%, -70%) scale(1.15); }
@@ -774,3 +799,262 @@ input[type="text"]:focus { border-color: var(--hot); box-shadow: 0 0 0 3px rgba(
 .netstats .good { color: var(--good); }
 .netstats .fair { color: var(--gold); }
 .netstats .poor { color: var(--hot); }
+
+/* ====================== FRIENDS & BROWSER ====================== */
+
+.code-display {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  background: rgba(255, 45, 75, 0.12);
+  border: 1px solid var(--hot);
+  border-radius: 9px;
+}
+.code-label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; }
+.room-code {
+  margin-left: auto;
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 22px;
+  letter-spacing: 4px;
+  color: #fff;
+  text-shadow: 0 0 12px var(--hot-glow);
+}
+
+.join-row { display: flex; gap: 8px; }
+.join-row input {
+  flex: 1 1 auto;
+  text-transform: uppercase;
+  letter-spacing: 5px;
+  text-align: center;
+  font-family: ui-monospace, Consolas, monospace;
+}
+.join-row .ghost-btn { flex: 0 0 auto; width: auto; margin-top: 0; padding: 11px 18px; }
+
+.room-list { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
+.room-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 11px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--edge);
+  border-radius: 9px;
+  font-size: 13px;
+}
+.room-row .room-mode { font-weight: 700; }
+.room-row .room-count { margin-left: auto; color: var(--muted); font-variant-numeric: tabular-nums; }
+.room-row button {
+  padding: 5px 12px;
+  font-family: inherit;
+  font-size: 12px;
+  color: var(--ink);
+  background: rgba(255, 45, 75, 0.2);
+  border: 1px solid var(--hot);
+  border-radius: 7px;
+  cursor: pointer;
+}
+.room-row button:disabled { opacity: 0.4; cursor: not-allowed; border-color: var(--edge); background: transparent; }
+.room-empty { font-size: 12px; color: var(--muted); padding: 4px 2px; }
+
+/* ========================== MODIFIERS ========================== */
+
+.mod-badge {
+  display: inline-block;
+  margin-top: 3px;
+  padding: 3px 10px;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 2px;
+  color: #0c0a02;
+  background: linear-gradient(180deg, #ffd85e, #ffbe15);
+  border-radius: 20px;
+  box-shadow: 0 0 16px rgba(255, 204, 61, 0.45);
+  animation: badgeIn .5s ease-out;
+}
+@keyframes badgeIn {
+  from { opacity: 0; transform: translateY(-6px) scale(0.85); }
+  to { opacity: 1; transform: none; }
+}
+
+/* ========================== OBJECTIVES ========================== */
+
+.objective {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 4px;
+  font-size: 13px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.objective .team-score {
+  min-width: 34px;
+  padding: 2px 8px;
+  border-radius: 6px;
+  color: #05060c;
+  text-align: center;
+}
+.objective .team-score.blue { background: #4da3ff; }
+.objective .team-score.red { background: #ff5d5d; }
+.objective .team-score.leading { box-shadow: 0 0 14px currentColor; }
+.objective .vs { font-size: 10px; color: var(--muted); letter-spacing: 1px; }
+
+.hill-meter {
+  width: 120px;
+  height: 7px;
+  background: rgba(0, 0, 0, 0.6);
+  border: 1px solid var(--edge);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.hill-meter i {
+  display: block;
+  height: 100%;
+  background: var(--good);
+  transform-origin: left center;
+  transition: transform .2s linear;
+}
+.objective .hill-label { font-size: 10px; letter-spacing: 1.5px; color: var(--muted); text-transform: uppercase; }
+.objective.contested .hill-label { color: var(--hot); }
+
+/* ===================== MOBILE / LANDSCAPE ===================== */
+
+.hud-buttons {
+  display: flex;
+  gap: 5px;
+  justify-content: center;
+  margin-top: 4px;
+}
+
+#rotate-prompt { display: none; }
+
+/* Only nags during a match — the menu is a tall card and reads fine upright. */
+@media (orientation: portrait) and (max-width: 900px) {
+  body.in-match #rotate-prompt {
+    display: grid;
+    position: fixed;
+    inset: 0;
+    z-index: 50;
+    place-items: center;
+    text-align: center;
+    background: linear-gradient(160deg, #0a0b14, #05050a 70%);
+  }
+}
+.rotate-inner { padding: 24px; }
+.rotate-icon {
+  font-size: 64px;
+  animation: rotateHint 2s ease-in-out infinite;
+}
+@keyframes rotateHint {
+  0%, 40% { transform: rotate(0deg); }
+  60%, 100% { transform: rotate(-90deg); }
+}
+#rotate-prompt h2 { margin: 18px 0 8px; font-size: 20px; }
+#rotate-prompt p { color: var(--muted); font-size: 13px; }
+
+/*
+ * Landscape phones. THIS is the query that matters, and it is keyed on HEIGHT.
+ * An iPhone SE in landscape is 667x375 — wider than the 620px breakpoint that
+ * used to be the only mobile rule, so none of it ever applied and every player
+ * on a phone saw desktop-sized text eating the screen.
+ */
+@media (max-height: 480px) {
+  .killfeed { width: 26vw; max-width: 190px; }
+  .kf-row { padding: 3px 6px; font-size: 9.5px; line-height: 1.3; }
+
+  .chat-panel { width: 28vw; max-width: 200px; }
+  .chat-log { max-height: 22vh; font-size: 9.5px; }
+  .chat-row { padding: 2px 6px; }
+  .chat-input { display: none; }
+  .qc-btn { padding: 3px 6px; font-size: 9px; }
+
+  .hud-top { padding: 5px 6px; }
+  .mode-pill { padding: 2px 8px; font-size: 8.5px; letter-spacing: 1.2px; }
+  .match-clock { font-size: 17px; margin-top: 1px; }
+  .mod-badge { font-size: 8.5px; padding: 2px 7px; letter-spacing: 1.2px; }
+  .objective { font-size: 11px; margin-top: 2px; }
+  .objective .team-score { min-width: 26px; padding: 1px 6px; }
+  .hill-meter { width: 84px; height: 5px; }
+
+  .icon-btn.hud-mute { width: 24px; height: 24px; font-size: 10px; margin-top: 2px; }
+  .hud-buttons { gap: 4px; }
+  .netstats { font-size: 8.5px; min-width: 88px; padding: 2px 6px; }
+
+  .scoreboard { font-size: 9.5px; gap: 2px; bottom: calc(34vh + var(--safe-b)); }
+  .sb-row { padding: 2px 6px 2px 4px; }
+  .sb-name { min-width: 52px; }
+  .sb-dot { width: 6px; height: 6px; }
+
+  .nameplate .np-name { font-size: 9px; }
+  .nameplate .np-bar { width: 34px; height: 4px; }
+  .nameplate .np-tag { font-size: 7.5px; }
+  .dmg-number { font-size: 12px; }
+  .dmg-number.crit { font-size: 16px; }
+
+  .announcer { font-size: clamp(16px, 4.5vw, 26px); top: 20%; }
+  .respawn-count { font-size: 46px; }
+  .respawn-label { font-size: 11px; letter-spacing: 2px; }
+  .respawn-sub { font-size: 10px; }
+  .touch-hint { font-size: 8.5px; }
+
+  /* Sticks get shorter zones so they don't swallow the whole screen. */
+  .stick-zone { height: 46vh; width: 38%; }
+}
+
+/* Very short screens (SE-class in landscape) shed the least useful text. */
+@media (max-height: 400px) {
+  .killfeed { width: 24vw; }
+  .chat-log { max-height: 18vh; }
+  .quick-chat { display: none; }
+  .touch-hint { display: none; }
+  .scoreboard { bottom: calc(30vh + var(--safe-b)); }
+}
+
+/* Menu on a landscape phone: two columns so PLAY is not miles down the page. */
+@media (max-height: 480px) and (orientation: landscape) {
+  .screen { padding: 10px; align-items: start; }
+  .menu-card, .results-card, .finding-card { width: min(680px, 100%); padding: 14px 16px; }
+  .logo { font-size: 30px; }
+  .tagline { font-size: 10px; margin: 4px 0 10px; letter-spacing: 2px; }
+  .field { margin-bottom: 8px; }
+  .field span { font-size: 9.5px; margin-bottom: 3px; }
+  input[type="text"] { padding: 9px 11px; }
+  .server-status, .rank-row { padding: 6px 10px; margin-bottom: 8px; font-size: 11px; }
+  .mode-grid { grid-template-columns: repeat(3, 1fr); gap: 6px; margin-bottom: 10px; }
+  .mode-btn { padding: 8px 9px; }
+  .mode-btn strong { font-size: 12px; margin-bottom: 1px; }
+  .mode-btn small { font-size: 9px; line-height: 1.25; }
+  .play-btn { padding: 12px; font-size: 16px; }
+  .ghost-btn { padding: 8px; font-size: 11px; }
+  .results-table { font-size: 11px; }
+  .podium { height: 100px; }
+}
+
+/* ======================== INVITE CODE ========================= */
+
+.pill-row { display: flex; align-items: center; gap: 6px; justify-content: center; }
+
+/* The host is dropped straight into the arena when they create a private
+   match, so the code has to live here — the menu that shows it is hidden by
+   then, and without this the room is uninvitable. */
+.room-chip {
+  padding: 3px 10px;
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 2px;
+  color: #05060c;
+  background: linear-gradient(180deg, #7ee7a8, #35e07f);
+  border: none;
+  border-radius: 20px;
+  cursor: pointer;
+  pointer-events: auto;
+  box-shadow: 0 0 14px rgba(53, 224, 127, 0.45);
+}
+.room-chip:active { transform: scale(0.96); }
+
+@media (max-height: 480px) {
+  .room-chip { padding: 2px 7px; font-size: 9px; letter-spacing: 1.4px; }
+}

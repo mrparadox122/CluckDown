@@ -38,7 +38,15 @@ const ZOOM_RATE_OUT = 1.5;      // dying pulls back slowly, it reads as delibera
 const ZOOM_RATE_RESPAWN = 2.6;  // then eases open from the punch
 const PUNCH_LOCKOUT = 0.6;      // seconds a respawn punch outranks alive/dead state
 
-export function createStage(canvas, gfx = { resolution: 1, glow: true, antialias: true }) {
+// Player-chosen framing. 'full' is computed per aspect ratio rather than fixed,
+// because "the whole map fits" means something different on a 21:9 phone in
+// landscape than on a tablet.
+export const VIEW_MODES = ['close', 'mid', 'full'];
+export const VIEW_LABELS = { close: 'Close', mid: 'Mid', full: 'Full map' };
+const VIEW_MUL = { close: 1, mid: 1.45 };
+const FIT_MARGIN = 3; // world units of breathing room around the arena
+
+export function createStage(canvas, gfx = { resolution: 1, glow: true, antialias: true }, modifier = 'none') {
   const engine = new Engine(canvas, gfx.antialias, {
     preserveDrawingBuffer: false,
     stencil: false,
@@ -64,14 +72,18 @@ export function createStage(canvas, gfx = { resolution: 1, glow: true, antialias
   camera.inputs.clear();
 
   // Dark by design: just enough ambient to read shapes, everything else comes
-  // from emissive materials and the glow layer.
+  // from emissive materials and the glow layer. LIGHTS OUT drops the ambient to near nothing. Nothing else changes: the
+  // glow layer and emissive materials still render, so tracer fire, pickups and
+  // the armed bomber become the only things you can see by.
+  const dark = modifier === 'darkness';
+
   const hemi = new HemisphericLight('hemi', new Vector3(0.3, 1, 0.2), scene);
-  hemi.intensity = 0.30;
+  hemi.intensity = dark ? 0.045 : 0.30;
   hemi.diffuse = new Color3(0.55, 0.6, 0.85);
   hemi.groundColor = new Color3(0.05, 0.05, 0.1);
 
   const key = new PointLight('key', new Vector3(0, 22, 0), scene);
-  key.intensity = 0.62;
+  key.intensity = dark ? 0.12 : 0.62;
   key.range = 70;
   key.diffuse = new Color3(0.7, 0.75, 1);
 
@@ -79,7 +91,7 @@ export function createStage(canvas, gfx = { resolution: 1, glow: true, antialias
   // target plus a wide blur, every frame. When it's off, nothing else needs to
   // change — emissive materials still render bright, just without the bloom.
   const glow = gfx.glow ? new GlowLayer('glow', scene, { blurKernelSize: 48 }) : null;
-  if (glow) glow.intensity = 1.15;
+  if (glow) glow.intensity = dark ? 1.5 : 1.15;
 
   return { engine, scene, camera, glow, key };
 }
@@ -282,6 +294,9 @@ export class CameraRig {
     this.zoomTarget = ZOOM_ALIVE;
     this.zoomRate = ZOOM_RATE_IN;
     this.punchTimer = 0;
+    this.view = 'close';
+    this.alive = true;
+    this.fitOffsetZ = 0;
 
     this.limits = null;
     this.recomputeLimits();
@@ -309,6 +324,65 @@ export class CameraRig {
    */
   recomputeLimits() {
     this.limits = { x: this.half, zMax: this.half, zMin: -this.half };
+    // A rotation or resize changes what "the whole map" costs.
+    if (this.view === 'full') this.applyZoomTarget();
+  }
+
+  /**
+   * Zoom at which the entire arena is visible.
+   *
+   * Distance scales linearly with zoom and the camera pitch does not change, so
+   * the ground footprint at zoom 1 can be measured once and scaled. Both axes
+   * are checked because a wide landscape phone runs out of vertical coverage
+   * first, and a tall one runs out of horizontal.
+   */
+  fitView() {
+    const aspect = this.engine ? this.engine.getRenderWidth() / this.engine.getRenderHeight() : 1.6;
+    const halfFov = CAM_FOV / 2;
+    const pitch = Math.atan2(this.baseHeight, this.baseBack);
+    const dist = Math.hypot(this.baseHeight, this.baseBack);
+
+    // Ground coverage at zoom 1, measured relative to the focus point. The view
+    // is tilted, so these are NOT symmetric: it sees much further beyond the
+    // focus than in front of it.
+    const far = this.baseHeight / Math.tan(Math.max(0.05, pitch - halfFov)) - this.baseBack;
+    const near = this.baseHeight / Math.tan(Math.min(Math.PI / 2 - 0.01, pitch + halfFov)) - this.baseBack;
+    const halfW = dist * Math.tan(halfFov) * aspect;
+
+    const needed = this.half + FIT_MARGIN;
+    const zoom = Math.max(1, (needed * 2) / (far - near), needed / halfW);
+
+    // Because coverage is lopsided, sitting the focus on the arena centre would
+    // hang the far half in empty space and push the near edge off the bottom of
+    // the screen. Offsetting the focus by the midpoint of the covered strip is
+    // what actually centres the *map* in the viewport.
+    return { zoom, offsetZ: -((far + near) / 2) * zoom };
+  }
+
+  /** close = in the fight, mid = pulled back, full = whole map, centred. */
+  setView(view) {
+    if (!VIEW_MODES.includes(view) || view === this.view) return this.view;
+    this.view = view;
+    this.zoomRate = ZOOM_RATE_IN;
+    this.applyZoomTarget();
+    return this.view;
+  }
+
+  cycleView() {
+    return this.setView(VIEW_MODES[(VIEW_MODES.indexOf(this.view) + 1) % VIEW_MODES.length]);
+  }
+
+  applyZoomTarget() {
+    if (this.view === 'full') {
+      // Full map ignores the alive/dead framing — it is already as wide as it
+      // gets, and stacking the death pull-back on top just pushes the arena
+      // into the distance.
+      const fit = this.fitView();
+      this.zoomTarget = fit.zoom;
+      this.fitOffsetZ = fit.offsetZ;
+      return;
+    }
+    this.zoomTarget = (this.alive ? ZOOM_ALIVE : ZOOM_DEAD) * VIEW_MUL[this.view];
   }
 
   snapTo(x, z) {
@@ -334,12 +408,11 @@ export class CameraRig {
     // state can still read "dead" — without this guard the camera would yank
     // straight back out again mid-punch.
     if (!alive && this.punchTimer > 0) return;
-
-    const target = alive ? ZOOM_ALIVE : ZOOM_DEAD;
-    if (target === this.zoomTarget) return;
-    this.zoomTarget = target;
+    if (alive === this.alive) return;
+    this.alive = alive;
     // Dying eases out slowly (you've got time, you're dead); living snaps in.
     this.zoomRate = alive ? ZOOM_RATE_IN : ZOOM_RATE_OUT;
+    this.applyZoomTarget();
   }
 
   /**
@@ -348,6 +421,8 @@ export class CameraRig {
    * no visual cue and spend a second wondering which chicken is yours.
    */
   respawnPunch(x, z) {
+    // In full-map view there is nothing to punch in to.
+    if (this.view === 'full') return;
     this.zoom = ZOOM_RESPAWN;
     this.zoomTarget = ZOOM_ALIVE;
     this.zoomRate = ZOOM_RATE_RESPAWN;
@@ -363,6 +438,12 @@ export class CameraRig {
 
   update(dt, targetX, targetZ) {
     if (this.punchTimer > 0) this.punchTimer -= dt;
+
+    // Full map is a fixed overview: stop following and frame the whole arena.
+    if (this.view === 'full') {
+      targetX = 0;
+      targetZ = this.fitOffsetZ ?? 0;
+    }
 
     if (Math.abs(this.zoom - this.zoomTarget) > 0.0005) {
       const zt = 1 - Math.exp(-this.zoomRate * dt);
@@ -393,3 +474,78 @@ export class CameraRig {
 }
 
 export { Vector3, Color3, Color4, Matrix, Quaternion, MeshBuilder, StandardMaterial };
+
+
+/**
+ * King of the Coop zone marker.
+ *
+ * A flat disc plus a rim ring, recoloured to whoever holds it — white while
+ * empty, the holder's colour while held, red while contested. Reading the state
+ * of the objective at a glance matters more here than any other HUD element,
+ * because the whole mode is "am I allowed to stand there".
+ */
+export function buildHillZone(scene, radius) {
+  const disc = MeshBuilder.CreateCylinder('hillDisc', {
+    diameter: radius * 2, height: 0.08, tessellation: 40,
+  }, scene);
+  disc.position.y = 0.05;
+  disc.material = emissiveMat(scene, 'hillDiscMat', '#ffffff', { intensity: 0.5, alpha: 0.16, cache: false });
+  disc.isPickable = false;
+
+  const ring = MeshBuilder.CreateTorus('hillRing', {
+    diameter: radius * 2, thickness: 0.22, tessellation: 44,
+  }, scene);
+  ring.position.y = 0.1;
+  ring.material = emissiveMat(scene, 'hillRingMat', '#ffffff', { intensity: 1.0, cache: false });
+  ring.isPickable = false;
+
+  let spin = 0;
+  return {
+    meshes: [disc, ring],
+    /** @param hex holder colour, or null when empty/contested */
+    update(dt, hex, contested) {
+      spin += dt * (contested ? 1.6 : 0.5);
+      ring.rotation.y = spin;
+      const target = contested ? '#ff2d4b' : (hex ?? '#9aa6c4');
+      const c = Color3.FromHexString(target);
+      ring.material.emissiveColor.copyFrom(c);
+      disc.material.emissiveColor.copyFrom(c.scale(0.6));
+      disc.material.alpha = contested ? 0.26 : (hex ? 0.22 : 0.12);
+      // Pulse while contested so it reads as "nobody is scoring".
+      const s = contested ? 1 + Math.sin(spin * 6) * 0.03 : 1;
+      ring.scaling.setAll(s);
+    },
+  };
+}
+
+/**
+ * The closing boundary in Last Chicken Standing.
+ *
+ * A hollow box scaled to the live safe half-extent, rather than moving the real
+ * walls: rebuilding arena geometry every tick would be absurd, and the wall
+ * meshes are frozen. This is one scaled mesh that reads clearly as a wall of
+ * light you must not be outside of.
+ */
+export function buildSafeZone(scene, startHalf) {
+  const box = MeshBuilder.CreateBox('safeZone', { size: 2, height: 3.2 }, scene);
+  box.position.y = 1.5;
+  box.material = emissiveMat(scene, 'safeZoneMat', '#35e07f', { intensity: 1.0, alpha: 0.16, cache: false });
+  box.material.backFaceCulling = false; // we are inside it, so show the far side
+  box.isPickable = false;
+  box.setEnabled(false);
+
+  let pulse = 0;
+  return {
+    mesh: box,
+    update(dt, half, closing) {
+      // Only worth showing once it has actually started closing.
+      const active = half < startHalf - 0.05;
+      box.setEnabled(active);
+      if (!active) return;
+
+      box.scaling.set(half, 1, half);
+      pulse += dt * (closing ? 5 : 2);
+      box.material.alpha = 0.14 + Math.abs(Math.sin(pulse)) * (closing ? 0.16 : 0.06);
+    },
+  };
+}

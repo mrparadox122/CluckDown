@@ -1,11 +1,15 @@
 import './style.css';
-import { MODE_LIST, MODES } from '@cluckdown/shared';
-import { findMatch, wakeServer, fetchServerStats, LocalSession } from './net.js';
+import { MODE_LIST, MODES, makeRoomCode, cleanRoomCode } from '@cluckdown/shared';
+import { findMatch, wakeServer, fetchServerStats, fetchRooms, joinRoomById, LocalSession } from './net.js';
 import { loadProfile, saveProfile, rankLabel, applyResult } from './profile.js';
 import { Hud } from './hud.js';
 import { Game } from './game/index.js';
 import { sfx } from './audio/sfx.js';
 import { loadGfx, saveGfx, RESOLUTIONS } from './graphics.js';
+import {
+  blockZoomGestures, fullscreenSupported, isFullscreen, toggleFullscreen,
+  lockLandscape, onFullscreenChange,
+} from './mobile.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -23,6 +27,12 @@ let session = null;
 let hud = null;
 let matchAbort = null;
 let lastResult = null;
+let privateCode = '';
+// Remembers that the player was in fullscreen when a match ended, so "Play
+// again" can put them back without them having to ask twice.
+let wantFullscreen = false;
+// Invite code of the match in progress, so the HUD can keep showing it.
+let activeCode = '';
 
 // ------------------------------------------------------------------ helpers
 
@@ -110,7 +120,8 @@ function currentName() {
 
 // ------------------------------------------------------------- match flow
 
-async function startOnline() {
+async function startOnline(code = '') {
+  activeCode = code;
   const name = currentName();
   profile.name = name;
   saveProfile(profile);
@@ -119,13 +130,15 @@ async function startOnline() {
   const cfg = MODES[mode];
 
   show('finding');
-  $('finding-title').textContent = 'Finding lobby…';
-  $('finding-sub').textContent = `${cfg.label} · up to ${cfg.maxPlayers} chickens`;
+  $('finding-title').textContent = code ? `Private match ${code}` : 'Finding lobby…';
+  $('finding-sub').textContent = code
+    ? 'Waiting for friends to join with your code'
+    : `${cfg.label} · up to ${cfg.maxPlayers} chickens`;
 
   matchAbort = new AbortController();
 
   try {
-    const s = await findMatch({ mode, name, rating: profile.rating, signal: matchAbort.signal });
+    const s = await findMatch({ mode, name, rating: profile.rating, code, signal: matchAbort.signal });
     if (matchAbort.signal.aborted) { s.leave(); return; }
     launch(s);
   } catch (err) {
@@ -142,6 +155,7 @@ async function startOnline() {
 }
 
 function startOffline() {
+  activeCode = '';
   const name = currentName();
   profile.name = name;
   saveProfile(profile);
@@ -157,6 +171,8 @@ function launch(newSession) {
 
   show(null);
   hud.show();
+  hud.setRoomCode(activeCode, copyCode);
+  document.body.classList.add('in-match');
 
   session.on('matchEnd', (result) => showResults(result));
   session.on('error', ({ message }) => {
@@ -169,6 +185,7 @@ function launch(newSession) {
 }
 
 function endMatch() {
+  document.body.classList.remove('in-match');
   game?.dispose();
   game = null;
   session?.leave();
@@ -259,6 +276,16 @@ function showResults(result) {
 
   sfx.play('matchEnd');
   endMatch();
+
+  // Drop out of fullscreen for the results screen. It's a scrollable page, and
+  // on a landscape phone the podium plus the table overflow a short viewport —
+  // being stuck fullscreen with no way to reach the bottom is the bug this
+  // fixes. The preference is remembered for the rematch.
+  if (isFullscreen()) {
+    wantFullscreen = true;
+    toggleFullscreen();
+  }
+
   show('results');
   renderMenu();
 }
@@ -377,14 +404,149 @@ function startServerPolling() {
   refreshServerStatus();
   clearInterval(serverPoll);
   // Only while the menu is up; no point polling during a match.
+  refreshRooms();
   serverPoll = setInterval(() => {
-    if (!screens.menu.classList.contains('hidden')) refreshServerStatus();
+    if (screens.menu.classList.contains('hidden')) return;
+    refreshServerStatus();
+    refreshRooms();
   }, 5000);
+}
+
+// ------------------------------------------------------- friends & browser
+
+async function copyCode(code) {
+  if (!code) return;
+  sfx.play('uiClick');
+  try {
+    await navigator.clipboard.writeText(code);
+    toast(`Copied ${code} — send it to a friend`);
+  } catch {
+    // Clipboard needs permission and a secure context; the code is on screen
+    // either way, so just surface it.
+    toast(`Invite code: ${code}`);
+  }
+}
+
+function bindFriends() {
+  const codeInput = $('join-code');
+
+  $('create-private').addEventListener('click', () => {
+    sfx.play('uiClick');
+    privateCode = makeRoomCode();
+    $('room-code').textContent = privateCode;
+    $('code-display').classList.remove('hidden');
+    startOnline(privateCode);
+  });
+
+  $('copy-code').addEventListener('click', () => copyCode(privateCode));
+
+  // Force the field to the canonical alphabet as they type.
+  codeInput.addEventListener('input', () => {
+    codeInput.value = cleanRoomCode(codeInput.value);
+  });
+
+  const join = () => {
+    const code = cleanRoomCode(codeInput.value);
+    if (code.length < 4) { toast('Enter the 4-character code'); return; }
+    sfx.play('uiClick');
+    startOnline(code);
+  };
+  $('join-code-btn').addEventListener('click', join);
+  codeInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') join(); });
+}
+
+async function refreshRooms() {
+  const list = $('room-list');
+  const rooms = await fetchRooms();
+
+  if (!rooms.length) {
+    list.replaceChildren(Object.assign(document.createElement('div'), {
+      className: 'room-empty',
+      textContent: 'No open matches right now — hit PLAY to start one.',
+    }));
+    return;
+  }
+
+  list.replaceChildren(...rooms.map((r) => {
+    const row = document.createElement('div');
+    row.className = 'room-row';
+
+    const mode = document.createElement('span');
+    mode.className = 'room-mode';
+    mode.textContent = MODES[r.mode]?.label ?? r.mode;
+
+    const count = document.createElement('span');
+    count.className = 'room-count';
+    count.textContent = `${r.humans}/${r.maxPlayers}${r.bots ? ` +${r.bots}🤖` : ''}`;
+
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.textContent = r.full ? 'Full' : 'Join';
+    btn.disabled = !!r.full;
+    btn.addEventListener('click', async () => {
+      sfx.play('uiClick');
+      btn.disabled = true;
+      show('finding');
+      $('finding-title').textContent = 'Joining match…';
+      $('finding-sub').textContent = MODES[r.mode]?.label ?? r.mode;
+      try {
+        const name = currentName();
+        profile.name = name;
+        saveProfile(profile);
+        launch(await joinRoomById({ roomId: r.roomId, name, rating: profile.rating }));
+      } catch {
+        show('menu');
+        setStatus('That match is no longer available.', true);
+        refreshRooms();
+      }
+    });
+
+    row.append(mode, count, btn);
+    return row;
+  }));
+}
+
+// --------------------------------------------------------------- mobile
+
+function bindMobile() {
+  // Must run before any match starts: accidental pinch-zoom mid-fight was the
+  // single most common complaint from phone players.
+  blockZoomGestures();
+
+  const fsBtn = $('hud-fullscreen');
+  if (!fullscreenSupported()) {
+    // iPhone Safari has no element fullscreen. Hide the button rather than
+    // offer something that silently does nothing.
+    fsBtn.classList.add('hidden');
+  } else {
+    fsBtn.addEventListener('click', async () => {
+      sfx.play('uiClick');
+      await toggleFullscreen();
+    });
+    const syncFs = () => { fsBtn.textContent = isFullscreen() ? '✕' : '⛶'; };
+    onFullscreenChange(syncFs);
+    syncFs();
+  }
+
+  $('hud-view').addEventListener('click', () => {
+    if (!game) return;
+    sfx.play('uiClick');
+    const { view, label } = game.cycleView();
+    gfx = { ...gfx, view };
+    saveGfx(gfx);
+    toast(`Camera: ${label}`, 1200);
+  });
+
+  // Worth attempting on load too — it works on Android Chrome when already
+  // fullscreen, and fails harmlessly everywhere else.
+  lockLandscape();
 }
 
 function bind() {
   bindAudio();
   bindGraphics();
+  bindFriends();
+  bindMobile();
   startServerPolling();
   $('play-btn').addEventListener('click', () => { sfx.unlock(); sfx.play('uiClick'); startOnline(); });
   $('practice-btn').addEventListener('click', () => { sfx.unlock(); sfx.play('uiClick'); startOffline(); });
@@ -397,10 +559,21 @@ function bind() {
   });
 
   $('again-btn').addEventListener('click', () => {
+    // Requesting fullscreen is only allowed from a user gesture, and this click
+    // is one — so a player who was fullscreen gets it back automatically.
+    if (wantFullscreen && !isFullscreen()) toggleFullscreen();
+    wantFullscreen = false;
     if (lastResult?.offline) startOffline();
-    else startOnline();
+    else startOnline(privateCode); // keep the party together for a rematch
   });
-  $('menu-btn').addEventListener('click', () => { show('menu'); setStatus(''); });
+  $('menu-btn').addEventListener('click', () => {
+    wantFullscreen = false;
+    privateCode = '';
+    $('code-display').classList.add('hidden');
+    show('menu');
+    setStatus('');
+    refreshRooms();
+  });
 
   $('name-input').addEventListener('change', () => {
     profile.name = currentName();

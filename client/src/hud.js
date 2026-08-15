@@ -1,13 +1,24 @@
-import { QUICK_CHAT, PLAYER, MODES, MULTIKILL_NAMES } from '@cluckdown/shared';
+import {
+  QUICK_CHAT, PLAYER, MODES, MULTIKILL_NAMES, MODIFIERS, TEAM_NAMES,
+} from '@cluckdown/shared';
 
 const $ = (id) => document.getElementById(id);
 const MAX_FEED = 5;
 const MAX_CHAT = 6;
+// Slack around the viewport so a plate doesn't pop as a chicken crosses the edge.
+const MARGIN = 48;
 
 // Everything user-supplied goes through textContent, never innerHTML — a name
 // or chat line is attacker-controlled input and this is the only place it
 // touches the DOM.
 function el(tag, cls, text) {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text != null) n.textContent = text;
+  return n;
+}
+
+function el2(tag, cls, text) {
   const n = document.createElement(tag);
   if (cls) n.className = cls;
   if (text != null) n.textContent = text;
@@ -30,6 +41,8 @@ export class Hud {
     this.respawnCount = $('respawn-count');
     this.touchHint = $('touch-hint');
     this.netStatsEl = $('netstats');
+    this.objectiveEl = $('objective');
+    this.roomChip = $('room-chip');
     this.onChat = onChat;
     // Compact by default; expanded shows the full breakdown.
     this.netExpanded = false;
@@ -63,10 +76,78 @@ export class Hud {
     this.respawnOverlay.classList.add('hidden');
     this.touchHint.style.opacity = '';
     this.netStatsEl.replaceChildren();
+    this.objectiveEl.classList.add('hidden');
+    this.roomChip.classList.add('hidden');
   }
 
-  setMode(mode) {
+  setMode(mode, modifier = 'none') {
     this.modePill.textContent = MODES[mode]?.label ?? mode;
+
+    // A persistent badge, because the opening announcement scrolls away and
+    // players who joined mid-match never saw it at all.
+    const mod = MODIFIERS[modifier];
+    const badge = $('mod-badge');
+    if (!badge) return;
+    if (!mod || modifier === 'none') {
+      badge.classList.add('hidden');
+      badge.textContent = '';
+      return;
+    }
+    badge.textContent = mod.label;
+    badge.title = mod.blurb;
+    badge.classList.remove('hidden');
+  }
+
+  /**
+   * Mode-specific readout under the clock: team score, or your hold on the hill.
+   * Hidden entirely in free-for-all so it costs nothing there.
+   */
+  setObjective({ teamScores, hill, self }) {
+    const el = this.objectiveEl;
+    if (!teamScores && !hill) { el.classList.add('hidden'); return; }
+    el.classList.remove('hidden');
+    el.replaceChildren();
+
+    if (teamScores) {
+      const [blue, red] = teamScores;
+      const mk = (n, cls, lead) => {
+        const d = el2('div', `team-score ${cls}${lead ? ' leading' : ''}`, String(n));
+        d.title = TEAM_NAMES[cls === 'blue' ? 0 : 1];
+        return d;
+      };
+      el.append(mk(blue, 'blue', blue > red), el2('span', 'vs', 'VS'), mk(red, 'red', red > blue));
+      return;
+    }
+
+    el.classList.toggle('contested', !!hill.contested);
+    const label = hill.contested ? 'Contested' : (hill.holder ? 'Held' : 'Open');
+    const meter = el2('div', 'hill-meter');
+    const fill = el2('i');
+    fill.style.transform = `scaleX(${Math.max(0, Math.min(1, self?.hillPct ?? 0))})`;
+    meter.append(fill);
+    el.append(el2('span', 'hill-label', label), meter);
+  }
+
+  /**
+   * Shows the invite code for the whole match.
+   *
+   * Creating a private room drops the host straight into the arena, so the
+   * menu's copy of the code is already hidden by the time they want to read it
+   * out — which made a private room effectively uninvitable.
+   */
+  setRoomCode(code, onCopy) {
+    this.roomCode = code;
+    if (!code) {
+      this.roomChip.classList.add('hidden');
+      this.roomChip.textContent = '';
+      return;
+    }
+    this.roomChip.textContent = `🔑 ${code}`;
+    this.roomChip.classList.remove('hidden');
+    if (!this.roomChipBound) {
+      this.roomChipBound = true;
+      this.roomChip.addEventListener('click', () => onCopy?.(this.roomCode));
+    }
   }
 
   // ------------------------------------------------------------ net stats
@@ -266,7 +347,15 @@ export class Hud {
       const wx = view ? view.x : p.x;
       const wz = view ? view.z : p.z;
       const pos = projectFn(wx, 2.35, wz);
-      if (!pos) { plate.style.display = 'none'; continue; }
+      // projectFn returns null only for points behind the camera. A player off
+      // the side of the screen still projects to a valid coordinate, so the
+      // plate would be positioned outside the viewport and merely clipped by
+      // the overlay — costing a transform every frame for something nobody can
+      // see. Hide those explicitly.
+      const off = !pos
+        || pos.x < -MARGIN || pos.x > window.innerWidth + MARGIN
+        || pos.y < -MARGIN || pos.y > window.innerHeight + MARGIN;
+      if (off) { plate.style.display = 'none'; continue; }
 
       plate.style.display = '';
       plate.style.transform = `translate(${pos.x}px, ${pos.y}px) translate(-50%, -100%)`;
@@ -310,7 +399,8 @@ export class Hud {
   popDamage(screenPos, amount, kind = 'hit') {
     if (!screenPos) return;
     const node = this.dmgPool.pop() ?? el('div', 'dmg-number');
-    node.className = `dmg-number${amount >= 25 ? ' crit' : ''}${kind === 'heal' ? ' heal' : ''}`;
+    node.className = `dmg-number${amount >= 25 ? ' crit' : ''}`
+      + (kind === 'heal' ? ' heal' : kind === 'burn' ? ' burn' : '');
     node.textContent = kind === 'heal' ? `+${amount}` : String(amount);
     node.style.left = `${screenPos.x}px`;
     node.style.top = `${screenPos.y}px`;

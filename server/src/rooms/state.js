@@ -12,6 +12,8 @@ export class PlayerState extends Schema {}
 defineTypes(PlayerState, {
   name: 'string',
   seat: 'uint8',
+  team: 'int8',      // -1 in free-for-all
+  hillPct: 'uint8',  // 0-100 share of the King of the Coop target
   x: 'float32',
   z: 'float32',
   aim: 'float32',
@@ -19,6 +21,8 @@ defineTypes(PlayerState, {
   alive: 'boolean',
   invuln: 'boolean',
   rapid: 'boolean',
+  ammo: 'string',    // '' | tracking | bouncy | fire
+  burning: 'boolean',
   kills: 'uint16',
   deaths: 'uint16',
   score: 'int32',
@@ -55,6 +59,14 @@ export class ArenaState extends Schema {
 }
 defineTypes(ArenaState, {
   mode: 'string',
+  modifier: 'string',
+  // Last Chicken Standing boundary. Synced as state rather than broadcast,
+  // because it moves every tick and clients only need the current value.
+  safeHalf: 'float32',
+  teamBlue: 'uint16',
+  teamRed: 'uint16',
+  hillHolder: 'string',
+  hillContested: 'boolean',
   phase: 'string',
   clock: 'float32',
   arenaSize: 'float32',

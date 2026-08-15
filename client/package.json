@@ -14,7 +14,9 @@
     "test:camera": "node test/camera.mjs",
     "test:audio": "node test/audio.mjs",
     "test:perf": "node test/perf.mjs",
-    "test:stats": "node test/stats.mjs"
+    "test:stats": "node test/stats.mjs",
+    "test:mobile": "node test/mobile.mjs",
+    "test:private": "node test/private.mjs"
   },
   "dependencies": {
     "@babylonjs/core": "^9.21.0",

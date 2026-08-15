@@ -70,14 +70,214 @@ naive point test would tunnel straight through a 0.6-radius chicken.
 
 | Mode | Players | Rules |
 |---|---|---|
-| Casual | 4 | FFA, 4 min, bots fill empty slots |
-| Ranked | 4 | FFA, 4 min, Elo on the line, humans only |
-| Deathmatch | 4 | First to 15 kills or 5 min |
-| 1v1 | 2 | Smaller arena, first to 10, bomber shows up rarely |
+| **Casual** | 4 | Free-for-all, 4 min, bots fill empty seats |
+| **2v2 Teams** | 4 | Blue vs Red, friendly fire off, first team to 20 kills |
+| **King of the Coop** | 4 | Hold the centre for 25 uncontested seconds |
+| **Last Chicken** | 4 | One life each, and the arena closes in around you |
+| **Ranked** | 4 | Free-for-all, Elo on the line, humans only |
+| **Deathmatch** | 4 | Endless respawns, first to 15 kills |
+| **1v1** | 2 | Tight arena, first to 10, humans only |
+
+Modes are data in `shared/src/constants.js` — `teams`, `hill`, `shrink`,
+`respawn` and `killLimit` are flags the simulation reads. Adding a variant is an
+entry in `MODES`, not a new system.
+
+**2v2 Teams** puts seats 0 and 3 on the west corners and 1 and 2 on the east, so
+a team spawns down one side rather than diagonally across the map. Bullets pass
+*through* team-mates rather than being absorbed, so a partner can't body-block you.
+
+**King of the Coop** only scores while one side is alone in the zone. Two players
+from different sides cancel out, so the point has to be cleared, not just reached.
+
+**Last Chicken** shrinks the safe area from half-extent 20 down to 7, starting 8
+seconds in. Players are clamped to the boundary, so it physically herds everyone
+together. The boundary rides in synced state rather than being broadcast — it
+moves every tick, and an event per tick would be 60 messages a second for one
+number.
 
 Rating is placement-based Elo: finishing above someone counts as beating them,
 scaled so a 4-player match moves your rating about as much as one duel would.
 It lives in `localStorage` and is sent to the server on join.
+
+## Match modifiers
+
+Casual, Teams, Hill, Last Chicken and Deathmatch roll a random twist per match,
+announced at the start and shown as a badge under the clock:
+
+| | Effect |
+|---|---|
+| **LIGHTS OUT** | Ambient light drops to near zero — tracers and pickups are the only light |
+| **LOW GRAVITY** | Knockback barely decays, so hits send chickens skating |
+| **DOUBLE DAMAGE** | Every shot hurts twice as much |
+| **SUDDEN DEATH** | One hit. That's the whole rule |
+| **TRIGGER HAPPY** | Fire rate roughly tripled |
+| **BOMBER FRENZY** | Bombers arrive early and keep coming |
+
+`none` sits in the pool twice, so a plain match still turns up about a quarter of
+the time — otherwise the twists stop feeling like an event. **Ranked and 1v1
+never roll one**: a rating only means something if everyone played the same game.
+
+Each modifier is a set of multipliers over existing tuning constants
+(`MODIFIERS`), so the simulation applies them in a handful of places and nothing
+else knows they exist. The roll comes from the seeded RNG, so a given seed always
+reproduces the same match.
+
+> "Low gravity" is a slight lie — there's no jumping in a top-down game, so it's
+> implemented as momentum: knockback that barely decays. It reads as floaty in play.
+
+## Aim assist
+
+Aiming with a thumb on a 375px-tall screen is genuinely hard, and that was the
+loudest piece of player feedback. `AIM_ASSIST` in `shared/src/constants.js` is
+one block of tunables; **`strength` is the whole feel of it**:
+
+```
+0     off
+0.35  a gentle nudge, you still do the aiming
+0.6   comfortable on a phone (default)
+1     hard lock, feels like the game plays for you
+```
+
+It works as a soft lock with two cones: a tight `cone` to *acquire* a target and
+a wider `stickyCone` to *keep* one, so thumb wobble doesn't shake you off but
+deliberately turning away still drops the lock. Shots are led slightly ahead of
+a moving target.
+
+Two details that are load-bearing:
+
+- Cone checks are measured against the **raw stick angle**, never the assisted
+  one. Testing the assisted angle would compare the lock against itself — the
+  offset would always be ~0 and a target could never be shaken off.
+- The assist is applied to a persistent `p.aim` while the stick writes to
+  `p.aimRaw`. An earlier version wrote both to the same field, so every tick
+  reset the aim to the raw stick angle and the pull never accumulated — it
+  closed 0.028 of a 0.25 radian gap and stayed there.
+
+Humans only. Bots already aim with deliberate error, and handing them assist on
+top would just make them snipers.
+
+## Ammo types
+
+Alongside health and rapid-fire, three pickups change what your rounds do. One
+ammo slot per player — a new type replaces the old rather than stacking, which
+keeps the balance surface finite. Each has its own tracer colour, so you can
+read what someone is shooting at a glance.
+
+| Pickup | Effect |
+|---|---|
+| **Tracking** | Rounds steer toward a target ahead of them, at a capped turn rate so they can still be dodged sideways |
+| **Bouncy** | Rounds ricochet off walls twice. The walls are axis-aligned, so a bounce is just negating one velocity component |
+| **Fire** | Hits set the target alight — damage keeps ticking for 3s after the shot, credited to the shooter |
+
+Burn damage is applied in half-second chunks rather than every tick. At 60Hz,
+per-tick damage would emit sixty hit events a second and bury the kill feed in
+damage numbers.
+
+Weights live in `PICKUP_WEIGHTS`. Health stays the most common because it's the
+one every player always wants.
+
+## Playing with friends
+
+**Private matches.** "Create a private match" generates a four-character code.
+The alphabet excludes `I`, `O`, `0` and `1` because they're indistinguishable
+read aloud or squinted at, which is the entire use case.
+
+Rooms are matched on **mode *and* code** (public matches carry an empty code),
+and the room verifies the code in `onAuth` before admitting anyone. That second
+part is load-bearing: a matchmaking filter is only a routing hint, and a client
+that omits the field sends `undefined`, which matches any room. Without the
+`onAuth` gate, a public queue could drop a stranger into a friends-only match.
+
+Creating a private match drops you straight into the arena, so the code is shown
+as a **chip in the HUD for the whole match** (tap it to copy), not just on the
+menu. That was a real bug: the menu is hidden by the time you want to read the
+code out, which made a private room impossible to invite anyone to.
+
+**Server browser.** Open public matches are listed on the menu with mode and
+player count, one tap to join. Coded rooms never appear there.
+
+## Sound
+
+Every sound is synthesised at runtime with the Web Audio API — oscillators,
+filtered noise, gain envelopes. No audio files, no loading, no licensing, 0 KB.
+Shots, hits, deaths, explosions, pickups, UI, an accelerating bomber fuse, and
+musical stingers that climb a tier per multi-kill.
+
+Browsers refuse to start audio before a user gesture, so the context is unlocked
+on the first tap or keypress. Volume and mute live on the menu (`M` toggles it
+in-game) and persist to `localStorage`.
+
+## Mobile
+
+Everything here came from player reports, and every report so far has been from
+a phone held sideways.
+
+- **Pinch-zoom is suppressed.** `user-scalable=no` in the viewport meta is not
+  enough — iOS Safari has ignored it since iOS 10, which is exactly where the
+  accidental-zoom reports came from. `client/src/mobile.js` cancels Safari's
+  `gesture*` events, any two-finger `touchmove`, and double-tap zoom, all with
+  non-passive listeners because `preventDefault()` is ignored on passive ones.
+  Single-finger touches pass through untouched — those are the joysticks.
+- **Fullscreen button** in the HUD, which also attempts a landscape orientation
+  lock (Android Chrome only allows the lock from fullscreen). iPhone Safari has
+  no element fullscreen at all, so the button hides itself there rather than
+  offering something that silently fails.
+- **Rotate prompt.** Orientation lock is unavailable on iOS, so portrait during
+  a match shows a "turn your phone sideways" overlay. It never appears on the
+  menu, which reads fine upright.
+- **Camera framing toggle** — Close / Mid / Full map, cycled from the HUD and
+  remembered between sessions. Full map fits the whole arena and stops following
+  the player.
+
+### The landscape breakpoint
+
+HUD text used to be sized by a single `max-width: 620px` rule. **An iPhone SE in
+landscape is 667×375** — wider than 620, so none of it ever applied and phone
+players got desktop-sized text eating the play area. The mobile rules are now
+keyed on `max-height`, because on a landscape phone height is the scarce
+dimension. `npm run test:mobile` runs the whole suite at 667×375 for this reason.
+
+## Graphics settings
+
+Under **Graphics** on the menu, aimed at older phones:
+
+- **Resolution** — Full down to 50%. The biggest single win; the engine
+  otherwise renders at up to 1.5× device pixel ratio.
+- **Glow effects** — a wide blur on a separate render target every frame,
+  routinely 30–50% of frame time on budget GPUs.
+- **Antialiasing** — MSAA, meaningful cost on mobile.
+
+These apply to your next match, because the renderer is built at match start.
+
+Some optimisations are unconditional: each chicken is merged into a **single
+mesh** with part colours baked into vertex colours (four players plus the bomber
+went from ~50 draw calls to 5), debris uses **thin instances** rather than scene
+nodes, arena world matrices and materials are **frozen**, and materials are
+shared through a per-scene cache.
+
+## Netcode
+
+| | Rate |
+|---|---|
+| Server simulation | 60 Hz |
+| Client input | 60 Hz |
+| State broadcast | 40 Hz |
+
+Simulation rate and broadcast rate are deliberately separate: simulating often
+makes the game responsive, while broadcasting often mostly makes clients decode
+more, and interpolation already covers the gaps.
+
+**The simulation runs on a fixed-step accumulator, not on the timer.** Windows
+timer granularity is ~15.6ms, so a 16.67ms `setInterval` really fires at ~26ms.
+Advancing the world by a fixed 1/60s per callback ran matches at ~60% speed —
+bots arriving late, match clock drifting, everything subtly in slow motion. The
+server now accumulates real elapsed time and spends it in fixed-size steps, so
+the simulation stays deterministic while the match runs on wall-clock time.
+`npm run smoke` asserts the match clock tracks real time, because that failure is
+completely silent.
+
+An in-game readout (tap it, or press `N`) shows ping, jitter, FPS and patch rate.
+The menu shows server status, live player count and a rough HTTP ping.
 
 ### Bots and lobby filling
 
@@ -104,30 +304,57 @@ where it died — a real risk/reward call, since shooting it means standing near
 
 ## Testing
 
-The server and client both have end-to-end tests that drive the real thing.
+Everything here drives the real thing — a real socket, a real browser, the real
+simulation. There are no mocks.
 
 ```bash
-# Server tests — need `npm run dev:server` running:
-npm run smoke                               # 15 assertions over the live socket
-npm run test:seats -w @cluckdown/server     # seat allocation + bot eviction
-
-# Browser tests (Playwright + Chromium) — need `npm run dev` running:
-npm install -D playwright && npx playwright install chromium
-npm run test:ui -w @cluckdown/client         # menu → match → HUD, screenshots
-npm run test:results -w @cluckdown/client    # forces a match to end, checks podium
-npm run test:nameplates -w @cluckdown/client # measures HUD-to-mesh alignment in px
-npm run test:touch -w @cluckdown/client      # emulates a phone, drags both sticks
+npm run test:sim       # simulation only: modes + modifiers. No server, ~5s
+npm run test:server    # needs `npm run dev:server`
+npm run test:browser   # needs `npm run dev` + Playwright chromium
+npm test               # all three, in order
 ```
 
-`test:touch` is not optional cover. The other browser tests drive WASD + mouse,
-which never touches nipplejs — a change in its listener signature once broke
-both joysticks completely while every other test stayed green.
+First time, for the browser suites:
 
-`PLAY_MODE=online npm run test:ui -w @cluckdown/client` runs the browser test
-against the real server instead of offline practice.
+```bash
+npm install -D playwright && npx playwright install chromium
+```
 
-In dev builds, `window.__cluckdown` exposes the live session — e.g.
-`__cluckdown.session.world.clock = 2` to jump to the results screen.
+| Suite | Covers |
+|---|---|
+| `test:sim` | Mode win conditions, friendly fire, hill scoring and contest, the shrinking zone, every modifier's effect, aim assist, all three ammo types |
+| `smoke` | Two real clients: state sync, input acks, chat rate-limiting, **match clock drift** |
+| `test:seats` | Seat allocation and bot eviction when a human joins |
+| `test:rooms` | Room-code isolation — a stranger must not reach a private match |
+| `test:mobile` | iPhone SE landscape: zoom suppression, HUD sizing, camera views, rotate prompt, results scrolling |
+| `test:private` | Two real browsers: host creates a code, friend joins with it, stranger cannot |
+| `test:touch` | Emulated phone in landscape, both joysticks dragged with real touch events |
+| `test:camera` | Alive / dead / respawn framing, and centring at dpr 1.5 |
+| `test:nameplates` | HUD-to-mesh alignment, measured in pixels |
+| `test:audio` | Context unlock, cue routing, fuse cadence, mute and volume persistence |
+| `test:perf` | Draw-call and material counts, thin instances, graphics settings |
+| `test:stats` | Server status panel and the in-game network readout |
+
+`test:touch` is not optional cover. Every other browser test drives WASD and the
+mouse, which never touches nipplejs — a change in its listener signature once
+broke both joysticks completely while the whole suite stayed green.
+
+Two things worth knowing before adding tests here, both learned the hard way:
+
+- **Bot matches are not deterministic.** Bots use global `Math.random()` for aim
+  jitter and strafing, so outcomes vary run to run. Anything that must be exact
+  (does holding the hill win? does the zone shrink?) is driven directly rather
+  than hoped for out of a bot match.
+- **Measure on a condition, not a timer.** Under software rendering the browser
+  runs at a few frames per second, so a fixed `waitForTimeout` routinely measures
+  a half-finished camera pan or an unconverged lerp.
+
+`PLAY_MODE=online npm run test:ui -w @cluckdown/client` runs the UI test against
+the real server instead of offline practice.
+
+In dev builds `window.__cluckdown` exposes the live session, game and audio — e.g.
+`__cluckdown.session.world.clock = 2` jumps to the results screen — and
+`window.__forceMod` pins a match modifier before starting a practice match.
 
 ---
 
@@ -357,10 +584,46 @@ bugs. Don't "clean them up" without checking:
 
 ## Known rough edges
 
-- Rating is client-supplied (`localStorage`), so it's trivially forgeable. Fine
-  for a hobby game; it needs a real identity store to mean anything.
+- **Rating is client-supplied** (`localStorage`), so it's trivially forgeable.
+  Fine for a hobby game; it needs a real identity store to mean anything.
+  "Ranked" also doesn't match by skill yet — it only filters by mode.
+- **Remote players are smoothed exponentially, not interpolated from a snapshot
+  buffer.** On a jittery connection that shows as rubber-banding, and at low
+  framerates the factor clamps to 1 and it snaps. Proper snapshot interpolation
+  (buffer two states, render ~100ms behind) is the fix and costs nothing on the GPU.
+- **Client prediction ignores knockback**, so high-knockback situations (a blast,
+  or the LOW GRAVITY modifier) produce a visible correction on your own chicken.
 - Under a very slow renderer the offline practice sim runs slower than real time,
-  because per-frame delta is clamped. That's the right trade (better than
-  fast-forwarding the match), and online play is unaffected — the server owns the clock.
+  because per-frame delta is clamped. That's the right trade — better than
+  fast-forwarding the match — and online play is unaffected; the server owns the clock.
 - Bots are good at killing the bomber. In a 4-bot match it usually gets shot down
   before it detonates; `BOMBER.maxHp` is the knob if you want it scarier.
+- Bots don't path around anything, because there is nothing to path around. Adding
+  cover to the arena means giving them obstacle avoidance in the same change.
+- Last Chicken rounds are short with four players — one life each resolves fast.
+  Best-of-N rounds would be the proper fix.
+- Performance work is verified by draw-call and material counts, not by profiling
+  on real low-end hardware. The counts are real; the frame-time win is inferred.
+
+## Roadmap
+
+Ordered roughly by value per unit of work:
+
+- **Bomber Horde** — a co-op wave mode. Needs `world.bomber` (a single object) to
+  become a list, which is also what unlocks bomber variants below.
+- **Powerups** — bounce bullets, shotgun spread, shield, decoy chicken. Wants a
+  small registry first so each one is a data entry rather than a special case.
+- **Signature mechanics** — streak evolution (your chicken visibly grows), bomber
+  variants (fast / heavy / splitter), egg-laying mines.
+- **Arena obstacles** — destructible cover and a few layouts. The biggest
+  gameplay change available, and the biggest job: bots need avoidance too.
+
+## Contributing
+
+The architecture is built for this: the simulation is pure functions over plain
+data in `shared/`, with no renderer or network types anywhere near it. In
+practice that means a new mode is an entry in `MODES` plus a rule check in the
+step function, and a new modifier is a set of multipliers.
+
+If you change simulation behaviour, `npm run test:sim` runs in about five seconds
+and needs nothing else installed — please add a case to it.

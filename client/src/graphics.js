@@ -23,6 +23,7 @@ const DEFAULTS = {
   resolution: 1,
   glow: true,
   antialias: true,
+  view: 'close', // camera framing: close | mid | full
 };
 
 export function loadGfx() {
@@ -33,6 +34,7 @@ export function loadGfx() {
     if (!RESOLUTIONS.some((r) => r.value === merged.resolution)) merged.resolution = DEFAULTS.resolution;
     merged.glow = !!merged.glow;
     merged.antialias = !!merged.antialias;
+    if (!['close', 'mid', 'full'].includes(merged.view)) merged.view = DEFAULTS.view;
     return merged;
   } catch {
     return { ...DEFAULTS };
@@ -45,6 +47,7 @@ export function saveGfx(gfx) {
       resolution: gfx.resolution,
       glow: gfx.glow,
       antialias: gfx.antialias,
+      view: gfx.view,
     }));
   } catch {
     // Private mode — settings just won't persist.

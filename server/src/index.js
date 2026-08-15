@@ -5,7 +5,7 @@ import cors from 'cors';
 import { Server } from 'colyseus';
 import { MODE_LIST, MODES } from '@cluckdown/shared';
 import { ArenaRoom } from './rooms/ArenaRoom.js';
-import { snapshot } from './stats.js';
+import { snapshot, listPublicRooms } from './stats.js';
 
 const require = createRequire(import.meta.url);
 
@@ -38,6 +38,12 @@ app.get('/stats', (_req, res) => {
   res.json(snapshot());
 });
 
+// Server browser. Only public, in-progress matches — coded rooms stay hidden.
+app.get('/rooms', (_req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.json({ rooms: listPublicRooms() });
+});
+
 app.get('/modes', (_req, res) => {
   res.json(MODE_LIST.map((id) => ({
     id,
@@ -65,9 +71,11 @@ const gameServer = new Server({
   transport: new WebSocketTransport({ server: http.createServer(app) }),
 });
 
-// One room type, filtered by mode — so matchmaking never drops a 1v1 player
-// into a 4-player deathmatch lobby.
-gameServer.define('arena', ArenaRoom).filterBy(['mode']);
+// One room type, filtered by mode AND code, so matchmaking never drops a 1v1
+// player into a 4-player deathmatch lobby — nor a stranger into a friends-only
+// match. Public rooms carry an empty code, private ones carry the shared code,
+// and joinOrCreate simply never matches across the two.
+gameServer.define('arena', ArenaRoom).filterBy(['mode', 'code']);
 
 gameServer.listen(PORT).then(() => {
   // Deliberately reports the port rather than a ws://localhost URL: on a host

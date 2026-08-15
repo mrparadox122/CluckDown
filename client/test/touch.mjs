@@ -23,9 +23,10 @@ const near = (a, b, tol = 0.08) => Math.abs(a - b) <= tol;
 const browser = await chromium.launch({
   args: ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader'],
 });
-// A phone: touch input, no mouse, portrait.
+// A phone in LANDSCAPE, which is how the game is actually played — portrait now
+// shows the rotate prompt, and that overlay (correctly) swallows touches.
 const context = await browser.newContext({
-  viewport: { width: 412, height: 915 },
+  viewport: { width: 844, height: 390 },
   deviceScaleFactor: 2,
   isMobile: true,
   hasTouch: true,
@@ -38,8 +39,8 @@ await page.fill('#name-input', 'Thumbs');
 await page.click('#practice-btn');
 await page.waitForTimeout(3500);
 
-const LEFT = { x: 90, y: 800 };
-const RIGHT = { x: 330, y: 800 };
+const LEFT = { x: 110, y: 320 };
+const RIGHT = { x: 730, y: 320 };
 
 // The stick zones must actually be the topmost element under a thumb — #hud
 // is pointer-events:none and the zones opt back in, which is easy to break.

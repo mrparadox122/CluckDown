@@ -11,20 +11,45 @@ const state = {
   peakPlayers: 0,
 };
 
-export function roomOpened(roomId, mode) {
-  state.rooms.set(roomId, { mode, humans: 0, bots: 0 });
+export function roomOpened(roomId, mode, code = '') {
+  state.rooms.set(roomId, { mode, code, humans: 0, bots: 0, maxPlayers: 0, phase: 'warmup' });
 }
 
 export function roomClosed(roomId) {
   if (state.rooms.delete(roomId)) state.matchesPlayed++;
 }
 
-export function roomPopulation(roomId, humans, bots) {
+export function roomPopulation(roomId, humans, bots, extra = {}) {
   const room = state.rooms.get(roomId);
   if (!room) return;
   room.humans = humans;
   room.bots = bots;
+  Object.assign(room, extra);
   state.peakPlayers = Math.max(state.peakPlayers, totalHumans());
+}
+
+/**
+ * Public, joinable matches for the server browser.
+ *
+ * Coded rooms are excluded deliberately — a private match should be reachable
+ * only by someone who was given the code, never by browsing.
+ */
+export function listPublicRooms() {
+  const out = [];
+  for (const [roomId, r] of state.rooms) {
+    if (r.code) continue;
+    if (r.phase === 'over') continue;
+    out.push({
+      roomId,
+      mode: r.mode,
+      humans: r.humans,
+      bots: r.bots,
+      maxPlayers: r.maxPlayers,
+      full: r.maxPlayers > 0 && r.humans >= r.maxPlayers,
+      phase: r.phase,
+    });
+  }
+  return out.sort((a, b) => b.humans - a.humans);
 }
 
 function totalHumans() {

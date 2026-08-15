@@ -1,10 +1,14 @@
 import { Vector3, Matrix } from '@babylonjs/core/Maths/math';
-import { createStage, buildArena, CameraRig } from './scene.js';
+import {
+  createStage, buildArena, buildHillZone, buildSafeZone, CameraRig, VIEW_LABELS,
+} from './scene.js';
 import { PlayerView, BomberView, PickupView } from './entities.js';
 import { BulletPool, DebrisPool, BlastRings, MuzzleFlash } from './fx.js';
 import { Controls } from './controls.js';
 import { sfx } from '../audio/sfx.js';
-import { PLAYER, BULLET, BOMBER, clampUnit, clamp } from '@cluckdown/shared';
+import {
+  PLAYER, BULLET, BOMBER, MODIFIERS, MODES, HILL, modValue, clampUnit, clamp,
+} from '@cluckdown/shared';
 
 // Matches the server's simulation rate: sending slower would leave most ticks
 // with no new input to act on, wasting the responsiveness a 60Hz sim buys.
@@ -24,7 +28,8 @@ export class Game {
     this.onExit = onExit;
     this.disposed = false;
 
-    const stage = createStage(canvas, gfx);
+    this.modifier = session.modifier ?? 'none';
+    const stage = createStage(canvas, gfx, this.modifier);
     this.engine = stage.engine;
     this.scene = stage.scene;
     this.camera = stage.camera;
@@ -32,9 +37,16 @@ export class Game {
 
     this.arena = buildArena(this.scene, session.arenaSize);
     this.rig = new CameraRig(this.camera, session.arenaSize, this.engine);
+    this.rig.setView(gfx?.view ?? 'close');
+
+    // Objective markers, built only for the modes that have them.
+    const rules = MODES[session.mode] ?? {};
+    this.hillZone = rules.hill ? buildHillZone(this.scene, HILL.radius) : null;
+    this.safeZone = rules.shrink ? buildSafeZone(this.scene, session.arenaSize / 2) : null;
+    this.lastSafeHalf = session.arenaSize / 2;
 
     this.bullets = new BulletPool(this.scene, this.glow);
-    this.debris = new DebrisPool(this.scene, this.glow);
+    this.debris = new DebrisPool(this.scene, this.glow, 90, modValue(this.modifier, 'debrisGravityMul'));
     this.blasts = new BlastRings(this.scene, this.glow);
     this.muzzle = new MuzzleFlash(this.scene, this.glow);
 
@@ -56,7 +68,12 @@ export class Game {
       scene: this.scene,
     });
 
-    this.hud.setMode(session.mode);
+    this.hud.setMode(session.mode, this.modifier);
+    // Announce the twist once the match view is actually up.
+    const mod = MODIFIERS[this.modifier];
+    if (mod && this.modifier !== 'none') {
+      setTimeout(() => this.hud.announce(mod.label), 700);
+    }
     this.bindSession();
 
     this.onResize = () => {
@@ -67,6 +84,12 @@ export class Game {
     window.addEventListener('resize', this.onResize);
 
     this.engine.runRenderLoop(() => this.frame());
+  }
+
+  /** Cycles close -> mid -> full and reports the new label for the HUD. */
+  cycleView() {
+    const view = this.rig.cycleView();
+    return { view, label: VIEW_LABELS[view] };
   }
 
   // ------------------------------------------------------------------ setup
@@ -133,7 +156,7 @@ export class Game {
           if (view) view.hit();
           const at = e.target === 'bomber' ? { x: e.x, z: e.z } : (view ?? { x: e.x, z: e.z });
           this.debris.feathers(at.x, 1.2, at.z, 3);
-          this.hud.popDamage(this.projectFn(at.x, 1.9, at.z), e.amount);
+          this.hud.popDamage(this.projectFn(at.x, 1.9, at.z), e.amount, e.kind === 'burn' ? 'burn' : 'hit');
           if (self && e.target === self.id) {
             this.rig.addShake(0.18);
             this.flashHurt();
@@ -183,6 +206,22 @@ export class Game {
           this.debris.emit('red', e.x, 0.6, e.z, 12, { speed: 7, up: 1.1, size: 0.3, life: 0.6 });
           this.hud.announce('BOMBER INCOMING');
           sfx.play('bomberSpawn');
+          break;
+        }
+        case 'bounce': {
+          // Keep the tracer in step with the authoritative ricochet.
+          this.bullets.redirect(e.id, e.x, e.z);
+          this.debris.emit('white', e.x, 0.85, e.z, 3, {
+            speed: 4, up: 0.4, size: 0.22, life: 0.25, drag: 4,
+          });
+          sfx.play('hit');
+          break;
+        }
+        case 'ignite': {
+          this.debris.emit('gold', e.x, 1.0, e.z, 8, {
+            speed: 5, up: 1.3, size: 0.3, life: 0.6, drag: 2,
+          });
+          sfx.play('pickupRapid');
           break;
         }
         case 'bomberArm': {
@@ -249,6 +288,7 @@ export class Game {
     this.syncPickups(dt);
     this.syncBomber(dt);
 
+    this.syncObjectives(dt, players);
     this.bullets.update(dt);
     this.debris.update(dt);
     this.blasts.update(dt);
@@ -274,6 +314,11 @@ export class Game {
     this.hud.syncBomberFuse(this.session.bomber, this.projectFn, this.bomberView);
     this.hud.syncScoreboard(players, this.session.selfId);
     this.hud.setClock(this.session.clock);
+    this.hud.setObjective({
+      teamScores: this.session.teamScores,
+      hill: this.session.hill,
+      self,
+    });
     this.hud.setRespawn(self && !self.alive ? self.respawnIn : 0);
 
     // Refresh at 4Hz — this is a diagnostic, and rebuilding its DOM every
@@ -388,6 +433,22 @@ export class Game {
     if (self) {
       if (self.hp < this.lastHp - 0.5 && self.alive) this.rig.addShake(0.1);
       this.lastHp = self.hp;
+    }
+  }
+
+  /** Keeps the hill marker and closing boundary in step with the rules. */
+  syncObjectives(dt, players) {
+    if (this.hillZone) {
+      const hill = this.session.hill;
+      const holder = hill?.holder ? players.find((p) => p.id === hill.holder) : null;
+      this.hillZone.update(dt, holder?.color ?? null, !!hill?.contested);
+    }
+
+    if (this.safeZone) {
+      const half = this.session.safeHalf;
+      const closing = half < this.lastSafeHalf - 0.0005;
+      this.safeZone.update(dt, half, closing);
+      this.lastSafeHalf = half;
     }
   }
 
