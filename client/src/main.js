@@ -1,5 +1,7 @@
 import './style.css';
-import { MODE_LIST, MODES, makeRoomCode, cleanRoomCode } from '@cluckdown/shared';
+import {
+  MODE_LIST, MODES, makeRoomCode, cleanRoomCode, MAPS, MAP_VOTE,
+} from '@cluckdown/shared';
 import { findMatch, wakeServer, fetchServerStats, fetchRooms, joinRoomById, LocalSession } from './net.js';
 import { loadProfile, saveProfile, rankLabel, applyResult } from './profile.js';
 import { Hud } from './hud.js';
@@ -16,6 +18,7 @@ const $ = (id) => document.getElementById(id);
 const screens = {
   menu: $('menu'),
   finding: $('finding'),
+  lobby: $('lobby'),
   results: $('results'),
 };
 
@@ -33,6 +36,8 @@ let privateCode = '';
 let wantFullscreen = false;
 // Invite code of the match in progress, so the HUD can keep showing it.
 let activeCode = '';
+let lobbyPoll = null;
+let myVote = null;
 
 // ------------------------------------------------------------------ helpers
 
@@ -140,7 +145,8 @@ async function startOnline(code = '') {
   try {
     const s = await findMatch({ mode, name, rating: profile.rating, code, signal: matchAbort.signal });
     if (matchAbort.signal.aborted) { s.leave(); return; }
-    launch(s);
+    if (s.phase === 'lobby') runLobby(s, () => launch(s));
+    else launch(s);
   } catch (err) {
     if (err?.name === 'AbortError') return;
     console.error(err);
@@ -159,8 +165,95 @@ function startOffline() {
   const name = currentName();
   profile.name = name;
   saveProfile(profile);
-  launch(new LocalSession({ mode: profile.mode, name }));
+  const local = new LocalSession({ mode: profile.mode, name });
+  // The offline lobby needs the sim ticking to advance, and nothing is driving
+  // it until the Game's render loop exists — so pump it here for the vote.
+  const pump = setInterval(() => local.update(0.05), 50);
+  runLobby(local, () => { clearInterval(pump); launch(local); });
   toast('Offline practice — bots only, no rating.');
+}
+
+/**
+ * Map vote, shown between joining and the match starting.
+ *
+ * The renderer builds its arena from the chosen size, so the Game cannot be
+ * constructed until the vote resolves — which is exactly why this sits here
+ * rather than as an overlay on top of a running match.
+ */
+function runLobby(newSession, onDone) {
+  session = newSession;
+  myVote = null;
+  show('lobby');
+
+  const grid = $('map-choices');
+  let built = false;
+
+  const render = () => {
+    const choices = session.mapChoices;
+    if (!choices.length) return;
+
+    if (!built) {
+      built = true;
+      grid.replaceChildren(...choices.map(({ id }) => {
+        const map = MAPS[id] ?? { label: id, blurb: '', size: 40, floor: '#3f6fd8' };
+        const btn = document.createElement('button');
+        btn.className = 'map-choice';
+        btn.type = 'button';
+        btn.dataset.map = id;
+        btn.setAttribute('aria-pressed', 'false');
+
+        const swatch = document.createElement('div');
+        swatch.className = 'map-swatch';
+        swatch.style.backgroundColor = map.floor;
+
+        const votes = document.createElement('span');
+        votes.className = 'map-votes';
+        votes.dataset.n = '0';
+
+        const name = document.createElement('strong');
+        name.textContent = map.label;
+        const blurb = document.createElement('small');
+        blurb.textContent = map.blurb;
+        const size = document.createElement('div');
+        size.className = 'map-size';
+        size.textContent = `${map.size}×${map.size}`;
+
+        btn.append(swatch, votes, name, blurb, size);
+        btn.addEventListener('click', () => {
+          if (myVote === id) return;
+          myVote = id;
+          sfx.play('uiClick');
+          session.sendVote(id);
+          for (const b of grid.children) b.setAttribute('aria-pressed', String(b.dataset.map === id));
+        });
+        return btn;
+      }));
+    }
+
+    for (const btn of grid.children) {
+      const found = choices.find((c) => c.id === btn.dataset.map);
+      const badge = btn.querySelector('.map-votes');
+      const n = found?.votes ?? 0;
+      badge.textContent = n > 0 ? String(n) : '';
+      badge.dataset.n = String(n);
+    }
+
+    const left = Math.max(0, MAP_VOTE.seconds - session.lobbyTime);
+    $('lobby-bar').style.transform = `scaleX(${left / MAP_VOTE.seconds})`;
+    $('lobby-status').textContent = myVote
+      ? `You picked ${MAPS[myVote]?.label ?? myVote}`
+      : 'Tap a map to vote';
+
+    if (session.phase !== 'lobby') {
+      clearInterval(lobbyPoll);
+      lobbyPoll = null;
+      onDone();
+    }
+  };
+
+  clearInterval(lobbyPoll);
+  lobbyPoll = setInterval(render, 150);
+  render();
 }
 
 function launch(newSession) {
@@ -185,6 +278,8 @@ function launch(newSession) {
 }
 
 function endMatch() {
+  clearInterval(lobbyPoll);
+  lobbyPoll = null;
   document.body.classList.remove('in-match');
   game?.dispose();
   game = null;
@@ -554,6 +649,10 @@ function bind() {
   $('cancel-btn').addEventListener('click', () => {
     matchAbort?.abort();
     matchAbort = null;
+    clearInterval(lobbyPoll);
+    lobbyPoll = null;
+    session?.leave();
+    session = null;
     show('menu');
     setStatus('');
   });

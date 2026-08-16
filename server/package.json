@@ -9,7 +9,8 @@
     "start": "node src/index.js",
     "smoke": "node test/netcheck.mjs",
     "test:seats": "node test/seats.mjs",
-    "test:rooms": "node test/rooms.mjs"
+    "test:rooms": "node test/rooms.mjs",
+    "test:lobby": "node test/lobby.mjs"
   },
   "dependencies": {
     "@cluckdown/shared": "*",

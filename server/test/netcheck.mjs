@@ -42,8 +42,26 @@ async function main() {
   r2.onMessage('feed', () => {});
   r2.onMessage('chat', () => {});
   r2.onMessage('matchEnd', () => {});
+  r1.onMessage('mapChosen', () => {});
+  r2.onMessage('mapChosen', () => {});
+
+  // Matches now open in a map-vote lobby. Vote straight away and wait for play
+  // to actually start, or the whole test window is spent in the waiting room.
+  const firstMap = [...(r1.state.mapChoices ?? [])][0]?.id;
+  if (firstMap) { r1.send('vote', firstMap); r2.send('vote', firstMap); }
+  for (let i = 0; i < 200 && r1.state.phase === 'lobby'; i++) {
+    await new Promise((res) => setTimeout(res, 100));
+  }
+  console.log(`  lobby resolved -> ${r1.state.phase} on ${r1.state.map}`);
 
   check('two clients matched into the same room', r1.roomId === r2.roomId, `${r1.roomId} / ${r2.roomId}`);
+
+  // Baseline for the drift check, taken once the match is genuinely running.
+  for (let i = 0; i < 100 && r1.state.phase !== 'live'; i++) {
+    await new Promise((res) => setTimeout(res, 100));
+  }
+  const clockAtStart = r1.state.clock;
+  const measuredFrom = Date.now();
 
   let seq = 0;
   const drive = setInterval(() => {
@@ -79,12 +97,14 @@ async function main() {
   // The match clock must track wall-clock time. This guards against a fixed-dt
   // simulation loop drifting when the OS timer can't hit its target interval —
   // at 60Hz on Windows that silently ran matches at ~60% speed.
-  const cfgTime = { casual: 240, ranked: 240, deathmatch: 300, duel: 180 }[s.mode];
-  const elapsedSim = cfgTime - s.clock;
-  const drift = Math.abs(elapsedSim - DURATION) / DURATION;
+  // Measured from when the clock actually started ticking, not from join —
+  // the lobby and the 1.5s warmup both sit in front of it.
+  const elapsedSim = clockAtStart - s.clock;
+  const elapsedReal = (Date.now() - measuredFrom) / 1000;
+  const drift = Math.abs(elapsedSim - elapsedReal) / elapsedReal;
 
   console.log('\n--- assertions ---');
-  console.log(`  (match clock advanced ${elapsedSim.toFixed(1)}s over ${DURATION}s real)`);
+  console.log(`  (match clock advanced ${elapsedSim.toFixed(1)}s over ${elapsedReal.toFixed(1)}s real)`);
   check('match clock tracks real time', drift < 0.15,
     `sim ran at ${((elapsedSim / DURATION) * 100).toFixed(0)}% of real speed`);
   check('state is streaming', stateChanges > 50, `${stateChanges} patches`);

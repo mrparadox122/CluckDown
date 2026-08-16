@@ -17,6 +17,7 @@ import '@babylonjs/core/Meshes/instancedMesh';
 import '@babylonjs/core/Meshes/thinInstanceMesh';
 
 import { hardwareScaling } from '../graphics.js';
+import { MAPS, DEFAULT_MAP, HILL } from '@cluckdown/shared';
 
 // The reference screenshot is a dimetric view — tilted ~58° off horizontal,
 // never straight down and never rotating with aim. Camera follows position
@@ -154,7 +155,8 @@ export function litMat(scene, name, hex, { emissive = 0.06, spec = 0.05, cache =
  * The arena: a floor of individual cubes (thin-instanced, so all 1600 of them
  * cost one draw call) plus four walls with the grey top trim from the mockup.
  */
-export function buildArena(scene, size) {
+export function buildArena(scene, size, mapId = DEFAULT_MAP) {
+  const map = MAPS[mapId] ?? MAPS[DEFAULT_MAP];
   const half = size / 2;
   const root = [];
 
@@ -163,9 +165,10 @@ export function buildArena(scene, size) {
   const n = Math.ceil(size / TILE);
 
   const tile = MeshBuilder.CreateBox('tile', { width: TILE - GAP, height: 0.6, depth: TILE - GAP }, scene);
-  tile.material = litMat(scene, 'tileMat', '#3f6fd8', { emissive: 0.1 });
+  tile.material = litMat(scene, `tileMat_${map.id}`, map.floor, { emissive: 0.1 });
   tile.receiveShadows = false;
 
+  const floor = Color3.FromHexString(map.floor);
   const matrices = new Float32Array(n * n * 16);
   const colors = new Float32Array(n * n * 4);
   let i = 0;
@@ -178,9 +181,9 @@ export function buildArena(scene, size) {
       const noise = 0.94 + ((Math.sin(gx * 12.9898 + gz * 78.233) * 43758.5453) % 1) * 0.06;
       const shade = checker * noise;
       Matrix.Translation(x, -0.3, z).copyToArray(matrices, i * 16);
-      colors[i * 4 + 0] = 0.30 * shade;
-      colors[i * 4 + 1] = 0.47 * shade;
-      colors[i * 4 + 2] = 0.90 * shade;
+      colors[i * 4 + 0] = floor.r * shade;
+      colors[i * 4 + 1] = floor.g * shade;
+      colors[i * 4 + 2] = floor.b * shade;
       colors[i * 4 + 3] = 1;
       i++;
     }
@@ -192,7 +195,7 @@ export function buildArena(scene, size) {
 
   // Walls: dark body + light grey cap, mirroring the screenshot's trim.
   const wallMat = litMat(scene, 'wallMat', '#1a1f33', { emissive: 0.05 });
-  const capMat = litMat(scene, 'capMat', '#9aa6c4', { emissive: 0.16 });
+  const capMat = litMat(scene, `capMat_${map.id}`, map.trim, { emissive: 0.16 });
   const H = 2.6;
   const T = 0.9;
   const specs = [
@@ -502,18 +505,34 @@ export function buildHillZone(scene, radius) {
   let spin = 0;
   return {
     meshes: [disc, ring],
-    /** @param hex holder colour, or null when empty/contested */
-    update(dt, hex, contested) {
+    /**
+     * @param hex holder colour, or null when empty/contested
+     * @param moveAt seconds until the zone relocates, or null if it never does
+     */
+    update(dt, hex, contested, x = 0, z = 0, moveAt = null) {
       spin += dt * (contested ? 1.6 : 0.5);
       ring.rotation.y = spin;
-      const target = contested ? '#ff2d4b' : (hex ?? '#9aa6c4');
+
+      // The zone relocates, so it is eased into place rather than teleported —
+      // a hard jump reads as a rendering glitch instead of a rule.
+      const k = Math.min(1, dt * 6);
+      disc.position.x += (x - disc.position.x) * k;
+      disc.position.z += (z - disc.position.z) * k;
+      ring.position.x = disc.position.x;
+      ring.position.z = disc.position.z;
+
+      // About to move: flash amber regardless of who holds it, so the warning
+      // cannot be mistaken for ownership.
+      const moving = moveAt !== null && moveAt <= HILL.warnAt;
+      const blink = moving && Math.sin(spin * 14) > 0;
+      const target = blink ? '#ffc233' : (contested ? '#ff2d4b' : (hex ?? '#9aa6c4'));
       const c = Color3.FromHexString(target);
       ring.material.emissiveColor.copyFrom(c);
       disc.material.emissiveColor.copyFrom(c.scale(0.6));
       disc.material.alpha = contested ? 0.26 : (hex ? 0.22 : 0.12);
       // Pulse while contested so it reads as "nobody is scoring".
       const s = contested ? 1 + Math.sin(spin * 6) * 0.03 : 1;
-      ring.scaling.setAll(s);
+      ring.scaling.setAll(moving ? s * (1 + Math.sin(spin * 14) * 0.05) : s);
     },
   };
 }

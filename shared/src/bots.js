@@ -3,7 +3,7 @@
 // offline practice opponents on the client with zero extra code.
 
 import { applyInput } from './sim.js';
-import { PLAYER, BULLET, BOMBER, PICKUP, HILL } from './constants.js';
+import { PLAYER, BULLET, BOMBER, PICKUP, HILL, HEIST, BOMB } from './constants.js';
 import { norm, len, dist2, clamp, angleDelta } from './math.js';
 
 const BOT_NAMES = [
@@ -111,21 +111,27 @@ function decide(world, p, b) {
     }
   }
 
+  // --- Plant & Defuse: the bomb outranks the gunfight either way
+  if (world.cfg.bomb && world.bomb) {
+    const move = bombErrand(world, p, b);
+    if (move) return move;
+  }
+
+  // --- Egg Heist: a bot that only shoots loses to anyone who runs errands
+  if (world.cfg.heist) {
+    const move = heistErrand(world, p, b);
+    if (move) return move;
+  }
+
   // --- King of the Coop: bots that ignore the objective are no opposition
   if (world.cfg.hill) {
-    const d = Math.sqrt(dist2(p.x, p.z, 0, 0));
+    // The zone relocates, so this has to chase its current spot rather than
+    // the middle of the map.
+    const zone = world.hill;
+    const d = Math.sqrt(dist2(p.x, p.z, zone.x, zone.z));
     if (d > HILL.radius * 0.6) {
-      const [tx, tz] = norm(-p.x, -p.z);
-      const foeNow = nearestFoe(world, p);
-      let ax = tx;
-      let az = tz;
-      let shoot = false;
-      if (foeNow) {
-        const [fx, fz] = norm(foeNow.x - p.x, foeNow.z - p.z);
-        ax = fx + b.aimJitterX;
-        az = fz + b.aimJitterZ;
-        shoot = aimedAt(p, fx, fz, b.cfg.fireArc);
-      }
+      const [tx, tz] = norm(zone.x - p.x, zone.z - p.z);
+      const { ax, az, shoot } = coveringFire(world, p, b, tx, tz);
       return { mx: tx, mz: tz, ax, az, shoot, seq: 0 };
     }
   }
@@ -166,6 +172,128 @@ function decide(world, p, b) {
   if (Math.abs(p.z) > edge) mz -= Math.sign(p.z) * 0.8;
 
   return { mx, mz, ax, az, shoot, seq: 0 };
+}
+
+/**
+ * Aim while running an errand.
+ *
+ * A bot crossing the map with its gun pointed at its feet is free score, so it
+ * keeps covering the nearest foe and falls back to looking where it is going.
+ */
+function coveringFire(world, p, b, fallbackX, fallbackZ) {
+  const foe = nearestFoe(world, p);
+  if (!foe) return { ax: fallbackX, az: fallbackZ, shoot: false };
+  const [fx, fz] = norm(foe.x - p.x, foe.z - p.z);
+  return {
+    ax: fx + b.aimJitterX,
+    az: fz + b.aimJitterZ,
+    shoot: aimedAt(p, fx, fz, b.cfg.fireArc),
+  };
+}
+
+/** Nest belonging to a seat. */
+function nestFor(world, seat) {
+  return world.nests ? world.nests.find((n) => n.seat === seat % 4) : null;
+}
+
+/**
+ * Egg Heist errand: raid, then bank.
+ *
+ * Bots deliberately head home before they are full. A bot that hoards until it
+ * has every egg is slow, obvious, and hands the whole load back the moment it
+ * dies — which is the same mistake new players make.
+ */
+function heistErrand(world, p, b) {
+  const home = nestFor(world, p.seat);
+  if (!home) return null;
+
+  const goTo = (x, z, stopWithin = 0) => {
+    const d = Math.sqrt(dist2(p.x, p.z, x, z));
+    if (d <= stopWithin) return null;
+    const [tx, tz] = norm(x - p.x, z - p.z);
+    const { ax, az, shoot } = coveringFire(world, p, b, tx, tz);
+    return { mx: tx, mz: tz, ax, az, shoot, seq: 0 };
+  };
+
+  // Hands full, or hurt and holding something: cash out.
+  if (p.carrying >= 2 || (p.carrying > 0 && p.hp < 55)) return goTo(home.x, home.z);
+
+  // Anything on the floor nearby is cheaper than raiding for it.
+  let best = null;
+  let bestD = 14 * 14;
+  for (const egg of world.looseEggs ?? []) {
+    const d = dist2(p.x, p.z, egg.x, egg.z);
+    if (d < bestD) { best = egg; bestD = d; }
+  }
+  if (best) return goTo(best.x, best.z);
+
+  if (p.carrying > 0) return goTo(home.x, home.z);
+
+  // Otherwise raid the fullest rival nest that is worth the walk.
+  let target = null;
+  let bestScore = 0;
+  for (const nest of world.nests) {
+    if (nest.seat === p.seat % 4 || nest.eggs <= 0) continue;
+    const d = Math.sqrt(dist2(p.x, p.z, nest.x, nest.z)) + 1;
+    const score = nest.eggs / d;
+    if (score > bestScore) { target = nest; bestScore = score; }
+  }
+  return target ? goTo(target.x, target.z) : null;
+}
+
+/**
+ * Plant & Defuse errand.
+ *
+ * Defusing your own nest comes first — losing it costs more than any kill is
+ * worth — and both planting and defusing mean standing still, so those return
+ * a zero move vector rather than nothing.
+ */
+function bombErrand(world, p, b) {
+  const bomb = world.bomb;
+
+  if (bomb.state === 'planted') {
+    // Only its owner can defuse. Everyone else may as well keep fighting.
+    if (bomb.plantSeat !== p.seat % 4) return null;
+    const d = Math.sqrt(dist2(p.x, p.z, bomb.x, bomb.z));
+    if (d > BOMB.plantRadius * 0.6) {
+      const [tx, tz] = norm(bomb.x - p.x, bomb.z - p.z);
+      const { ax, az, shoot } = coveringFire(world, p, b, tx, tz);
+      return { mx: tx, mz: tz, ax, az, shoot, seq: 0 };
+    }
+    // Stand on it. Holding still is what defusing *is*.
+    const { ax, az, shoot } = coveringFire(world, p, b, 0, 1);
+    return { mx: 0, mz: 0, ax, az, shoot, seq: 0 };
+  }
+
+  if (bomb.carriedBy === p.id) {
+    // Carry it to the nearest defended rival nest.
+    let target = null;
+    let bestD = Infinity;
+    for (const nest of world.nests ?? []) {
+      if (nest.seat === p.seat % 4) continue;
+      if (![...world.players.values()].some((o) => o.seat % 4 === nest.seat)) continue;
+      const d = dist2(p.x, p.z, nest.x, nest.z);
+      if (d < bestD) { target = nest; bestD = d; }
+    }
+    if (!target) return null;
+
+    if (Math.sqrt(bestD) > BOMB.plantRadius * 0.6) {
+      const [tx, tz] = norm(target.x - p.x, target.z - p.z);
+      const { ax, az, shoot } = coveringFire(world, p, b, tx, tz);
+      return { mx: tx, mz: tz, ax, az, shoot, seq: 0 };
+    }
+    const { ax, az, shoot } = coveringFire(world, p, b, 0, 1);
+    return { mx: 0, mz: 0, ax, az, shoot, seq: 0 };
+  }
+
+  if (bomb.state === 'loose') {
+    const [tx, tz] = norm(bomb.x - p.x, bomb.z - p.z);
+    const { ax, az, shoot } = coveringFire(world, p, b, tx, tz);
+    return { mx: tx, mz: tz, ax, az, shoot, seq: 0 };
+  }
+
+  // Someone else is carrying it — hunting the carrier is just the normal fight.
+  return null;
 }
 
 function aimedAt(p, dx, dz, arc) {

@@ -224,6 +224,38 @@ export const MODES = {
     fillWithBots: true,
     modifiers: true,
   },
+  heist: {
+    id: 'heist',
+    label: 'Egg Heist',
+    blurb: 'Four eggs each. Steal theirs, defend yours.',
+    maxPlayers: 4,
+    minPlayers: 2,
+    arena: 40,
+    matchTime: 240,
+    killLimit: 0,
+    heist: true,
+    ranked: false,
+    bomberEnabled: true,
+    bomberFirstSpawn: 14,
+    fillWithBots: true,
+    modifiers: true,
+  },
+  bomb: {
+    id: 'bomb',
+    label: 'Plant & Defuse',
+    blurb: 'Carry the bomb to a rival nest. Then survive the clock.',
+    maxPlayers: 4,
+    minPlayers: 2,
+    arena: 40,
+    matchTime: 300,
+    killLimit: 0,
+    bomb: true,
+    ranked: false,
+    bomberEnabled: false, // one bomb at a time is enough tension
+    bomberFirstSpawn: 999,
+    fillWithBots: true,
+    modifiers: true,
+  },
   ranked: {
     id: 'ranked',
     label: 'Ranked',
@@ -257,6 +289,7 @@ export const MODES = {
     id: 'duel',
     label: '1v1',
     blurb: 'Tight arena, two chickens, one survives.',
+    arenaScale: 0.68, // a duel on The Big Yard would be two chickens jogging
     maxPlayers: 2,
     minPlayers: 2,
     arena: 26,
@@ -270,7 +303,9 @@ export const MODES = {
   },
 };
 
-export const MODE_LIST = ['casual', 'teams', 'hill', 'survival', 'ranked', 'deathmatch', 'duel'];
+export const MODE_LIST = [
+  'casual', 'heist', 'bomb', 'teams', 'hill', 'survival', 'ranked', 'deathmatch', 'duel',
+];
 
 // Team play. Seats 0 and 3 hold the west corners, 1 and 2 the east ones, so a
 // team always spawns down one side rather than diagonally across the arena.
@@ -286,6 +321,12 @@ export const HILL = {
   // most of the time, so the target has to be a small fraction of the match.
   target: 25,
   rate: 1,          // points per second, uncontested
+  // The zone relocates so a match isn't one long grind over the same tile.
+  // This has to be well under `target` or the mechanic never fires: at 30s a
+  // solo holder wins at 25 and the zone sits in the middle for the whole match.
+  moveEvery: 18,    // seconds between relocations
+  warnAt: 4,        // seconds of warning before it moves
+  spread: 0.55,     // how far from centre it may land, as a share of the half-extent
 };
 
 // Last Chicken Standing: the safe area closes in, which forces the fight to a
@@ -388,6 +429,11 @@ export const MODIFIERS = {
     blurb: 'Everyone fires like they found the gold egg.',
     fireCooldownMul: 0.34,
   },
+  potato: {
+    id: 'potato',
+    label: 'HOT POTATO',
+    blurb: 'A cursed egg. Touch someone to hand it on, fast.',
+  },
   frenzy: {
     id: 'frenzy',
     label: 'BOMBER FRENZY',
@@ -401,7 +447,7 @@ export const MODIFIERS = {
 // twists stop feeling like an event.
 export const MODIFIER_POOL = [
   'none', 'none',
-  'darkness', 'lowGravity', 'doubleDamage', 'suddenDeath', 'trigger', 'frenzy',
+  'darkness', 'lowGravity', 'doubleDamage', 'suddenDeath', 'trigger', 'frenzy', 'potato',
 ];
 
 /** Multiplier lookup that tolerates an unknown or missing modifier. */
@@ -409,3 +455,213 @@ export function modValue(modifier, key, fallback = 1) {
   const m = MODIFIERS[modifier];
   return m && typeof m[key] === 'number' ? m[key] : fallback;
 }
+
+// ------------------------------------------------------------------ MAPS
+//
+// Deliberately shallow for now: size and palette only. Real map identity needs
+// cover to fight around, and cover needs bot obstacle avoidance — so that is a
+// separate job. These exist so the vote has something meaningful to choose
+// between, and arena size alone genuinely changes how a match plays.
+export const MAPS = {
+  coop: {
+    id: 'coop',
+    label: 'The Coop',
+    blurb: 'The original yard. Balanced.',
+    size: 40,
+    floor: '#3f6fd8',
+    trim: '#9aa6c4',
+  },
+  squeeze: {
+    id: 'squeeze',
+    label: 'Tight Squeeze',
+    blurb: 'Small and vicious. Nowhere to hide.',
+    size: 28,
+    floor: '#8f3fd8',
+    trim: '#b49ac4',
+  },
+  yard: {
+    id: 'yard',
+    label: 'The Big Yard',
+    blurb: 'Room to run. Bring your legs.',
+    size: 54,
+    floor: '#2f9e6f',
+    trim: '#9ac4b4',
+  },
+  dusk: {
+    id: 'dusk',
+    label: 'Dusk Pen',
+    blurb: 'Dim and rusty. Follow the tracers.',
+    size: 40,
+    floor: '#a8452f',
+    trim: '#c49a8a',
+  },
+  frost: {
+    id: 'frost',
+    label: 'Frost Roost',
+    blurb: 'Cold, pale and open.',
+    size: 46,
+    floor: '#4a7fa8',
+    trim: '#c9d8e4',
+  },
+};
+
+export const MAP_LIST = Object.keys(MAPS);
+export const DEFAULT_MAP = 'coop';
+
+export const MAP_VOTE = {
+  candidates: 3,   // choices offered
+  seconds: 14,     // hard ceiling on the lobby
+  minSeconds: 4,   // never flash past, even if everyone votes instantly
+};
+
+/** Picks `n` distinct maps using the world RNG, so a seed reproduces the vote. */
+export function pickMapCandidates(rand, n = MAP_VOTE.candidates) {
+  const pool = [...MAP_LIST];
+  const out = [];
+  while (out.length < Math.min(n, pool.length)) {
+    out.push(pool.splice(Math.floor(rand() * pool.length), 1)[0]);
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------- BOUNTY
+//
+// The player in front wears a crown and is worth more. A comeback lever: it
+// stops a runaway leader and it hands everyone else a shared target, which is
+// where the stories come from.
+export const BOUNTY = {
+  enabled: true,
+  multiplier: 3,     // score for killing the crowned chicken
+  minScore: 150,     // no crown until someone is actually ahead
+  minLead: 100,      // and clearly ahead of second place
+  recheck: 2,        // seconds between recalculations
+};
+
+// ------------------------------------------------------------ HOT POTATO
+//
+// A cursed egg that burns whoever is carrying it. Touch someone to pass it on.
+// It inverts the whole game — suddenly you are chasing people to make contact
+// rather than to shoot them.
+export const POTATO = {
+  firstSpawn: 8,
+  dps: 11,           // damage per second to the holder
+  fuse: 12,          // seconds before it detonates on whoever is holding it
+  blastDamage: 55,
+  passRadius: 1.7,   // how close you must get to hand it over
+  passCooldown: 0.6, // stops it ping-ponging between two touching players
+  respawnDelay: 6,
+};
+
+// -------------------------------------------------------------- CONTRACTS
+//
+// Rotating personal side-tasks. This is the cheapest way to make a match feel
+// purposeful: it is a counting layer over events the simulation already emits,
+// it works in every mode including plain deathmatch, and it quietly teaches
+// players the systems they would otherwise never discover.
+//
+// Each contract declares EITHER `onEvent` (count things that happened) or
+// `onTick` (accumulate time under a condition) — never both.
+export const CONTRACT = {
+  duration: 45,     // seconds before an unfinished contract rotates out
+  gap: 4,           // breather between contracts
+  reward: 120,      // score for completing one
+};
+
+export const CONTRACTS = {
+  doubleKill: {
+    id: 'doubleKill',
+    label: 'Clean 2 chickens',
+    target: 2,
+    onEvent: (e, p) => (e.type === 'kill' && e.by === p.id ? 1 : 0),
+  },
+  bomberDown: {
+    id: 'bomberDown',
+    label: 'Defuse the bomber',
+    target: 1,
+    onEvent: (e, p) => (e.type === 'bomberDown' && e.by === p.id ? 1 : 0),
+  },
+  scavenge: {
+    id: 'scavenge',
+    label: 'Grab 3 pickups',
+    target: 3,
+    onEvent: (e, p) => (e.type === 'pickupTaken' && e.by === p.id ? 1 : 0),
+  },
+  arsonist: {
+    id: 'arsonist',
+    label: 'Set 2 chickens alight',
+    target: 2,
+    onEvent: (e, p) => (e.type === 'ignite' && e.by === p.id ? 1 : 0),
+  },
+  trickshot: {
+    id: 'trickshot',
+    label: 'Ricochet 3 rounds',
+    target: 3,
+    onEvent: (e, p) => (e.type === 'bounce' && e.owner === p.id ? 1 : 0),
+  },
+  regicide: {
+    id: 'regicide',
+    label: 'Take down the crown',
+    target: 1,
+    onEvent: (e, p) => (e.type === 'kill' && e.by === p.id && e.bounty ? 1 : 0),
+  },
+  survivor: {
+    id: 'survivor',
+    label: 'Survive 25 seconds',
+    target: 25,
+    // Resets on death, so it is a genuine streak rather than a stopwatch.
+    onTick: (p, world, dt) => (p.alive ? dt : -Infinity),
+  },
+  holdGround: {
+    id: 'holdGround',
+    label: 'Hold the middle for 8s',
+    target: 8,
+    onTick: (p, world, dt) => {
+      const hx = world.hill?.x ?? 0;
+      const hz = world.hill?.z ?? 0;
+      const inside = (p.x - hx) ** 2 + (p.z - hz) ** 2 <= HILL.radius * HILL.radius;
+      return p.alive && inside ? dt : 0;
+    },
+  },
+};
+
+export const CONTRACT_LIST = Object.keys(CONTRACTS);
+
+// ------------------------------------------------------------- EGG HEIST
+//
+// Every nest starts with four eggs. Steal from anyone, carry them home.
+//
+// Carrying is deliberately expensive: each egg slows you and lights you up, so
+// a full load makes you a slow glowing target. That is the whole risk/reward,
+// and it stops the leader simply hoarding. Eggs drop where you fall rather than
+// teleporting home, which turns a death into a scramble.
+export const HEIST = {
+  eggsPerNest: 4,
+  nestRadius: 2.6,
+  stealCooldown: 0.7,   // between individual eggs, so a nest isn't emptied instantly
+  carrySlow: 0.08,      // speed lost per egg carried
+  maxCarrySlow: 0.34,   // ...capped, or four eggs would be unplayable
+  dropSpread: 1.4,      // how far dropped eggs scatter
+  returnAfter: 15,      // loose eggs go home rather than littering the map
+  depositScore: 60,     // points for banking one
+  stealScore: 15,       // a little for the theft itself, most for getting home
+};
+
+// ------------------------------------------------------ BOMB PLANT/DEFUSE
+//
+// The defuse race: everyone knows exactly where to be and exactly how long they
+// have. Plant it in someone else's nest, then survive the countdown while they
+// try to reach it.
+export const BOMB = {
+  pickupRadius: 1.5,
+  plantRadius: 3.0,     // how close to a nest you must be to plant
+  plantTime: 2.5,       // seconds of holding still to plant
+  defuseTime: 3,        // seconds of holding still to defuse
+  fuse: 12,             // countdown once planted
+  blastRadius: 9,
+  blastDamage: 85,
+  plantScore: 150,
+  defuseScore: 200,     // defusing is harder, and pays more
+  detonateScore: 250,
+  respawnDelay: 8,
+  carrySlow: 0.12,      // the bomb is heavy
+};

@@ -71,8 +71,10 @@ naive point test would tunnel straight through a 0.6-radius chicken.
 | Mode | Players | Rules |
 |---|---|---|
 | **Casual** | 4 | Free-for-all, 4 min, bots fill empty seats |
+| **Egg Heist** | 4 | Four eggs per nest. Steal theirs, bank yours, most eggs at the whistle wins |
+| **Plant & Defuse** | 4 | Carry the bomb into a rival nest, hold to plant, then survive the fuse |
 | **2v2 Teams** | 4 | Blue vs Red, friendly fire off, first team to 20 kills |
-| **King of the Coop** | 4 | Hold the centre for 25 uncontested seconds |
+| **King of the Coop** | 4 | Hold the zone for 25 uncontested seconds — and it moves every 18 |
 | **Last Chicken** | 4 | One life each, and the arena closes in around you |
 | **Ranked** | 4 | Free-for-all, Elo on the line, humans only |
 | **Deathmatch** | 4 | Endless respawns, first to 15 kills |
@@ -86,8 +88,25 @@ entry in `MODES`, not a new system.
 a team spawns down one side rather than diagonally across the map. Bullets pass
 *through* team-mates rather than being absorbed, so a partner can't body-block you.
 
+**Egg Heist** is decided by what is sitting in your nest at the final whistle,
+not by score — so a raid in the closing seconds can take the whole match. Eggs
+are stolen one at a time on a cooldown, so a nest can actually be defended;
+carrying slows you down, so hoarding is punished; and dying scatters your load
+on the floor rather than sending it home, so shooting the carrier is worth it.
+Abandoned eggs walk themselves back after 15 seconds so a stalemate can't strand
+them.
+
+**Plant & Defuse** has one bomb. Both planting and defusing mean standing still
+and holding, which turns it into a fight over a place rather than a race to
+touch a thing. Only the nest's owner can defuse, and only nests belonging to a
+present player can be planted in — otherwise an empty corner would be a free,
+undefusable win.
+
 **King of the Coop** only scores while one side is alone in the zone. Two players
 from different sides cancel out, so the point has to be cleared, not just reached.
+The zone relocates every 18 seconds with a 4-second warning. That has to be well
+under the 25-second win target or the mechanic never fires at all — at 30 seconds
+a solo holder wins before the zone ever moves.
 
 **Last Chicken** shrinks the safe area from half-extent 20 down to 7, starting 8
 seconds in. Players are clamped to the boundary, so it physically herds everyone
@@ -98,6 +117,34 @@ number.
 Rating is placement-based Elo: finishing above someone counts as beating them,
 scaled so a 4-player match moves your rating about as much as one duel would.
 It lives in `localStorage` and is sent to the server on join.
+
+## Contracts
+
+Every player carries a rotating personal side-task, shown as a strip along the
+bottom of the screen: 45 seconds to finish it, a 4-second gap, then a new one.
+They run in every mode, so there is always something to chase even when you are
+losing the actual match.
+
+| | Goal |
+|---|---|
+| **Clean 2 chickens** | 2 kills |
+| **Defuse the bomber** | Take the bomber down |
+| **Scavenger** | Grab 3 pickups |
+| **Arsonist** | Set 2 chickens alight |
+| **Trick shot** | Land a hit after a ricochet |
+| **Regicide** | Kill the marked chicken |
+| **Survive 25 seconds** | Stay alive — dying resets it |
+| **Hold the middle for 8s** | Stand in the centre |
+
+The system is deliberately a pure counting layer: `stepContracts` runs last in
+the tick and reads the events that tick already produced, so adding a contract
+is an entry in `CONTRACTS` rather than a hook threaded through combat. Each one
+defines *either* `onEvent(e, p)` or `onTick(p, world, dt)` — never both. An
+`onTick` returning `-Infinity` is the "streak broken" signal, which is how
+"survive 25 seconds" resets when you die instead of accumulating across a dozen
+lives.
+
+You never get the same contract twice in a row.
 
 ## Match modifiers
 
@@ -322,7 +369,7 @@ npm install -D playwright && npx playwright install chromium
 
 | Suite | Covers |
 |---|---|
-| `test:sim` | Mode win conditions, friendly fire, hill scoring and contest, the shrinking zone, every modifier's effect, aim assist, all three ammo types |
+| `test:sim` | Mode win conditions, friendly fire, hill scoring and contest, the shrinking zone, every modifier's effect, aim assist, all three ammo types, and every objective system — contracts, Egg Heist, Plant & Defuse, the rotating hill, Hot Potato |
 | `smoke` | Two real clients: state sync, input acks, chat rate-limiting, **match clock drift** |
 | `test:seats` | Seat allocation and bot eviction when a human joins |
 | `test:rooms` | Room-code isolation — a stranger must not reach a private match |
@@ -334,6 +381,14 @@ npm install -D playwright && npx playwright install chromium
 | `test:audio` | Context unlock, cue routing, fuse cadence, mute and volume persistence |
 | `test:perf` | Draw-call and material counts, thin instances, graphics settings |
 | `test:stats` | Server status panel and the in-game network readout |
+| `test:tasks` | Both new modes end-to-end in a browser: nests and eggs render, the bomb is pickable, the contract strip names and counts its task, the zone marker follows a relocation |
+
+Two of the browser objective checks drive the *local player* onto the bomb and
+the potato rather than waiting for a bot to blunder into a 1.5-unit radius. That
+is deliberate: bots use global `Math.random`, so waiting on one is a coin flip
+inside a test window, and the path worth proving in a browser is the player's
+own — touch it, and the HUD has to say so. The rules themselves are covered
+deterministically in `shared/test/tasks.mjs`.
 
 `test:touch` is not optional cover. Every other browser test drives WASD and the
 mouse, which never touches nipplejs — a change in its listener signature once
@@ -604,6 +659,13 @@ bugs. Don't "clean them up" without checking:
   Best-of-N rounds would be the proper fix.
 - Performance work is verified by draw-call and material counts, not by profiling
   on real low-end hardware. The counts are real; the frame-time win is inferred.
+- **Egg Heist and Plant & Defuse have not been played by humans yet.** The rules
+  are covered by tests and the bots exercise them, but the tuning numbers
+  (`HEIST`, `BOMB` in `constants.js`) are first guesses. Plant and defuse times
+  in particular are the kind of thing only real matches settle.
+- Both new modes give every seat a nest, including corners nobody occupies. In
+  Egg Heist an empty corner is a free four-egg pile for whoever walks over first;
+  in Plant & Defuse it is skipped as a plant target, but it still gets drawn.
 
 ## Roadmap
 

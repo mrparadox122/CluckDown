@@ -3,9 +3,11 @@ import {
   createWorld, addPlayer, removePlayer, applyInput, stepWorld,
   stepBots, initBot, botName,
   MODES, TICK_HZ, TICK_DT, PATCH_MS, MAX_CATCHUP, QUICK_CHAT, PLAYER, cleanRoomCode,
-  hillProgress,
+  hillProgress, castVote, voteTally, beginMatch, MAP_VOTE, contractInfo, BOMB,
 } from '@cluckdown/shared';
-import { ArenaState, PlayerState, PickupState } from './state.js';
+import {
+  ArenaState, PlayerState, PickupState, MapChoiceState, NestState, EggState,
+} from './state.js';
 import { ratingDeltas } from '../rating.js';
 import { roomOpened, roomClosed, roomPopulation } from '../stats.js';
 
@@ -41,6 +43,13 @@ export class ArenaRoom extends Room {
     state.clock = this.world.clock;
     state.arenaSize = this.cfg.arena;
     state.safeHalf = this.world.safeHalf;
+    state.map = this.world.map;
+    for (const id of this.world.mapCandidates) {
+      const c = new MapChoiceState();
+      c.id = id;
+      c.votes = 0;
+      state.mapChoices.push(c);
+    }
     state.killLimit = this.cfg.killLimit;
     this.setState(state);
 
@@ -52,6 +61,16 @@ export class ArenaRoom extends Room {
     });
 
     this.onMessage('chat', (client, msg) => this.handleChat(client, msg));
+
+    this.onMessage('vote', (client, mapId) => {
+      if (!castVote(this.world, client.sessionId, String(mapId ?? ''))) return;
+      this.syncVotes();
+      // Everyone has spoken — no reason to make them sit out the timer, as long
+      // as the lobby has been up long enough to actually be seen.
+      if (this.world.lobbyTime >= MAP_VOTE.minSeconds && this.everyoneVoted()) {
+        this.closeLobby();
+      }
+    });
 
     // Round-trip probe. Echoing the client's own timestamp back means the
     // server needs no clock agreement and the client can measure RTT exactly.
@@ -273,8 +292,60 @@ export class ArenaRoom extends Room {
     }
   }
 
+  // ------------------------------------------------------------------ lobby
+
+  everyoneVoted() {
+    const humans = [...this.world.players.values()].filter((p) => !p.isBot);
+    return humans.length > 0 && humans.every((p) => this.world.votes.has(p.id));
+  }
+
+  syncVotes() {
+    const counts = voteTally(this.world);
+    for (const c of this.state.mapChoices) c.votes = counts[c.id] ?? 0;
+  }
+
+  closeLobby() {
+    if (this.world.phase !== 'lobby') return;
+    // Bots vote too, so a solo player still sees a real tally rather than a
+    // one-horse race — and a lobby with nobody voting still resolves.
+    for (const p of this.world.players.values()) {
+      if (p.isBot && !this.world.votes.has(p.id)) {
+        const pick = this.world.mapCandidates[
+          Math.floor(Math.random() * this.world.mapCandidates.length)
+        ];
+        castVote(this.world, p.id, pick);
+      }
+    }
+    this.syncVotes();
+    const map = beginMatch(this.world);
+    this.broadcast('mapChosen', { map, votes: voteTally(this.world) });
+  }
+
   /** One fixed-size simulation step. */
   stepOnce(dt) {
+    if (this.world.phase === 'lobby') {
+      // The sim owns the lobby clock, so it has to be stepped even though no
+      // gameplay runs during a lobby — stepWorld returns immediately after
+      // advancing lobbyTime. Skipping it froze the timer at zero, which meant
+      // neither the timeout nor the everyone-voted early close could ever fire.
+      stepWorld(this.world, dt);
+
+      // Bots are pulled in early so the vote isn't decided by one person, and
+      // so the lobby shows a full roster.
+      if (this.cfg.fillWithBots && this.world.players.size < this.cfg.maxPlayers) {
+        this.botFillAt -= dt;
+        if (this.botFillAt <= 0) this.fillWithBots();
+      }
+      // Checked every tick, not only when a vote arrives: if everyone votes
+      // before the minimum lobby duration is up, the vote handler's check has
+      // already been and gone, and the lobby would sit out the whole timeout.
+      if (this.world.lobbyTime >= MAP_VOTE.seconds
+          || (this.world.lobbyTime >= MAP_VOTE.minSeconds && this.everyoneVoted())) {
+        this.closeLobby();
+      }
+      return;
+    }
+
     if (this.world.phase === 'over') {
       this.postMatch -= dt;
       if (this.postMatch <= 0 && !this.disconnecting) {
@@ -395,6 +466,14 @@ export class ArenaRoom extends Room {
     ps.respawnIn = p.alive ? 0 : Math.max(0, p.respawnAt - this.world.time);
     ps.ack = p.lastSeq >>> 0;
     ps.bot = !!p.isBot;
+    ps.carrying = p.carrying ?? 0;
+
+    const contract = contractInfo(p);
+    ps.contract = contract?.id ?? '';
+    ps.contractLabel = contract?.label ?? '';
+    ps.contractAt = contract?.secondsLeft ?? 0;
+    ps.contractGoal = contract?.target ?? 0;
+    ps.contractDone = contract?.progress ?? 0;
   }
 
   syncState() {
@@ -402,13 +481,34 @@ export class ArenaRoom extends Room {
     s.phase = this.world.phase;
     s.clock = this.world.clock;
     s.safeHalf = this.world.safeHalf;
+    // Set every tick, not just at creation: the voted map changes it.
+    s.arenaSize = this.world.arena.size;
+    s.map = this.world.map;
+    s.lobbyTime = this.world.lobbyTime;
+    s.bounty = this.world.bounty ?? '';
+
+    const pot = this.world.potato;
+    s.potatoActive = !!pot;
+    if (pot) {
+      s.potatoX = pot.x;
+      s.potatoZ = pot.z;
+      s.potatoFuse = Math.max(0, pot.fuse);
+      s.potatoHolder = pot.holder ?? '';
+    }
     if (this.world.teamScores) {
       [s.teamBlue, s.teamRed] = this.world.teamScores;
     }
     if (this.world.hill) {
       s.hillHolder = this.world.hill.holder ?? '';
       s.hillContested = this.world.hill.contested;
+      s.hillX = this.world.hill.x;
+      s.hillZ = this.world.hill.z;
+      s.hillMoveAt = Math.max(0, this.world.hill.moveAt);
     }
+
+    this.syncNests();
+    this.syncEggs();
+    this.syncBomb();
 
     for (const [id, p] of this.world.players) {
       let ps = s.players.get(id);
@@ -447,6 +547,82 @@ export class ArenaRoom extends Room {
       s.bomber.phase = b.state;
       s.bomber.fuse = Math.max(0, b.fuse);
     }
+  }
+
+  /**
+   * Nests are created once and then only their egg count changes — they sit on
+   * the spawn corners, which are fixed for the whole match.
+   */
+  syncNests() {
+    const nests = this.world.nests;
+    if (!nests) return;
+
+    if (this.state.nests.length !== nests.length) {
+      this.state.nests.clear();
+      for (const n of nests) {
+        const ns = new NestState();
+        ns.seat = n.seat;
+        ns.x = n.x;
+        ns.z = n.z;
+        ns.eggs = n.eggs;
+        this.state.nests.push(ns);
+      }
+      return;
+    }
+    for (let i = 0; i < nests.length; i++) {
+      const ns = this.state.nests[i];
+      ns.eggs = nests[i].eggs;
+      ns.x = nests[i].x;
+      ns.z = nests[i].z;
+    }
+  }
+
+  syncEggs() {
+    const eggs = this.world.looseEggs;
+    if (!eggs) return;
+
+    const live = new Set();
+    for (const egg of eggs) {
+      const key = String(egg.id);
+      live.add(key);
+      let es = this.state.eggs.get(key);
+      if (!es) {
+        es = new EggState();
+        es.x = egg.x;
+        es.z = egg.z;
+        es.seat = egg.fromSeat;
+        this.state.eggs.set(key, es);
+      }
+      es.returnAt = Math.max(0, egg.returnAt);
+    }
+    for (const key of [...this.state.eggs.keys()]) {
+      if (!live.has(key)) this.state.eggs.delete(key);
+    }
+  }
+
+  syncBomb() {
+    if (!this.cfg.bomb) return;
+    const s = this.state;
+    const bomb = this.world.bomb;
+
+    if (!bomb) {
+      s.bombState = '';
+      s.bombCarrier = '';
+      s.bombSeat = -1;
+      s.bombPlant = 0;
+      s.bombDefuse = 0;
+      return;
+    }
+    s.bombState = bomb.state;
+    s.bombX = bomb.x;
+    s.bombZ = bomb.z;
+    s.bombCarrier = bomb.carriedBy ?? '';
+    s.bombSeat = bomb.state === 'planted' ? bomb.plantSeat : -1;
+    s.bombFuse = Math.max(0, bomb.fuse);
+    // Sent as a 0..1 share so the client can draw a ring without knowing the
+    // hold durations.
+    s.bombPlant = Math.min(1, bomb.plant / BOMB.plantTime);
+    s.bombDefuse = Math.min(1, bomb.defuse / BOMB.defuseTime);
   }
 }
 

@@ -9,6 +9,7 @@
 //   node client/test/private.mjs
 
 import { chromium } from 'playwright';
+import { passLobby } from './_lobby.mjs';
 
 const URL = process.env.UI_URL || 'http://localhost:5173';
 const failures = [];
@@ -37,6 +38,7 @@ const host = await openClient('Host');
 await host.click('#friends-box summary');
 await host.waitForTimeout(200);
 await host.click('#create-private');
+await passLobby(host);
 await host.waitForTimeout(6000);
 
 const hostState = await host.evaluate(() => ({
@@ -62,6 +64,7 @@ await friend.click('#friends-box summary');
 await friend.waitForTimeout(200);
 await friend.fill('#join-code', code.toLowerCase()); // lowercase on purpose
 await friend.click('#join-code-btn');
+await passLobby(friend);
 await friend.waitForTimeout(6000);
 
 const friendState = await friend.evaluate(() => ({
@@ -90,6 +93,7 @@ check('both humans are in the same match', roster.includes('Host') && roster.inc
 console.log('\n--- stranger ---');
 const stranger = await openClient('Stranger');
 await stranger.click('#play-btn');
+await passLobby(stranger);
 await stranger.waitForTimeout(6000);
 const strangerRoom = await stranger.evaluate(() => window.__cluckdown?.session?.room?.roomId ?? null);
 console.log('  stranger room:', strangerRoom, 'private room:', hostState.roomId);

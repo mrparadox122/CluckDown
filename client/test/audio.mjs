@@ -11,6 +11,7 @@
 //   node client/test/audio.mjs
 
 import { chromium } from 'playwright';
+import { passLobby } from './_lobby.mjs';
 
 const URL = process.env.UI_URL || 'http://localhost:5173';
 const failures = [];
@@ -68,6 +69,7 @@ check('no AudioContext is created before a gesture', cold.hasCtx === false);
 // A click is a real user gesture.
 await page.fill('#name-input', 'Beaky');
 await page.click('#practice-btn');
+await passLobby(page);
 await page.waitForTimeout(600);
 
 const warm = await sfxState();

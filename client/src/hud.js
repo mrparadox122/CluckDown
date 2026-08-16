@@ -1,5 +1,5 @@
 import {
-  QUICK_CHAT, PLAYER, MODES, MULTIKILL_NAMES, MODIFIERS, TEAM_NAMES,
+  QUICK_CHAT, PLAYER, MODES, MULTIKILL_NAMES, MODIFIERS, TEAM_NAMES, HILL,
 } from '@cluckdown/shared';
 
 const $ = (id) => document.getElementById(id);
@@ -42,6 +42,7 @@ export class Hud {
     this.touchHint = $('touch-hint');
     this.netStatsEl = $('netstats');
     this.objectiveEl = $('objective');
+    this.contractEl = $('contract');
     this.roomChip = $('room-chip');
     this.onChat = onChat;
     // Compact by default; expanded shows the full breakdown.
@@ -77,10 +78,13 @@ export class Hud {
     this.touchHint.style.opacity = '';
     this.netStatsEl.replaceChildren();
     this.objectiveEl.classList.add('hidden');
+    this.contractEl.classList.add('hidden');
+    this.contractShown = null;
     this.roomChip.classList.add('hidden');
   }
 
   setMode(mode, modifier = 'none') {
+    this.modeId = mode;
     this.modePill.textContent = MODES[mode]?.label ?? mode;
 
     // A persistent badge, because the opening announcement scrolls away and
@@ -102,8 +106,56 @@ export class Hud {
    * Mode-specific readout under the clock: team score, or your hold on the hill.
    * Hidden entirely in free-for-all so it costs nothing there.
    */
-  setObjective({ teamScores, hill, self }) {
+  setObjective({ teamScores, hill, nests, bomb, self, players }) {
     const el = this.objectiveEl;
+
+    // Egg Heist: the standings ARE the nests, so show all four counts. Nothing
+    // else in the mode tells you whether you are winning.
+    if (nests?.length) {
+      el.classList.remove('hidden');
+      el.classList.remove('contested');
+      el.replaceChildren();
+      const row = el2('div', 'nest-row');
+      for (const nest of [...nests].sort((a, b) => a.seat - b.seat)) {
+        const owner = players?.find((pp) => pp.seat % 4 === nest.seat);
+        const cell = el2('div', `nest-count${owner?.isSelf ? ' mine' : ''}`, String(nest.eggs));
+        cell.style.setProperty('--seat', owner?.color ?? '#9aa6c4');
+        cell.title = owner ? `${owner.name}'s nest` : 'Empty corner';
+        row.append(cell);
+      }
+      el.append(row);
+      if (self?.carrying > 0) el.append(el2('span', 'carrying', `Carrying ${self.carrying}`));
+      return;
+    }
+
+    // Plant & Defuse: one line that says what the bomb is doing right now.
+    if (MODES[this.modeId]?.bomb) {
+      if (!bomb) { el.classList.add('hidden'); return; }
+      el.classList.remove('hidden');
+      el.replaceChildren();
+      const planted = bomb.state === 'planted';
+      el.classList.toggle('contested', planted);
+      if (planted) {
+        const victim = players?.find((pp) => pp.seat % 4 === bomb.plantSeat);
+        el.append(el2('span', 'bomb-label', `\u{1F4A3} ${Math.ceil(bomb.fuse)}s`));
+        el.append(el2('span', 'hill-label', victim ? `in ${victim.name}'s nest` : 'planted'));
+      } else if (bomb.carriedBy) {
+        const who = players?.find((pp) => pp.id === bomb.carriedBy);
+        el.append(el2('span', 'bomb-label',
+          who?.isSelf ? '\u{1F4A3} You have the bomb' : `\u{1F4A3} ${who?.name ?? 'Someone'} has it`));
+        if (bomb.plant > 0) {
+          const meter = el2('div', 'hill-meter');
+          const fill = el2('i');
+          fill.style.transform = `scaleX(${bomb.plant})`;
+          meter.append(fill);
+          el.append(meter);
+        }
+      } else {
+        el.append(el2('span', 'bomb-label', '\u{1F4A3} Bomb is loose'));
+      }
+      return;
+    }
+
     if (!teamScores && !hill) { el.classList.add('hidden'); return; }
     el.classList.remove('hidden');
     el.replaceChildren();
@@ -120,12 +172,60 @@ export class Hud {
     }
 
     el.classList.toggle('contested', !!hill.contested);
-    const label = hill.contested ? 'Contested' : (hill.holder ? 'Held' : 'Open');
+    // A relocation warning outranks who currently holds it: in the next few
+    // seconds, holding it stops mattering.
+    const moving = hill.moveAt !== undefined && hill.moveAt !== null && hill.moveAt <= HILL.warnAt;
+    el.classList.toggle('moving', moving);
+    const label = moving
+      ? `Moving in ${Math.ceil(hill.moveAt)}`
+      : (hill.contested ? 'Contested' : (hill.holder ? 'Held' : 'Open'));
     const meter = el2('div', 'hill-meter');
     const fill = el2('i');
     fill.style.transform = `scaleX(${Math.max(0, Math.min(1, self?.hillPct ?? 0))})`;
     meter.append(fill);
     el.append(el2('span', 'hill-label', label), meter);
+  }
+
+  /**
+   * Your current side-task.
+   *
+   * Rebuilt only when the contract itself changes; the progress bar and
+   * countdown are mutated in place, because this runs every frame and
+   * replaceChildren on every frame is exactly the kind of thing that costs
+   * frames on the phones this game is aimed at.
+   */
+  setContract(contract) {
+    const el = this.contractEl;
+    if (!contract) {
+      if (this.contractShown !== null) {
+        this.contractShown = null;
+        el.classList.add('hidden');
+        el.replaceChildren();
+      }
+      return;
+    }
+
+    if (this.contractShown !== contract.id) {
+      this.contractShown = contract.id;
+      el.classList.remove('hidden');
+      el.replaceChildren();
+      el.append(el2('span', 'contract-tag', 'TASK'));
+      this.contractLabel = el2('span', 'contract-label', contract.label);
+      this.contractMeter = el2('div', 'contract-meter');
+      this.contractFill = el2('i');
+      this.contractMeter.append(this.contractFill);
+      this.contractTime = el2('span', 'contract-time');
+      el.append(this.contractLabel, this.contractMeter, this.contractTime);
+      // Fresh contract: flash once so it is noticed without an announcement.
+      el.classList.remove('flash');
+      void el.offsetWidth; // restart the animation
+      el.classList.add('flash');
+    }
+
+    const pct = contract.target > 0 ? contract.progress / contract.target : 0;
+    this.contractFill.style.transform = `scaleX(${Math.max(0, Math.min(1, pct))})`;
+    this.contractTime.textContent = `${Math.ceil(contract.secondsLeft)}s`;
+    el.classList.toggle('urgent', contract.secondsLeft <= 10);
   }
 
   /**

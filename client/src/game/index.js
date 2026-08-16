@@ -2,12 +2,14 @@ import { Vector3, Matrix } from '@babylonjs/core/Maths/math';
 import {
   createStage, buildArena, buildHillZone, buildSafeZone, CameraRig, VIEW_LABELS,
 } from './scene.js';
-import { PlayerView, BomberView, PickupView } from './entities.js';
+import {
+  PlayerView, BomberView, PickupView, PotatoView, NestView, LooseEggView, BombView,
+} from './entities.js';
 import { BulletPool, DebrisPool, BlastRings, MuzzleFlash } from './fx.js';
 import { Controls } from './controls.js';
 import { sfx } from '../audio/sfx.js';
 import {
-  PLAYER, BULLET, BOMBER, MODIFIERS, MODES, HILL, modValue, clampUnit, clamp,
+  PLAYER, BULLET, BOMBER, MODIFIERS, MODES, HILL, BOMB, SEAT_COLORS, modValue, clampUnit, clamp,
 } from '@cluckdown/shared';
 
 // Matches the server's simulation rate: sending slower would leave most ticks
@@ -35,7 +37,9 @@ export class Game {
     this.camera = stage.camera;
     this.glow = stage.glow;
 
-    this.arena = buildArena(this.scene, session.arenaSize);
+    // Arena geometry and palette both come from the voted map.
+    this.map = session.map ?? 'coop';
+    this.arena = buildArena(this.scene, session.arenaSize, this.map);
     this.rig = new CameraRig(this.camera, session.arenaSize, this.engine);
     this.rig.setView(gfx?.view ?? 'close');
 
@@ -45,6 +49,12 @@ export class Game {
     this.safeZone = rules.shrink ? buildSafeZone(this.scene, session.arenaSize / 2) : null;
     this.lastSafeHalf = session.arenaSize / 2;
 
+    // Nests exist in both Egg Heist and Plant & Defuse, but only the heist
+    // fills them with eggs.
+    this.nests = new Map();
+    this.looseEggs = new Map();
+    this.bombView = rules.bomb ? new BombView(this.scene) : null;
+
     this.bullets = new BulletPool(this.scene, this.glow);
     this.debris = new DebrisPool(this.scene, this.glow, 90, modValue(this.modifier, 'debrisGravityMul'));
     this.blasts = new BlastRings(this.scene, this.glow);
@@ -53,6 +63,7 @@ export class Game {
     this.views = new Map();
     this.pickups = new Map();
     this.bomberView = new BomberView(this.scene);
+    this.potatoView = new PotatoView(this.scene);
 
     // Locally predicted position for our own chicken.
     this.pred = { x: 0, z: 0, aim: 0, has: false };
@@ -224,6 +235,136 @@ export class Game {
           sfx.play('pickupRapid');
           break;
         }
+        case 'bounty': {
+          if (e.target) {
+            this.hud.announce(e.target === self?.id ? 'YOU ARE MARKED' : `${e.name} IS MARKED`);
+            sfx.play('bomberSpawn');
+          }
+          break;
+        }
+        case 'potatoSpawn': {
+          this.hud.announce('HOT POTATO');
+          sfx.play('bomberSpawn');
+          this.debris.emit('gold', e.x, 1, e.z, 12, { speed: 7, up: 1.2, size: 0.3, life: 0.6 });
+          break;
+        }
+        case 'potatoPass': {
+          this.debris.emit('gold', e.x, 1.1, e.z, 8, { speed: 6, up: 1.1, size: 0.26, life: 0.45 });
+          sfx.play('pickupRapid');
+          if (self && e.to === self.id) this.hud.announce('YOU HAVE IT!');
+          break;
+        }
+        case 'potatoBlast': {
+          this.blasts.fire(e.x, e.z, 5);
+          this.debris.emit('gold', e.x, 0.8, e.z, 22, { speed: 13, up: 1.1, size: 0.45, life: 0.8 });
+          this.debris.feathers(e.x, 1.2, e.z, 10);
+          sfx.play('blast');
+          if (self && e.target === self.id) this.rig.addShake(0.9);
+          break;
+        }
+        // --- contracts
+        case 'contractNew': {
+          // No announcement: a new task arrives every 45s per player, and an
+          // announcer line that often becomes wallpaper. The strip flashes.
+          if (self && e.target === self.id) sfx.play('pickupRapid');
+          break;
+        }
+        case 'contractDone': {
+          if (self && e.target === self.id) {
+            this.hud.announce(`TASK COMPLETE  +${e.reward}`);
+            sfx.play('pickupHealth');
+            this.debris.emit('gold', self.x, 1.2, self.z, 14, {
+              speed: 7, up: 1.4, size: 0.3, life: 0.7, drag: 2,
+            });
+          }
+          break;
+        }
+
+        // --- Egg Heist
+        case 'eggSteal': {
+          this.debris.emit('white', e.x, 0.9, e.z, 6, { speed: 5, up: 1, size: 0.24, life: 0.45 });
+          sfx.play(self && e.by === self.id ? 'pickupRapid' : 'hit');
+          if (self && e.from === self.seat % 4 && e.by !== self.id) {
+            this.hud.announce('YOUR NEST IS BEING RAIDED');
+          }
+          break;
+        }
+        case 'eggDeposit': {
+          this.debris.emit('gold', e.x, 1, e.z, 10 + e.count * 3, {
+            speed: 7, up: 1.3, size: 0.3, life: 0.7, drag: 2,
+          });
+          sfx.play('pickupHealth');
+          if (self && e.by === self.id) this.hud.announce(`BANKED ${e.count}`);
+          break;
+        }
+        case 'eggDropped': {
+          this.debris.emit('white', e.x, 1, e.z, 8, { speed: 6, up: 1.1, size: 0.26, life: 0.5 });
+          break;
+        }
+        case 'eggPickup': {
+          this.debris.emit('white', e.x, 0.8, e.z, 4, { speed: 4, up: 0.9, size: 0.2, life: 0.35 });
+          if (self && e.by === self.id) sfx.play('pickupRapid');
+          break;
+        }
+        case 'eggReturned': {
+          this.debris.emit('white', e.x, 0.9, e.z, 5, { speed: 5, up: 1, size: 0.22, life: 0.4 });
+          break;
+        }
+
+        // --- Plant & Defuse
+        case 'bombSpawn': {
+          this.hud.announce('BOMB IS LOOSE');
+          sfx.play('bomberSpawn');
+          this.debris.emit('red', e.x, 0.8, e.z, 10, { speed: 6, up: 1.1, size: 0.3, life: 0.6 });
+          break;
+        }
+        case 'bombTaken': {
+          if (self && e.by === self.id) this.hud.announce('YOU HAVE THE BOMB');
+          sfx.play('pickupRapid');
+          break;
+        }
+        case 'bombPlanted': {
+          const mine = self && e.seat === self.seat % 4;
+          this.hud.announce(mine ? 'BOMB IN YOUR NEST — DEFUSE IT' : 'BOMB PLANTED');
+          sfx.play('bomberSpawn');
+          this.debris.emit('red', e.x, 0.8, e.z, 14, { speed: 8, up: 1.2, size: 0.34, life: 0.7 });
+          break;
+        }
+        case 'bombDefused': {
+          this.hud.announce('DEFUSED');
+          sfx.stopFuse();
+          sfx.play('bomberDown');
+          this.debris.emit('green', e.x, 0.9, e.z, 14, { speed: 7, up: 1.2, size: 0.3, life: 0.7 });
+          break;
+        }
+        case 'bombBlast': {
+          this.blasts.fire(e.x, e.z, e.radius);
+          sfx.stopFuse();
+          sfx.play('blast');
+          this.debris.emit('red', e.x, 0.6, e.z, 30, { speed: 16, up: 0.9, size: 0.55, life: 0.9, drag: 1.4 });
+          this.debris.emit('gold', e.x, 0.6, e.z, 16, { speed: 12, up: 1.2, size: 0.4, life: 0.75, drag: 1.6 });
+          if (self) {
+            const d = Math.hypot(self.x - e.x, self.z - e.z);
+            this.rig.addShake(Math.max(0, 1.2 * (1 - d / (e.radius * 2))));
+          }
+          break;
+        }
+
+        // --- rotating hill
+        case 'hillMoving': {
+          this.hud.announce(`ZONE MOVES IN ${e.inSeconds}`);
+          sfx.play('pickupRapid');
+          break;
+        }
+        case 'hillMoved': {
+          this.hud.announce('ZONE MOVED');
+          this.debris.emit('gold', e.x, 0.8, e.z, 16, {
+            speed: 8, up: 1.3, size: 0.32, life: 0.8, drag: 2,
+          });
+          sfx.play('bomberSpawn');
+          break;
+        }
+
         case 'bomberArm': {
           this.rig.addShake(0.1);
           break;
@@ -289,6 +430,7 @@ export class Game {
     this.syncBomber(dt);
 
     this.syncObjectives(dt, players);
+    this.potatoView.sync(this.session.potato, dt);
     this.bullets.update(dt);
     this.debris.update(dt);
     this.blasts.update(dt);
@@ -317,8 +459,12 @@ export class Game {
     this.hud.setObjective({
       teamScores: this.session.teamScores,
       hill: this.session.hill,
+      nests: MODES[this.session.mode]?.heist ? this.session.nests : null,
+      bomb: this.session.bomb,
       self,
+      players,
     });
+    this.hud.setContract(self?.contract ?? null);
     this.hud.setRespawn(self && !self.alive ? self.respawnIn : 0);
 
     // Refresh at 4Hz — this is a diagnostic, and rebuilding its DOM every
@@ -409,9 +555,13 @@ export class Game {
       const isSelf = p.isSelf;
       // Our own chicken uses the predicted transform; everyone else is
       // smoothed toward the last server position.
+      const crowned = this.session.bounty === p.id;
       const target = isSelf && this.pred.has
-        ? { x: this.pred.x, z: this.pred.z, aim: p.aim, invuln: p.invuln, rapid: p.rapid }
-        : p;
+        ? {
+          x: this.pred.x, z: this.pred.z, aim: p.aim,
+          invuln: p.invuln, rapid: p.rapid, burning: p.burning, bounty: crowned,
+        }
+        : { ...p, bounty: crowned };
 
       const moving = isSelf
         ? Math.hypot(this.controls.input.mx, this.controls.input.mz) > 0.1
@@ -441,14 +591,53 @@ export class Game {
     if (this.hillZone) {
       const hill = this.session.hill;
       const holder = hill?.holder ? players.find((p) => p.id === hill.holder) : null;
-      this.hillZone.update(dt, holder?.color ?? null, !!hill?.contested);
+      this.hillZone.update(
+        dt, holder?.color ?? null, !!hill?.contested,
+        hill?.x ?? 0, hill?.z ?? 0, hill?.moveAt ?? null,
+      );
     }
+
+    this.syncNests(dt, players);
+    this.syncEggs(dt);
+    if (this.bombView) this.bombView.sync(this.session.bomb, dt);
 
     if (this.safeZone) {
       const half = this.session.safeHalf;
       const closing = half < this.lastSafeHalf - 0.0005;
       this.safeZone.update(dt, half, closing);
       this.lastSafeHalf = half;
+    }
+  }
+
+  /** Nests are keyed by seat and coloured by their owner. */
+  syncNests(dt, players) {
+    const nests = this.session.nests ?? [];
+    for (const nest of nests) {
+      let view = this.nests.get(nest.seat);
+      if (!view) {
+        const owner = players.find((p) => p.seat % 4 === nest.seat);
+        view = new NestView(this.scene, nest, owner?.color ?? SEAT_COLORS[nest.seat]);
+        this.nests.set(nest.seat, view);
+      }
+      view.update(dt, nest);
+    }
+  }
+
+  syncEggs(dt) {
+    const seen = new Set();
+    for (const egg of this.session.looseEggs ?? []) {
+      seen.add(egg.id);
+      let view = this.looseEggs.get(egg.id);
+      if (!view) {
+        view = new LooseEggView(this.scene);
+        this.looseEggs.set(egg.id, view);
+      }
+      view.update(dt, egg);
+    }
+    for (const [id, view] of this.looseEggs) {
+      if (seen.has(id)) continue;
+      view.dispose();
+      this.looseEggs.delete(id);
     }
   }
 
@@ -474,13 +663,33 @@ export class Game {
     const b = this.session.bomber;
     if (!b) {
       this.bomberView.setActive(false);
-      sfx.stopFuse();
+      this.tickFuse();
       return;
     }
     this.bomberView.setActive(true);
     this.bomberView.sync(b, dt, Math.min(1, dt * 12));
-    // Beeps speed up as the fuse burns down; sfx owns the timing.
-    sfx.fuseTick(b.state === 'arm' ? b.fuse : null, BOMBER.fuse);
+    this.tickFuse(b);
+  }
+
+  /**
+   * Drives the accelerating beep from whichever fuse is running.
+   *
+   * An armed bomber and a planted bomb are the same signal to the player —
+   * something is about to go off nearby — so they share one voice rather than
+   * beeping over each other. The bomber wins when both are live, because it is
+   * the one that chases you.
+   */
+  tickFuse(bomber = null) {
+    if (bomber && bomber.state === 'arm') {
+      sfx.fuseTick(bomber.fuse, BOMBER.fuse);
+      return;
+    }
+    const bomb = this.session.bomb;
+    if (bomb?.state === 'planted') {
+      sfx.fuseTick(bomb.fuse, BOMB.fuse);
+      return;
+    }
+    sfx.stopFuse();
   }
 
   // --------------------------------------------------------------- cleanup
@@ -490,6 +699,9 @@ export class Game {
     this.disposed = true;
     window.removeEventListener('resize', this.onResize);
     this.controls.dispose();
+    for (const v of this.nests.values()) v.dispose();
+    for (const v of this.looseEggs.values()) v.dispose();
+    this.bombView?.dispose();
     sfx.stopFuse();
     this.engine.stopRenderLoop();
     this.scene.dispose();

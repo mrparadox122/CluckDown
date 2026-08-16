@@ -1,4 +1,5 @@
 import { chromium } from 'playwright';
+import { passLobby } from './_lobby.mjs';
 
 // Screenshots are diagnostics, not assertions. Under a loaded CPU the software
 // renderer can blow the default capture timeout, and that must not fail a run.
@@ -47,8 +48,10 @@ await shot(page, `${OUT}/02-menu-filled.png`);
 
 if (MODE === 'online') {
   await page.click('#play-btn');
+  await passLobby(page);
 } else {
   await page.click('#practice-btn');
+  await passLobby(page);
 }
 
 // Let the match run so bots fight, bomber spawns, pickups appear.

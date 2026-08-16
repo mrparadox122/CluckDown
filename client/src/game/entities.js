@@ -3,7 +3,7 @@ import { Mesh } from '@babylonjs/core/Meshes/mesh';
 import { VertexBuffer } from '@babylonjs/core/Buffers/buffer';
 import { Color3 } from '@babylonjs/core/Maths/math';
 import { emissiveMat, litMat } from './scene.js';
-import { BOMBER, AMMO } from '@cluckdown/shared';
+import { BOMBER, AMMO, POTATO, HEIST, BOMB } from '@cluckdown/shared';
 
 /**
  * A chicken, assembled from boxes then baked down to a SINGLE mesh.
@@ -120,6 +120,15 @@ export class PlayerView {
     this.flame.position.y = 1.0;
     this.flame.isPickable = false;
     this.flame.setEnabled(false);
+
+    // Bounty crown. A gold bar above the head reads instantly at this camera
+    // angle, and it doubles as "shoot this one".
+    this.crown = MeshBuilder.CreateBox('crown', { width: 0.62, height: 0.2, depth: 0.5 }, scene);
+    this.crown.material = emissiveMat(scene, 'crownMat', '#ffcc3d', { intensity: 1.0 });
+    this.crown.parent = this.root;
+    this.crown.position.y = 2.15;
+    this.crown.isPickable = false;
+    this.crown.setEnabled(false);
   }
 
   setVisible(v) {
@@ -180,6 +189,14 @@ export class PlayerView {
       if (target.burning) {
         this.flame.rotation.y += dt * 7;
         this.flame.scaling.setAll(0.9 + Math.abs(Math.sin(this.bob * 1.7)) * 0.35);
+      }
+    }
+
+    if (this.crown) {
+      this.crown.setEnabled(!!target.bounty);
+      if (target.bounty) {
+        this.crown.rotation.y += dt * 1.6;
+        this.crown.position.y = 2.15 + Math.sin(this.bob * 0.8) * 0.06;
       }
     }
 
@@ -280,4 +297,208 @@ export class PickupView {
   }
 
   dispose() { this.mesh.dispose(); }
+}
+
+
+/** The cursed egg from the Hot Potato modifier. */
+export class PotatoView {
+  constructor(scene) {
+    this.mesh = MeshBuilder.CreateSphere('potato', { diameter: 0.9, segments: 10 }, scene);
+    this.mesh.material = emissiveMat(scene, 'potatoMat', '#ff8a3d', { intensity: 1.0, cache: false });
+    this.mesh.isPickable = false;
+    this.mesh.setEnabled(false);
+
+    this.ring = MeshBuilder.CreateTorus('potatoRing', {
+      diameter: POTATO.passRadius * 2, thickness: 0.09, tessellation: 24,
+    }, scene);
+    this.ring.material = emissiveMat(scene, 'potatoRingMat', '#ff8a3d', { intensity: 1.0, cache: false });
+    this.ring.isPickable = false;
+    this.ring.setEnabled(false);
+
+    this.t = 0;
+  }
+
+  sync(pot, dt) {
+    const on = !!pot;
+    this.mesh.setEnabled(on);
+    this.ring.setEnabled(on);
+    if (!on) return;
+
+    this.t += dt;
+    // Strobes faster as the fuse burns down, so the panic scales with the timer.
+    const urgency = 1 - Math.max(0, Math.min(1, pot.fuse / POTATO.fuse));
+    const pulse = 1 + Math.abs(Math.sin(this.t * (4 + urgency * 22))) * 0.3;
+
+    this.mesh.position.set(pot.x, 1.15, pot.z);
+    this.mesh.scaling.setAll(pulse);
+    this.mesh.rotation.y += dt * 3;
+
+    // The ring shows exactly how close you must get to hand it on.
+    this.ring.position.set(pot.x, 0.12, pot.z);
+    this.ring.rotation.y += dt * 2;
+    this.ring.scaling.setAll(0.9 + urgency * 0.2);
+  }
+}
+
+/**
+ * A nest: home base in Egg Heist, plant site in Plant & Defuse.
+ *
+ * The eggs sitting in it are real meshes rather than a number on the HUD,
+ * because "their nest looks fat and mine looks empty" has to be readable from
+ * across the arena — that glance is what starts a raid.
+ */
+export class NestView {
+  constructor(scene, nest, color) {
+    this.scene = scene;
+    this.seat = nest.seat;
+    this.color = color;
+    this.eggs = [];
+    this.t = Math.random() * 6;
+
+    this.pad = MeshBuilder.CreateCylinder(`nestPad${nest.seat}`, {
+      diameter: HEIST.nestRadius * 2, height: 0.07, tessellation: 28,
+    }, scene);
+    this.pad.position.set(nest.x, 0.04, nest.z);
+    this.pad.material = emissiveMat(scene, `nestPadMat${nest.seat}`, color, {
+      intensity: 0.5, alpha: 0.18, cache: false,
+    });
+    this.pad.isPickable = false;
+
+    this.ring = MeshBuilder.CreateTorus(`nestRing${nest.seat}`, {
+      diameter: HEIST.nestRadius * 2, thickness: 0.14, tessellation: 30,
+    }, scene);
+    this.ring.position.set(nest.x, 0.09, nest.z);
+    this.ring.material = emissiveMat(scene, `nestRingMat${nest.seat}`, color, {
+      intensity: 1.0, cache: false,
+    });
+    this.ring.isPickable = false;
+  }
+
+  /** Grows or shrinks the pile to match the count, reusing meshes. */
+  setCount(n, x, z) {
+    while (this.eggs.length < n) {
+      const i = this.eggs.length;
+      const egg = MeshBuilder.CreateSphere(`nestEgg${this.seat}_${i}`, {
+        diameterX: 0.42, diameterY: 0.54, diameterZ: 0.42, segments: 8,
+      }, this.scene);
+      egg.material = emissiveMat(this.scene, 'eggMat', '#fff4d6', { intensity: 0.75 });
+      egg.isPickable = false;
+      this.eggs.push(egg);
+    }
+    while (this.eggs.length > n) this.eggs.pop().dispose();
+
+    // Spiral outward so a big pile still reads as individual eggs.
+    for (let i = 0; i < this.eggs.length; i++) {
+      const a = i * 2.399; // golden angle, so nothing lines up
+      const r = 0.28 + Math.sqrt(i) * 0.34;
+      this.eggs[i].position.set(x + Math.cos(a) * r, 0.32, z + Math.sin(a) * r);
+    }
+  }
+
+  update(dt, nest) {
+    this.t += dt;
+    this.pad.position.set(nest.x, 0.04, nest.z);
+    this.ring.position.set(nest.x, 0.09, nest.z);
+    this.ring.rotation.y += dt * 0.4;
+    // Breathe faster when the nest is nearly empty — that is when its owner
+    // most needs to notice it.
+    const panic = nest.eggs <= 1 ? 1 : 0;
+    this.pad.material.alpha = 0.14 + Math.abs(Math.sin(this.t * (1.2 + panic * 4))) * 0.12;
+    this.setCount(Math.min(nest.eggs, 12), nest.x, nest.z);
+  }
+
+  dispose() {
+    for (const e of this.eggs) e.dispose();
+    this.pad.dispose();
+    this.ring.dispose();
+  }
+}
+
+/** A single egg on the floor, dropped by a carrier who died. */
+export class LooseEggView {
+  constructor(scene) {
+    this.mesh = MeshBuilder.CreateSphere('looseEgg', {
+      diameterX: 0.46, diameterY: 0.58, diameterZ: 0.46, segments: 8,
+    }, scene);
+    this.mesh.material = emissiveMat(scene, 'looseEggMat', '#fff4d6', { intensity: 1.0, cache: false });
+    this.mesh.isPickable = false;
+    this.t = Math.random() * 6;
+  }
+
+  update(dt, egg) {
+    this.t += dt;
+    this.mesh.position.set(egg.x, 0.45 + Math.sin(this.t * 2.4) * 0.12, egg.z);
+    this.mesh.rotation.y += dt * 1.6;
+    // Flash as it is about to walk itself home, so a nearby player knows the
+    // window is closing.
+    const soon = egg.returnAt < 4;
+    this.mesh.material.emissiveColor.copyFrom(
+      Color3.FromHexString(soon && Math.sin(this.t * 12) > 0 ? '#ffb347' : '#fff4d6'),
+    );
+  }
+
+  dispose() { this.mesh.dispose(); }
+}
+
+/**
+ * The bomb in Plant & Defuse.
+ *
+ * One object with three very different jobs — lying around, being carried, and
+ * ticking down in someone's nest — so its look changes with its state rather
+ * than relying on the HUD to explain which is which.
+ */
+export class BombView {
+  constructor(scene) {
+    this.mesh = MeshBuilder.CreateBox('bomb', { size: 0.85 }, scene);
+    this.mesh.material = emissiveMat(scene, 'bombMat', '#ff3b30', { intensity: 1.0, cache: false });
+    this.mesh.isPickable = false;
+    this.mesh.setEnabled(false);
+
+    this.ring = MeshBuilder.CreateTorus('bombRing', {
+      diameter: BOMB.blastRadius * 2, thickness: 0.16, tessellation: 40,
+    }, scene);
+    this.ring.material = emissiveMat(scene, 'bombRingMat', '#ff3b30', {
+      intensity: 1.0, alpha: 0.5, cache: false,
+    });
+    this.ring.isPickable = false;
+    this.ring.setEnabled(false);
+
+    this.t = 0;
+  }
+
+  sync(bomb, dt) {
+    const on = !!bomb;
+    this.mesh.setEnabled(on);
+    if (!on) {
+      this.ring.setEnabled(false);
+      return;
+    }
+
+    this.t += dt;
+    const planted = bomb.state === 'planted';
+    // Once planted the strobe tracks the fuse, so the panic is legible without
+    // reading a number.
+    const urgency = planted ? 1 - Math.max(0, Math.min(1, bomb.fuse / BOMB.fuse)) : 0;
+    const rate = planted ? 4 + urgency * 24 : 3;
+
+    this.mesh.position.set(bomb.x, planted ? 0.6 : 0.9, bomb.z);
+    this.mesh.rotation.y += dt * (planted ? 1 : 2.4);
+    this.mesh.scaling.setAll(1 + Math.abs(Math.sin(this.t * rate)) * (planted ? 0.28 : 0.12));
+    this.mesh.material.emissiveColor.copyFrom(
+      Color3.FromHexString(planted ? '#ff2d1a' : '#ffb020'),
+    );
+
+    // The blast radius is only worth drawing once it can actually hurt you.
+    this.ring.setEnabled(planted);
+    if (planted) {
+      this.ring.position.set(bomb.x, 0.12, bomb.z);
+      this.ring.rotation.y += dt * 0.7;
+      this.ring.material.alpha = 0.25 + urgency * 0.45;
+    }
+  }
+
+  dispose() {
+    this.mesh.dispose();
+    this.ring.dispose();
+  }
 }

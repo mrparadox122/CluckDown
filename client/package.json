@@ -16,7 +16,8 @@
     "test:perf": "node test/perf.mjs",
     "test:stats": "node test/stats.mjs",
     "test:mobile": "node test/mobile.mjs",
-    "test:private": "node test/private.mjs"
+    "test:private": "node test/private.mjs",
+    "test:tasks": "node test/tasks.mjs"
   },
   "dependencies": {
     "@babylonjs/core": "^9.21.0",

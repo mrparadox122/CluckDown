@@ -1,4 +1,4 @@
-import { Schema, MapSchema, defineTypes } from '@colyseus/schema';
+import { Schema, MapSchema, ArraySchema, defineTypes } from '@colyseus/schema';
 
 // NOTE ON BULLETS: they are deliberately *not* part of synced state.
 // A bullet is a straight line at a fixed speed with a known origin, direction
@@ -29,6 +29,40 @@ defineTypes(PlayerState, {
   respawnIn: 'float32',
   ack: 'uint32', // last input seq the server consumed, for client reconciliation
   bot: 'boolean',
+  carrying: 'uint8', // eggs in hand (Egg Heist)
+  // The contract is per-player and only ever read by its owner, but it rides in
+  // the same record anyway: it is two small fields, and a separate per-client
+  // channel would cost more than it saves.
+  contract: 'string',      // '' when between contracts
+  contractLabel: 'string',
+  contractAt: 'float32',   // seconds left
+  contractGoal: 'float32',
+  contractDone: 'float32', // progress toward the goal
+});
+
+/** One player's nest: home base in Egg Heist, plant site in Plant & Defuse. */
+export class NestState extends Schema {}
+defineTypes(NestState, {
+  seat: 'uint8',
+  x: 'float32',
+  z: 'float32',
+  eggs: 'uint8',
+});
+
+/** An egg on the floor, dropped by a carrier who died. */
+export class EggState extends Schema {}
+defineTypes(EggState, {
+  x: 'float32',
+  z: 'float32',
+  seat: 'uint8',       // nest it belongs to
+  returnAt: 'float32', // seconds until it walks itself home
+});
+
+/** One candidate in the pre-match map vote. */
+export class MapChoiceState extends Schema {}
+defineTypes(MapChoiceState, {
+  id: 'string',
+  votes: 'uint8',
 });
 
 export class PickupState extends Schema {}
@@ -55,6 +89,9 @@ export class ArenaState extends Schema {
     this.players = new MapSchema();
     this.pickups = new MapSchema();
     this.bomber = new BomberState();
+    this.mapChoices = new ArraySchema();
+    this.nests = new ArraySchema();
+    this.eggs = new MapSchema();
   }
 }
 defineTypes(ArenaState, {
@@ -67,11 +104,36 @@ defineTypes(ArenaState, {
   teamRed: 'uint16',
   hillHolder: 'string',
   hillContested: 'boolean',
+  // The zone relocates, so clients need where it is, not just who holds it.
+  hillX: 'float32',
+  hillZ: 'float32',
+  hillMoveAt: 'float32',
+  map: 'string',
+  lobbyTime: 'float32',
+  mapChoices: [MapChoiceState],
+  bounty: 'string',       // sessionId of the crowned chicken, '' for nobody
+  potatoActive: 'boolean',
+  potatoX: 'float32',
+  potatoZ: 'float32',
+  potatoFuse: 'float32',
+  potatoHolder: 'string',
   phase: 'string',
   clock: 'float32',
   arenaSize: 'float32',
   killLimit: 'uint16',
+  // Plant & Defuse. One bomb at a time, so it is flat fields rather than a
+  // child schema — cheaper on the wire and simpler to read on the client.
+  bombState: 'string',    // '' | loose | carried | planted
+  bombX: 'float32',
+  bombZ: 'float32',
+  bombCarrier: 'string',
+  bombSeat: 'int8',       // nest it is planted in, -1 when it isn't
+  bombFuse: 'float32',
+  bombPlant: 'float32',   // 0..1 plant progress
+  bombDefuse: 'float32',  // 0..1 defuse progress
   players: { map: PlayerState },
   pickups: { map: PickupState },
+  nests: [NestState],
+  eggs: { map: EggState },
   bomber: BomberState,
 });

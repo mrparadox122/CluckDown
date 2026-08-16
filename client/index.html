@@ -103,6 +103,17 @@
     </div>
   </section>
 
+  <!-- ===================== MAP VOTE ===================== -->
+  <section id="lobby" class="screen hidden">
+    <div class="menu-card lobby-card">
+      <h2 class="lobby-title">Vote for a map</h2>
+      <p id="lobby-sub" class="tagline">Everyone picks — most votes wins</p>
+      <div id="map-choices" class="map-choices"></div>
+      <div class="lobby-timer"><i id="lobby-bar"></i></div>
+      <div id="lobby-status" class="menu-status"></div>
+    </div>
+  </section>
+
   <!-- ===================== IN-GAME HUD ===================== -->
   <div id="hud" class="hidden">
     <div id="world-overlay"></div>
@@ -117,6 +128,10 @@
         <div id="mod-badge" class="mod-badge hidden"></div>
         <div id="objective" class="objective hidden"></div>
         <div id="match-clock" class="match-clock">4:00</div>
+        <!-- Your personal side-task. Bottom-centre rather than up here with the
+             mode pill: it changes every 45s and needs to catch the eye without
+             sitting in the middle of the fight. -->
+        <div id="contract" class="contract hidden"></div>
         <div class="hud-buttons">
           <button id="hud-mute" class="icon-btn hud-mute" type="button" aria-label="Mute">&#128266;</button>
           <button id="hud-view" class="icon-btn hud-mute" type="button" aria-label="Camera view" title="Camera view">&#128247;</button>

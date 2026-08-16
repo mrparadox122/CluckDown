@@ -918,6 +918,87 @@ input[type="text"]:focus { border-color: var(--hot); box-shadow: 0 0 0 3px rgba(
 }
 .objective .hill-label { font-size: 10px; letter-spacing: 1.5px; color: var(--muted); text-transform: uppercase; }
 .objective.contested .hill-label { color: var(--hot); }
+/* The zone is about to relocate. Amber, and blinking, so it cannot be read as
+   ownership — which is what the same element says the rest of the time. */
+.objective.moving .hill-label { color: var(--gold); animation: pulse .5s ease-in-out infinite; }
+
+/* --- Egg Heist: four nest counts, so the standings are the objective --- */
+.nest-row { display: flex; gap: 5px; }
+.nest-count {
+  min-width: 26px;
+  padding: 2px 6px;
+  border-radius: 6px;
+  color: #05060c;
+  text-align: center;
+  background: var(--seat, #9aa6c4);
+  opacity: .75;
+}
+/* Yours is the one you defend, so it is the one that must stand out. */
+.nest-count.mine { opacity: 1; box-shadow: 0 0 12px var(--seat, #9aa6c4); }
+.objective .carrying {
+  font-size: 10px;
+  letter-spacing: 1.2px;
+  text-transform: uppercase;
+  color: var(--gold);
+}
+
+/* --- Plant & Defuse --- */
+.objective .bomb-label { font-size: 12px; color: var(--ink); }
+.objective.contested .bomb-label { color: var(--hot); animation: pulse .6s ease-in-out infinite; }
+
+/* ========================== CONTRACTS ==========================
+   The personal side-task. Bottom-centre, above the sticks' dead zone, so it
+   sits in peripheral vision rather than over the fight. */
+
+.contract {
+  position: absolute;
+  left: 50%;
+  bottom: calc(10px + var(--safe-b));
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 12px;
+  border-radius: 20px;
+  background: rgba(6, 7, 14, 0.82);
+  border: 1px solid var(--edge);
+  font-size: 12px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+.contract-tag {
+  font-size: 8.5px;
+  font-weight: 800;
+  letter-spacing: 1.6px;
+  color: #05060c;
+  background: var(--gold);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+.contract-label { font-weight: 700; }
+.contract-meter {
+  width: 70px;
+  height: 5px;
+  background: rgba(0, 0, 0, 0.6);
+  border: 1px solid var(--edge);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.contract-meter i {
+  display: block;
+  height: 100%;
+  background: var(--gold);
+  transform-origin: left center;
+  transition: transform .2s linear;
+}
+.contract-time { font-size: 10px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.contract.urgent .contract-time { color: var(--hot); }
+.contract.flash { animation: contractIn .5s ease-out; }
+@keyframes contractIn {
+  0% { opacity: 0; transform: translateX(-50%) translateY(10px) scale(.9); }
+  60% { opacity: 1; transform: translateX(-50%) translateY(0) scale(1.05); }
+  100% { transform: translateX(-50%) translateY(0) scale(1); }
+}
 
 /* ===================== MOBILE / LANDSCAPE ===================== */
 
@@ -977,6 +1058,15 @@ input[type="text"]:focus { border-color: var(--hot); box-shadow: 0 0 0 3px rgba(
   .objective { font-size: 11px; margin-top: 2px; }
   .objective .team-score { min-width: 26px; padding: 1px 6px; }
   .hill-meter { width: 84px; height: 5px; }
+  .nest-count { min-width: 20px; padding: 1px 4px; font-size: 10px; }
+  .objective .bomb-label { font-size: 10px; }
+
+  /* On a short screen the sticks own the bottom corners, so the contract strip
+     shrinks rather than overlapping them. */
+  .contract { padding: 3px 9px; gap: 6px; font-size: 10px; }
+  .contract-tag { font-size: 7.5px; padding: 1px 4px; letter-spacing: 1.2px; }
+  .contract-meter { width: 48px; height: 4px; }
+  .contract-time { font-size: 9px; }
 
   .icon-btn.hud-mute { width: 24px; height: 24px; font-size: 10px; margin-top: 2px; }
   .hud-buttons { gap: 4px; }
@@ -1057,4 +1147,84 @@ input[type="text"]:focus { border-color: var(--hot); box-shadow: 0 0 0 3px rgba(
 
 @media (max-height: 480px) {
   .room-chip { padding: 2px 7px; font-size: 9px; letter-spacing: 1.4px; }
+}
+
+/* ========================= MAP VOTE ========================= */
+
+.lobby-card { text-align: center; }
+.lobby-title { font-size: 22px; margin-bottom: 4px; }
+
+.map-choices {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  margin: 14px 0 12px;
+}
+
+.map-choice {
+  position: relative;
+  padding: 10px 8px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--edge);
+  border-radius: 11px;
+  color: var(--ink);
+  font-family: inherit;
+  text-align: center;
+  cursor: pointer;
+  transition: border-color .15s, background .15s, transform .1s;
+}
+.map-choice:active { transform: scale(0.98); }
+.map-choice[aria-pressed="true"] {
+  border-color: var(--hot);
+  background: rgba(255, 45, 75, 0.14);
+  box-shadow: 0 0 0 1px var(--hot) inset;
+}
+
+/* A cube of the map's own floor colour — cheap, and it reads as a preview. */
+.map-swatch {
+  width: 100%;
+  height: 42px;
+  border-radius: 7px;
+  margin-bottom: 7px;
+  background-image:
+    linear-gradient(rgba(0, 0, 0, .28) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(0, 0, 0, .28) 1px, transparent 1px);
+  background-size: 10px 10px;
+}
+.map-choice strong { display: block; font-size: 12.5px; }
+.map-choice small { display: block; font-size: 9.5px; color: var(--muted); line-height: 1.3; margin-top: 2px; }
+.map-size { font-size: 9px; color: var(--muted); letter-spacing: 1px; }
+
+.map-votes {
+  position: absolute;
+  top: 6px; right: 6px;
+  min-width: 18px;
+  padding: 1px 5px;
+  font-size: 10px;
+  font-weight: 800;
+  color: #05060c;
+  background: var(--gold);
+  border-radius: 10px;
+}
+.map-votes:empty, .map-votes[data-n="0"] { display: none; }
+
+.lobby-timer {
+  height: 5px;
+  background: rgba(255, 255, 255, .12);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.lobby-timer i {
+  display: block;
+  height: 100%;
+  width: 100%;
+  background: var(--hot);
+  transform-origin: left center;
+  transition: transform .2s linear;
+}
+
+@media (max-height: 480px) and (orientation: landscape) {
+  .lobby-title { font-size: 17px; }
+  .map-swatch { height: 30px; }
+  .map-choices { margin: 8px 0; }
 }

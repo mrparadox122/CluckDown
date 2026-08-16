@@ -11,7 +11,7 @@ import {
   createWorld, addPlayer, applyInput, stepWorld,
   stepBots, initBot, botName,
   MODES, SEAT_COLORS, TEAM_COLORS, TICK_DT, MAX_CATCHUP, QUICK_CHAT, cleanRoomCode,
-  hillProgress,
+  hillProgress, castVote, voteTally, beginMatch, MAP_VOTE, MAPS, contractInfo, BOMB,
 } from '@cluckdown/shared';
 
 const DEFAULT_ENDPOINT = import.meta.env.VITE_SERVER_URL
@@ -57,7 +57,8 @@ export class OnlineSession extends BaseSession {
     this.offline = false;
     this.selfId = room.sessionId;
     this.mode = room.state.mode || 'casual';
-    this.arenaSize = room.state.arenaSize || MODES.casual.arena;
+    // Latched when the match actually starts — the arena resizes when the map
+    // vote resolves, and the renderer builds its geometry from this.
     this.modifier = room.state.modifier || 'none';
 
     room.onMessage('fx', (evs) => this.emit('fx', evs));
@@ -103,16 +104,71 @@ export class OnlineSession extends BaseSession {
     });
   }
 
-  get phase() { return this.room.state?.phase ?? 'warmup'; }
+  get arenaSize() { return this.room.state?.arenaSize || MODES[this.mode]?.arena || 40; }
+  get phase() { return this.room.state?.phase ?? 'lobby'; }
   get clock() { return this.room.state?.clock ?? 0; }
   get safeHalf() { return this.room.state?.safeHalf ?? this.arenaSize / 2; }
+  get map() { return this.room.state?.map ?? 'coop'; }
+  get lobbyTime() { return this.room.state?.lobbyTime ?? 0; }
+
+  get mapChoices() {
+    const out = [];
+    this.room.state?.mapChoices?.forEach((c) => out.push({ id: c.id, votes: c.votes }));
+    return out;
+  }
+
+  get bounty() { return this.room.state?.bounty || null; }
+
+  get potato() {
+    const st = this.room.state;
+    if (!st?.potatoActive) return null;
+    return { x: st.potatoX, z: st.potatoZ, fuse: st.potatoFuse, holder: st.potatoHolder || null };
+  }
+
+  sendVote(mapId) { this.room.send('vote', mapId); }
   get teamScores() {
     const st = this.room.state;
     return MODES[this.mode]?.teams ? [st?.teamBlue ?? 0, st?.teamRed ?? 0] : null;
   }
   get hill() {
     if (!MODES[this.mode]?.hill) return null;
-    return { holder: this.room.state?.hillHolder || null, contested: !!this.room.state?.hillContested };
+    const st = this.room.state;
+    return {
+      holder: st?.hillHolder || null,
+      contested: !!st?.hillContested,
+      x: st?.hillX ?? 0,
+      z: st?.hillZ ?? 0,
+      moveAt: st?.hillMoveAt ?? 0,
+    };
+  }
+
+  get nests() {
+    const out = [];
+    this.room.state?.nests?.forEach((n) => out.push({ seat: n.seat, x: n.x, z: n.z, eggs: n.eggs }));
+    return out;
+  }
+
+  get looseEggs() {
+    const out = [];
+    this.room.state?.eggs?.forEach((e, id) => {
+      out.push({ id, x: e.x, z: e.z, seat: e.seat, returnAt: e.returnAt });
+    });
+    return out;
+  }
+
+  get bomb() {
+    const st = this.room.state;
+    if (!st?.bombState) return null;
+    return {
+      state: st.bombState,
+      x: st.bombX,
+      z: st.bombZ,
+      carriedBy: st.bombCarrier || null,
+      plantSeat: st.bombSeat,
+      fuse: st.bombFuse,
+      plant: st.bombPlant,
+      defuse: st.bombDefuse,
+    };
   }
 
   get players() {
@@ -132,6 +188,16 @@ export class OnlineSession extends BaseSession {
         ammo: p.ammo || 'none', burning: !!p.burning,
         kills: p.kills, deaths: p.deaths, score: p.score,
         respawnIn: p.respawnIn,
+        carrying: p.carrying ?? 0,
+        contract: p.contract
+          ? {
+            id: p.contract,
+            label: p.contractLabel,
+            progress: p.contractDone,
+            target: p.contractGoal,
+            secondsLeft: p.contractAt,
+          }
+          : null,
         isBot: p.bot,
         isSelf: id === this.selfId,
       });
@@ -191,7 +257,6 @@ export class LocalSession extends BaseSession {
     this.selfId = 'you';
     this.mode = mode;
     const cfg = MODES[mode] ?? MODES.casual;
-    this.arenaSize = cfg.arena;
 
     // Dev escape hatch: window.__forceMod pins the modifier so a specific twist
     // can be tested or demoed without rerolling until it turns up.
@@ -207,16 +272,58 @@ export class LocalSession extends BaseSession {
 
     this.acc = 0;
     this.ended = false;
+    this.botVoteAt = 1.2; // bots don't all vote the instant the lobby opens
+  }
+
+  get map() { return this.world.map; }
+  get lobbyTime() { return this.world.lobbyTime; }
+  get bounty() { return this.world.bounty; }
+  get potato() { return this.world.potato; }
+
+  get mapChoices() {
+    const counts = voteTally(this.world);
+    return this.world.mapCandidates.map((id) => ({ id, votes: counts[id] ?? 0 }));
+  }
+
+  sendVote(mapId) {
+    castVote(this.world, this.selfId, mapId);
   }
 
   get phase() { return this.world.phase; }
   get clock() { return this.world.clock; }
+  get arenaSize() { return this.world.arena.size; }
   get safeHalf() { return this.world.safeHalf; }
   get teamScores() { return this.world.teamScores ? [...this.world.teamScores] : null; }
   get hill() {
-    return this.world.hill
-      ? { holder: this.world.hill.holder, contested: this.world.hill.contested }
+    const h = this.world.hill;
+    return h
+      ? { holder: h.holder, contested: h.contested, x: h.x, z: h.z, moveAt: h.moveAt }
       : null;
+  }
+
+  get nests() {
+    return this.world.nests ? this.world.nests.map((n) => ({ ...n })) : [];
+  }
+
+  get looseEggs() {
+    return (this.world.looseEggs ?? []).map((e) => ({
+      id: String(e.id), x: e.x, z: e.z, seat: e.fromSeat, returnAt: e.returnAt,
+    }));
+  }
+
+  get bomb() {
+    const b = this.world.bomb;
+    if (!b) return null;
+    return {
+      state: b.state,
+      x: b.x,
+      z: b.z,
+      carriedBy: b.carriedBy,
+      plantSeat: b.state === 'planted' ? b.plantSeat : -1,
+      fuse: b.fuse,
+      plant: Math.min(1, b.plant / BOMB.plantTime),
+      defuse: Math.min(1, b.defuse / BOMB.defuseTime),
+    };
   }
 
   get players() {
@@ -235,6 +342,8 @@ export class LocalSession extends BaseSession {
       burning: p.burnUntil > this.world.time,
       kills: p.kills, deaths: p.deaths, score: p.score,
       respawnIn: p.alive ? 0 : Math.max(0, p.respawnAt - this.world.time),
+      carrying: p.carrying,
+      contract: contractInfo(p),
       isBot: p.isBot,
       isSelf: p.id === this.selfId,
     }));
@@ -258,6 +367,31 @@ export class LocalSession extends BaseSession {
     this.emit('chat', { name: me?.name ?? 'You', color: me?.color, text });
   }
 
+  /**
+   * Drives the offline lobby: bots vote after a beat, and the lobby closes on
+   * the same rules the server uses. Practice mode is where this gets tried
+   * first, so it should behave the same.
+   */
+  stepLobby(dt) {
+    const w = this.world;
+    this.botVoteAt -= dt;
+    if (this.botVoteAt <= 0) {
+      for (const p of w.players.values()) {
+        if (p.isBot && !w.votes.has(p.id)) {
+          castVote(w, p.id, w.mapCandidates[Math.floor(Math.random() * w.mapCandidates.length)]);
+        }
+      }
+    }
+
+    const humans = [...w.players.values()].filter((p) => !p.isBot);
+    const allVoted = humans.length > 0 && humans.every((p) => w.votes.has(p.id));
+    if (w.lobbyTime >= MAP_VOTE.seconds || (w.lobbyTime >= MAP_VOTE.minSeconds && allVoted)) {
+      const map = beginMatch(w);
+      this.arenaSizeAtStart = w.arena.size;
+      this.emit('mapChosen', { map, votes: voteTally(w) });
+    }
+  }
+
   /** Steps the sim on a fixed accumulator so it matches the server exactly. */
   update(dt) {
     if (this.ended) return;
@@ -269,6 +403,11 @@ export class LocalSession extends BaseSession {
     const maxSteps = Math.ceil(MAX_CATCHUP / TICK_DT);
     while (this.acc >= TICK_DT && guard++ < maxSteps) {
       this.acc -= TICK_DT;
+      if (this.world.phase === 'lobby') {
+        stepWorld(this.world, TICK_DT);
+        this.stepLobby(TICK_DT);
+        continue;
+      }
       stepBots(this.world, TICK_DT);
       const events = stepWorld(this.world, TICK_DT);
       if (events.length) this.dispatch(events);

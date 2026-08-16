@@ -8,7 +8,7 @@
 
 import {
   createWorld, addPlayer, stepWorld, stepBots, initBot, hillProgress,
-  MODES, TICK_DT, HILL, SHRINK, PLAYER,
+  MODES, TICK_DT, HILL, SHRINK, PLAYER, beginMatch,
 } from '../src/index.js';
 
 const failures = [];
@@ -24,6 +24,10 @@ function play(mode, { seconds = 400, modifier = 'none', players = 4 } = {}) {
     const p = addPlayer(world, { id: `p${seat}`, name: `P${seat}`, seat, isBot: true });
     initBot(p, 'normal');
   }
+
+  // Worlds start in the map-vote lobby now. Skip it with a fixed map so arena
+  // size stays deterministic for the assertions below.
+  beginMatch(world, 'coop');
 
   const events = {};
   let friendlyHits = 0;
@@ -121,7 +125,9 @@ solo.phase = 'live';
 rival.x = 18; rival.z = 18; // parked well outside the zone
 let soloEnd = null;
 for (let t = 0; t < 120 / TICK_DT && solo.phase !== 'over'; t++) {
-  holder.x = 0; holder.z = 0; // stand on the point
+  // Follow the zone, not the origin — it relocates every HILL.moveEvery
+  // seconds now, so standing in the middle only holds it for the first leg.
+  holder.x = solo.hill.x; holder.z = solo.hill.z;
   for (const e of stepWorld(solo, TICK_DT)) if (e.type === 'matchEnd') soloEnd = e;
 }
 console.log(`  solo hold: ended ${solo.phase} after ${solo.time.toFixed(0)}s, reason ${soloEnd?.reason}`);
@@ -136,8 +142,10 @@ const c1 = addPlayer(fight, { id: 'c1', name: 'C1', seat: 0 });
 const c2 = addPlayer(fight, { id: 'c2', name: 'C2', seat: 1 });
 fight.phase = 'live';
 for (let t = 0; t < 40 / TICK_DT; t++) {
-  c1.x = 0; c1.z = 0; c1.hp = PLAYER.maxHp;
-  c2.x = 1; c2.z = 1; c2.hp = PLAYER.maxHp;
+  // Both stand on the zone wherever it currently is, so it stays contested
+  // across relocations rather than handing one of them a free stretch.
+  c1.x = fight.hill.x; c1.z = fight.hill.z; c1.hp = PLAYER.maxHp;
+  c2.x = fight.hill.x + 1; c2.z = fight.hill.z + 1; c2.hp = PLAYER.maxHp;
   stepWorld(fight, TICK_DT);
 }
 check('a contested hill scores for nobody',

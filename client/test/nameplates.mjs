@@ -9,6 +9,7 @@
 //   node client/test/nameplates.mjs
 
 import { chromium } from 'playwright';
+import { passLobby } from './_lobby.mjs';
 
 const URL = process.env.UI_URL || 'http://localhost:5173';
 const TOLERANCE_PX = 2; // sub-pixel rounding only
@@ -40,6 +41,7 @@ await page.fill('#name-input', 'Beaky');
 // renderer, so view and server positions converge every frame and the drift
 // this test measures cannot appear. Prediction vs server state is the real case.
 await page.click(process.env.PLAY_MODE === 'practice' ? '#practice-btn' : '#play-btn');
+await passLobby(page);
 await page.waitForTimeout(process.env.PLAY_MODE === 'practice' ? 3500 : 12000);
 
 // Drive the player so prediction/interpolation error is actually non-zero —

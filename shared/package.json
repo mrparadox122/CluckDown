@@ -11,6 +11,7 @@
   "scripts": {
     "test:modifiers": "node test/modifiers.mjs",
     "test:modes": "node test/modes.mjs",
-    "test:combat": "node test/combat.mjs"
+    "test:combat": "node test/combat.mjs",
+    "test:tasks": "node test/tasks.mjs"
   }
 }

@@ -8,6 +8,7 @@
 //   node client/test/stats.mjs
 
 import { chromium } from 'playwright';
+import { passLobby } from './_lobby.mjs';
 
 const URL = process.env.UI_URL || 'http://localhost:5173';
 const failures = [];
@@ -49,6 +50,7 @@ console.log('  /stats before:', JSON.stringify(before));
 // --- in game, online ------------------------------------------------------
 await page.fill('#name-input', 'Netty');
 await page.click('#play-btn');
+await passLobby(page);
 await page.waitForTimeout(9000);
 
 const readCompact = () => page.evaluate(() => document.getElementById('netstats').textContent);
@@ -107,6 +109,7 @@ await page.reload({ waitUntil: 'networkidle' });
 await page.waitForTimeout(1200);
 await page.fill('#name-input', 'Netty');
 await page.click('#practice-btn');
+await passLobby(page);
 await page.waitForTimeout(4000);
 const offline = await waitForReadout((t) => /offline/.test(t));
 console.log('\n--- offline readout ---');

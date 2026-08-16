@@ -7,6 +7,7 @@
 // Uses the dev-only window.__cluckdown handle to jump the match clock forward.
 
 import { chromium } from 'playwright';
+import { passLobby } from './_lobby.mjs';
 
 // Screenshots are diagnostics, not assertions. Under a loaded CPU the software
 // renderer can blow the default capture timeout, and that must not fail a run.
@@ -32,6 +33,7 @@ page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
 await page.goto('http://localhost:5173', { waitUntil: 'networkidle' });
 await page.fill('#name-input', 'Beaky');
 await page.click('#practice-btn');
+await passLobby(page);
 await page.waitForTimeout(3000);
 
 // Let bots rack up a few kills so the table has real numbers, then jump the

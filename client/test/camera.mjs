@@ -8,6 +8,7 @@
 //   node client/test/camera.mjs
 
 import { chromium } from 'playwright';
+import { passLobby } from './_lobby.mjs';
 
 const URL = process.env.UI_URL || 'http://localhost:5173';
 
@@ -28,6 +29,7 @@ page.on('pageerror', (e) => pageErrors.push(e.message));
 await page.goto(URL, { waitUntil: 'networkidle' });
 await page.fill('#name-input', 'Beaky');
 await page.click('#practice-btn');
+await passLobby(page);
 await page.waitForTimeout(3500);
 
 // Distance from the camera to its focus point is the honest measure of framing —
