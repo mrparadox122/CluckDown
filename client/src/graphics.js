@@ -23,7 +23,9 @@ const DEFAULTS = {
   resolution: 1,
   glow: true,
   antialias: true,
-  view: 'close', // camera framing: close | mid | full
+  // Cluckdown is first person. There is no camera setting any more.
+  assist: true,    // aim assist, applied client-side before input is sent
+  fireEdit: false, // drag-to-reposition mode for the touch fire button
 };
 
 export function loadGfx() {
@@ -34,7 +36,8 @@ export function loadGfx() {
     if (!RESOLUTIONS.some((r) => r.value === merged.resolution)) merged.resolution = DEFAULTS.resolution;
     merged.glow = !!merged.glow;
     merged.antialias = !!merged.antialias;
-    if (!['close', 'mid', 'full'].includes(merged.view)) merged.view = DEFAULTS.view;
+    merged.fireEdit = !!merged.fireEdit;
+    merged.assist = merged.assist !== false;
     return merged;
   } catch {
     return { ...DEFAULTS };
@@ -47,7 +50,8 @@ export function saveGfx(gfx) {
       resolution: gfx.resolution,
       glow: gfx.glow,
       antialias: gfx.antialias,
-      view: gfx.view,
+      assist: gfx.assist !== false,
+      fireEdit: !!gfx.fireEdit,
     }));
   } catch {
     // Private mode — settings just won't persist.

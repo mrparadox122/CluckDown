@@ -51,14 +51,23 @@ export class BulletPool {
     }
   }
 
-  spawn(ev) {
+  /**
+    * @param ahead world units to push the VISUAL start forward.
+    *
+    * Nonzero only for your own shots in first person. The tracer is a 3.2-unit
+    * stretched box spawned at the shooter's own position — which in first
+    * person is exactly where the camera is, so every shot painted a white
+    * streak across the whole screen. The authoritative bullet is unaffected;
+    * this only moves where the streak is drawn from.
+    */
+  spawn(ev, ahead = 0) {
     const kind = this.pools[ev.ammo] ? ev.ammo : 'none';
     const mesh = this.pools[kind].pop();
     if (!mesh) return; // pool exhausted — drop the visual rather than stutter
     mesh.setEnabled(true);
     const dx = Math.sin(ev.aim);
     const dz = Math.cos(ev.aim);
-    mesh.position.set(ev.x, 0.85, ev.z);
+    mesh.position.set(ev.x + dx * ahead, 0.85, ev.z + dz * ahead);
     mesh.rotation.y = ev.aim;
     mesh.scaling.set(0.85, 0.85, 3.2); // stretched along travel = tracer streak
     this.active.set(ev.id, {

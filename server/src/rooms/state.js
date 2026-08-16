@@ -27,6 +27,12 @@ defineTypes(PlayerState, {
   deaths: 'uint16',
   score: 'int32',
   respawnIn: 'float32',
+  // Knockback velocity. Synced because client prediction has to apply the
+  // same shove the server will, otherwise every hit ends in a correction
+  // and a blast reads as a rendering glitch rather than as being hit.
+  kx: 'float32',
+  kz: 'float32',
+  nemesis: 'string', // sessionId of whoever killed you last, '' for nobody
   ack: 'uint32', // last input seq the server consumed, for client reconciliation
   bot: 'boolean',
   carrying: 'uint8', // eggs in hand (Egg Heist)

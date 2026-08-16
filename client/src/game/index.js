@@ -1,6 +1,7 @@
 import { Vector3, Matrix } from '@babylonjs/core/Maths/math';
 import {
-  createStage, buildArena, buildHillZone, buildSafeZone, CameraRig, VIEW_LABELS,
+  createStage, buildArena, buildHillZone, buildSafeZone, CameraRig,
+  FPS_PITCH_MIN, FPS_PITCH_MAX,
 } from './scene.js';
 import {
   PlayerView, BomberView, PickupView, PotatoView, NestView, LooseEggView, BombView,
@@ -9,7 +10,8 @@ import { BulletPool, DebrisPool, BlastRings, MuzzleFlash } from './fx.js';
 import { Controls } from './controls.js';
 import { sfx } from '../audio/sfx.js';
 import {
-  PLAYER, BULLET, BOMBER, MODIFIERS, MODES, HILL, BOMB, SEAT_COLORS, modValue, clampUnit, clamp,
+  PLAYER, BULLET, BOMBER, MODIFIERS, MODES, HILL, BOMB, HEIST, SEAT_COLORS,
+  modValue, clampUnit, clamp,
 } from '@cluckdown/shared';
 
 // Matches the server's simulation rate: sending slower would leave most ticks
@@ -17,10 +19,24 @@ import {
 const INPUT_HZ = 60;
 const INPUT_DT = 1 / INPUT_HZ;
 
+// How far down the firing line the first-person reticle is drawn. Roughly a
+// duel's worth of distance: near enough that it tracks a real target, far
+// enough that it doesn't swing wildly as you turn.
+const CROSSHAIR_RANGE = 16;
+
 // Prediction error above this means something real happened (a blast, a wall,
 // a rejected move) — snap instead of sliding the player across the arena.
 const SNAP_ERROR = 3.5;
 const CORRECTION_RATE = 9;
+
+// One line of "what am I supposed to do", announced at the whistle. Only for
+// modes whose goal isn't legible from the arena itself — free-for-all doesn't
+// need telling.
+const MODE_OPENERS = {
+  bomb: 'GRAB THE BOMB — PLANT IT IN A RIVAL NEST',
+  heist: 'STEAL THEIR EGGS — BANK THEM AT HOME',
+  hill: 'HOLD THE ZONE — IT MOVES',
+};
 
 export class Game {
   constructor({ canvas, session, hud, gfx, onExit }) {
@@ -41,7 +57,6 @@ export class Game {
     this.map = session.map ?? 'coop';
     this.arena = buildArena(this.scene, session.arenaSize, this.map);
     this.rig = new CameraRig(this.camera, session.arenaSize, this.engine);
-    this.rig.setView(gfx?.view ?? 'close');
 
     // Objective markers, built only for the modes that have them.
     const rules = MODES[session.mode] ?? {};
@@ -73,11 +88,21 @@ export class Game {
 
     this.controls = new Controls({
       leftZone: document.getElementById('stick-left'),
-      rightZone: document.getElementById('stick-right'),
       canvas,
-      camera: this.camera,
-      scene: this.scene,
     });
+    this.controls.setFireEdit(!!gfx?.fireEdit);
+    this.controls.setAssist(gfx?.assist !== false);
+
+    // Who to watch while dead — set from the kill event, cleared on respawn.
+    this.killedBy = null;
+
+    // Shown once per match, the first time the cursor gets captured.
+    let hinted = false;
+    this.controls.onLockHint = () => {
+      if (hinted) return;
+      hinted = true;
+      this.hud.announce('ESC TO FREE THE CURSOR');
+    };
 
     this.hud.setMode(session.mode, this.modifier);
     // Announce the twist once the match view is actually up.
@@ -85,6 +110,12 @@ export class Game {
     if (mod && this.modifier !== 'none') {
       setTimeout(() => this.hud.announce(mod.label), 700);
     }
+    // ...and say what the mode wants from you, for the modes where that is not
+    // obvious from looking at the arena. Plant & Defuse was reported as simply
+    // unlearnable; the running prompt handles the moment-to-moment, but the
+    // one-line goal has to land before the first bomb even spawns.
+    const opener = MODE_OPENERS[session.mode];
+    if (opener) setTimeout(() => this.hud.announce(opener), mod && this.modifier !== 'none' ? 2600 : 900);
     this.bindSession();
 
     this.onResize = () => {
@@ -97,11 +128,9 @@ export class Game {
     this.engine.runRenderLoop(() => this.frame());
   }
 
-  /** Cycles close -> mid -> full and reports the new label for the HUD. */
-  cycleView() {
-    const view = this.rig.cycleView();
-    return { view, label: VIEW_LABELS[view] };
-  }
+  setFireEdit(on) { this.controls.setFireEdit(on); }
+
+  setAssist(on) { this.controls.setAssist(on); }
 
   // ------------------------------------------------------------------ setup
 
@@ -149,8 +178,16 @@ export class Game {
     for (const e of events) {
       switch (e.type) {
         case 'shot': {
-          this.bullets.spawn(e);
-          this.muzzle.fire(e.x, e.z);
+          // Your own gun goes off roughly where your eyeballs are, so in first
+          // person both of these effects were rendering INSIDE the camera: a
+          // 0.9-unit glowing sphere and a 3.2-unit tracer, at point blank. The
+          // result was a full-screen white flash on every shot.
+          const ownShot = self && e.owner === self.id;
+          this.bullets.spawn(e, ownShot ? 3.2 : 0);
+          if (!ownShot) this.muzzle.fire(e.x, e.z);
+          // ...replaced by a recoil kick, which reads as "I fired" far better
+          // than a flash does anyway.
+          if (ownShot) this.rig.addRecoil();
           sfx.play(e.rapid ? 'rapidShot' : 'shot');
           break;
         }
@@ -183,10 +220,21 @@ export class Game {
           if (self && e.target === self.id) {
             this.rig.addShake(0.75);
             sfx.play('death');
+            // Stash it for the respawn overlay — by the time that renders, the
+            // event is long gone.
+            this.killedBy = e.by
+              ? { name: e.byName, color: e.byColor, hp: e.byHp, dist: e.byDist, kind: e.kind }
+              : { name: null, kind: e.kind };
           } else {
             sfx.play('kill');
           }
-          if (self && e.by === self.id && e.multi > 1) sfx.streak(e.multi);
+          if (self && e.by === self.id) {
+            if (e.multi > 1) sfx.streak(e.multi);
+            if (e.revenge) {
+              this.hud.announce('REVENGE!');
+              sfx.play('pickupHealth');
+            }
+          }
           break;
         }
         case 'blast': {
@@ -387,6 +435,7 @@ export class Game {
             this.pred.x = e.x;
             this.pred.z = e.z;
             this.hud.announce('GO!');
+            this.killedBy = null;
             sfx.play('respawn');
           }
           break;
@@ -440,8 +489,19 @@ export class Game {
     // would make the whole view stutter at the network tick rate.
     const focusX = self ? (this.pred.has ? this.pred.x : self.x) : 0;
     const focusZ = self ? (this.pred.has ? this.pred.z : self.z) : 0;
-    this.rig.setAlive(!self || self.alive);
-    this.rig.update(dt, focusX, focusZ);
+    const alive = !self || self.alive;
+    this.rig.setAlive(alive);
+    // The camera follows the LOCAL look direction, never the server's — a 40Hz
+    // round-trip on "where am I looking" is the most noticeable lag there is.
+    this.controls.clampPitch(FPS_PITCH_MIN, FPS_PITCH_MAX);
+    // Dead: watch whoever put you there, if they are still up.
+    const killer = !alive && this.killedBy?.id
+      ? players.find((p) => p.id === this.killedBy.id && p.alive)
+      : null;
+    this.rig.update(
+      dt, focusX, focusZ, this.controls.yaw, alive, this.controls.pitch,
+      killer ? { x: killer.x, z: killer.z } : null,
+    );
 
     // Render BEFORE projecting the HUD. projectFn reads scene.getTransformMatrix(),
     // which is only recomputed during render — projecting first would place every
@@ -465,7 +525,45 @@ export class Game {
       players,
     });
     this.hud.setContract(self?.contract ?? null);
-    this.hud.setRespawn(self && !self.alive ? self.respawnIn : 0);
+    this.hud.setActionPrompt(this.actionPrompt(self));
+    this.hud.setMarkers(
+      this.markers(self, players, focusX, focusZ),
+      this.projectFn,
+      { w: this.engine.getRenderWidth() * this.engine.getHardwareScalingLevel(),
+        h: this.engine.getRenderHeight() * this.engine.getHardwareScalingLevel() },
+    );
+    {
+      // The crosshair is placed where the shot will actually be, not at screen
+      // centre.
+      //
+      // Shots travel along the yaw at chest height — pitch is a look control,
+      // not an aim one, because everything in this game stands on the ground.
+      // So a fixed centre reticle would start lying the moment you tilted the
+      // view. Projecting the real aim point keeps it honest at any pitch, and
+      // with aim assist off in first person that honesty is the whole contract.
+      const yaw = this.controls.yaw;
+      this.hud.setCrosshairAt(alive ? this.projectFn(
+        focusX + Math.sin(yaw) * CROSSHAIR_RANGE,
+        0.85,
+        focusZ + Math.cos(yaw) * CROSSHAIR_RANGE,
+      ) : null);
+      this.hud.drawMinimap({
+        half: this.session.safeHalf,
+        players,
+        self,
+        selfX: focusX,
+        selfZ: focusZ,
+        aim: this.controls.yaw,
+        bomber: this.session.bomber,
+        pickups: this.session.pickups,
+        nests: this.session.nests,
+        hill: this.session.hill,
+        bomb: this.session.bomb,
+      });
+    }
+    const dead = self && !self.alive;
+    this.hud.setRespawn(dead ? self.respawnIn : 0);
+    this.hud.setKilledBy(dead ? this.killedBy : null);
 
     // Refresh at 4Hz — this is a diagnostic, and rebuilding its DOM every
     // frame would itself cost frames on the devices most likely to need it.
@@ -478,7 +576,21 @@ export class Game {
 
   pumpInput(dt, self) {
     const src = this.pred.has ? this.pred : self;
-    const input = this.controls.sample(src);
+    // Aim assist runs client-side, so it needs the roster. See
+    // shared/src/aim.js for why it is on this side of the wire.
+    const players = this.session.players;
+    const me = players.find((p) => p.isSelf);
+    const foes = me
+      ? players.filter((p) => !p.isSelf).map((p) => ({
+        id: p.id, x: p.x, z: p.z, alive: p.alive, team: p.team,
+        invuln: p.invuln, mx: 0, mz: 0,
+      }))
+      : [];
+    const input = this.controls.sample(
+      me && me.alive ? { id: me.id, x: src.x, z: src.z, team: me.team } : null,
+      dt,
+      foes,
+    );
 
     // Send at a fixed 20Hz regardless of framerate: a 144Hz display shouldn't
     // flood the socket, and a 30fps phone shouldn't feel less responsive.
@@ -521,9 +633,26 @@ export class Game {
 
     const inp = this.controls.input;
     const [mx, mz] = clampUnit(inp.mx, inp.mz);
-    const half = this.session.arenaSize / 2;
-    this.pred.x = clamp(this.pred.x + mx * PLAYER.speed * dt, -half + PLAYER.radius, half - PLAYER.radius);
-    this.pred.z = clamp(this.pred.z + mz * PLAYER.speed * dt, -half + PLAYER.radius, half - PLAYER.radius);
+    const half = this.session.safeHalf;
+
+    // Everything stepPlayers does to velocity has to be mirrored here, or the
+    // prediction and the server disagree permanently and the correction fights
+    // your input every frame.
+    //
+    // Knockback was the big omission: it is ADDED to movement server-side, so a
+    // client that ignores it predicts you walking forward while the server has
+    // you flying backwards. That mismatch is what made being shot feel like the
+    // controls had come loose.
+    let moveScale = this.session.phase === 'live' ? 1 : 0.35;
+    if (self.carrying > 0) {
+      moveScale *= 1 - Math.min(HEIST.maxCarrySlow, HEIST.carrySlow * self.carrying);
+    }
+    if (this.session.bomb?.carriedBy === self.id) moveScale *= 1 - BOMB.carrySlow;
+
+    const vx = mx * PLAYER.speed * moveScale + (self.kx ?? 0);
+    const vz = mz * PLAYER.speed * moveScale + (self.kz ?? 0);
+    this.pred.x = clamp(this.pred.x + vx * dt, -half + PLAYER.radius, half - PLAYER.radius);
+    this.pred.z = clamp(this.pred.z + vz * dt, -half + PLAYER.radius, half - PLAYER.radius);
 
     const ex = self.x - this.pred.x;
     const ez = self.z - this.pred.z;
@@ -550,18 +679,26 @@ export class Game {
       }
 
       view.setVisible(p.alive);
+      // First person: you are looking out of your own head, so your own body
+      // fills the screen. Hide it rather than clipping through it.
+      // You are looking out of your own head, so your own body would fill
+      // the screen from the inside.
+      view.setHidden(p.isSelf);
       if (!p.alive) continue;
 
       const isSelf = p.isSelf;
       // Our own chicken uses the predicted transform; everyone else is
       // smoothed toward the last server position.
       const crowned = this.session.bounty === p.id;
+      // Whoever killed you last is outlined, so a grudge has somewhere to go.
+      const nemesis = !!self && !p.isSelf && self.nemesis === p.id;
       const target = isSelf && this.pred.has
         ? {
           x: this.pred.x, z: this.pred.z, aim: p.aim,
           invuln: p.invuln, rapid: p.rapid, burning: p.burning, bounty: crowned,
+          nemesis: false,
         }
-        : { ...p, bounty: crowned };
+        : { ...p, bounty: crowned, nemesis };
 
       const moving = isSelf
         ? Math.hypot(this.controls.input.mx, this.controls.input.mz) > 0.1
@@ -612,6 +749,16 @@ export class Game {
   /** Nests are keyed by seat and coloured by their owner. */
   syncNests(dt, players) {
     const nests = this.session.nests ?? [];
+    const self = players.find((p) => p.isSelf);
+    const rules = MODES[this.session.mode] ?? {};
+    const bomb = this.session.bomb;
+
+    // Which nests the player is currently supposed to be running at. Lighting
+    // these up is what turns "carry it to a rival nest" from instructions into
+    // something you can see from across the arena.
+    const carryingBomb = rules.bomb && bomb?.carriedBy === self?.id;
+    const raiding = rules.heist && self && self.carrying === 0;
+
     for (const nest of nests) {
       let view = this.nests.get(nest.seat);
       if (!view) {
@@ -619,7 +766,12 @@ export class Game {
         view = new NestView(this.scene, nest, owner?.color ?? SEAT_COLORS[nest.seat]);
         this.nests.set(nest.seat, view);
       }
-      view.update(dt, nest);
+      const rival = self ? nest.seat !== self.seat % 4 : false;
+      const owned = players.some((p) => p.seat % 4 === nest.seat);
+      const target = (carryingBomb && rival && owned)
+        || (raiding && rival && nest.eggs > 0)
+        || (rules.bomb && bomb?.state === 'planted' && bomb.plantSeat === nest.seat);
+      view.update(dt, nest, target);
     }
   }
 
@@ -639,6 +791,147 @@ export class Game {
       view.dispose();
       this.looseEggs.delete(id);
     }
+  }
+
+  /**
+   * Works out what the player should be told to do next.
+   *
+   * Computed entirely client-side — it needs only nest positions, your own
+   * position and the bomb state, all of which are already synced. No new
+   * traffic, and it stays correct in offline practice for free.
+   */
+  actionPrompt(self) {
+    if (!self?.alive) return null;
+    const rules = MODES[this.session.mode] ?? {};
+    const px = this.pred.has ? this.pred.x : self.x;
+    const pz = this.pred.has ? this.pred.z : self.z;
+    const nests = this.session.nests ?? [];
+    const inp = this.controls.input;
+    const still = Math.hypot(inp.mx, inp.mz) < 0.2;
+    const near = (n, r) => Math.hypot(px - n.x, pz - n.z) <= r;
+
+    if (rules.bomb) {
+      const bomb = this.session.bomb;
+      if (!bomb) return null;
+
+      if (bomb.state === 'planted') {
+        // Only its owner can do anything about it. Everyone else is told to
+        // defend, because "wait it out" is genuinely the correct play.
+        if (bomb.plantSeat !== self.seat % 4) {
+          return { text: `Bomb planted — ${Math.ceil(bomb.fuse)}s`, progress: 0 };
+        }
+        if (!near(bomb, BOMB.plantRadius)) {
+          return { text: '⚠ GET TO YOUR NEST AND DEFUSE', progress: 0, urgent: true };
+        }
+        if (!still) return { text: 'STOP MOVING TO DEFUSE', progress: 0, urgent: true };
+        return { text: 'DEFUSING…', progress: bomb.defuse, urgent: true };
+      }
+
+      if (bomb.carriedBy === self.id) {
+        const target = nests.find((n) => n.seat !== self.seat % 4 && near(n, BOMB.plantRadius));
+        if (!target) return { text: 'CARRY THE BOMB TO A RIVAL NEST', progress: 0 };
+        if (!still) return { text: 'STOP MOVING TO PLANT', progress: 0 };
+        return { text: 'PLANTING…', progress: bomb.plant };
+      }
+
+      if (bomb.state === 'loose') return { text: 'GRAB THE BOMB', progress: 0 };
+      return null;
+    }
+
+    if (rules.heist) {
+      if (self.carrying > 0) {
+        const home = nests.find((n) => n.seat === self.seat % 4);
+        if (home && near(home, HEIST.nestRadius)) return null; // already banking
+        return { text: `RUN ${self.carrying} EGG${self.carrying > 1 ? 'S' : ''} HOME`, progress: 0 };
+      }
+      const raidable = nests.some((n) => n.seat !== self.seat % 4 && n.eggs > 0);
+      if (raidable) return { text: 'RAID A RIVAL NEST', progress: 0 };
+    }
+
+    return null;
+  }
+
+  /**
+   * What deserves an on-screen marker right now.
+   *
+   * First person took the overview away, and two things broke with it. The
+   * bomber could creep up behind you with no warning at all — tense becomes
+   * unfair the moment you cannot possibly have seen it coming. And every
+   * objective instruction ("run the eggs home", "carry the bomb to a rival
+   * nest") quietly assumed you could see where that was.
+   *
+   * Deliberately sparse. A screen ringed with arrows is the same as no arrows:
+   * only the bomber, the thing you are carrying somewhere, and the one place
+   * you are supposed to be heading.
+   */
+  markers(self, players, px, pz) {
+    if (!self?.alive) return [];
+    const out = [];
+    const rules = MODES[this.session.mode] ?? {};
+    const yaw = this.controls.yaw;
+    // Bearing relative to where we're looking, so the HUD can put an
+    // off-screen marker on the correct edge.
+    const add = (key, x, z, icon, color, urgent = false) => {
+      const dist = Math.hypot(x - px, z - pz);
+      out.push({ key, x, z, icon, color, urgent, dist, bearing: Math.atan2(x - px, z - pz) - yaw });
+    };
+
+    // --- the bomber. The one thing that can kill you from behind.
+    const b = this.session.bomber;
+    if (b) {
+      const armed = b.state === 'arm';
+      const d = Math.hypot(b.x - px, b.z - pz);
+      // Always marked once it is armed; otherwise only when it is close enough
+      // to be your problem.
+      if (armed || d < BOMBER.detectRadius) add('bomber', b.x, b.z, '💣', '#ff2d4b', armed);
+    }
+
+    // --- Egg Heist: where the eggs go, and where to get more.
+    if (rules.heist) {
+      const nests = this.session.nests ?? [];
+      const home = nests.find((n) => n.seat === self.seat % 4);
+      if (self.carrying > 0 && home) {
+        add('home', home.x, home.z, '🏠', self.color, false);
+      } else {
+        const target = nests
+          .filter((n) => n.seat !== self.seat % 4 && n.eggs > 0)
+          .sort((a, c) => Math.hypot(a.x - px, a.z - pz) - Math.hypot(c.x - px, c.z - pz))[0];
+        if (target) add('raid', target.x, target.z, '🥚', '#fff4d6', false);
+      }
+    }
+
+    // --- Plant & Defuse: the bomb, or the nest it is in.
+    if (rules.bomb) {
+      const bomb = this.session.bomb;
+      if (bomb?.state === 'planted') {
+        const mine = bomb.plantSeat === self.seat % 4;
+        add('bomb', bomb.x, bomb.z, mine ? '🛠' : '💥', mine ? '#ff2d4b' : '#ffcc3d', mine);
+      } else if (bomb?.carriedBy === self.id) {
+        const nests = this.session.nests ?? [];
+        const target = nests
+          .filter((n) => n.seat !== self.seat % 4 && players.some((p) => p.seat % 4 === n.seat))
+          .sort((a, c) => Math.hypot(a.x - px, a.z - pz) - Math.hypot(c.x - px, c.z - pz))[0];
+        if (target) add('plant', target.x, target.z, '🎯', '#ff8a3d', false);
+      } else if (bomb) {
+        add('bomb', bomb.x, bomb.z, '💣', '#ffb020', false);
+      }
+    }
+
+    // --- King of the Coop: the zone moves, so it has to be findable.
+    const hill = this.session.hill;
+    if (hill) {
+      const inside = Math.hypot(hill.x - px, hill.z - pz) <= HILL.radius;
+      if (!inside) add('hill', hill.x, hill.z, '⬢', '#ffcc3d', false);
+    }
+
+    // --- Hot Potato: whoever has it wants to give it to you.
+    const pot = this.session.potato;
+    if (pot) {
+      const mine = pot.holder === self.id;
+      add('potato', pot.x, pot.z, mine ? '🔥' : '🥔', '#ff8a3d', mine);
+    }
+
+    return out;
   }
 
   syncPickups(dt) {

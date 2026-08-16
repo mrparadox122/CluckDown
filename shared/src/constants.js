@@ -28,6 +28,21 @@ export const PLAYER = {
   fireCooldown: 0.18,
   rapidCooldown: 0.07,
   knockbackDecay: 6, // per second, exponential-ish damping
+
+  /**
+   * Ceiling on the accumulated shove, in units per second.
+   *
+   * Knockback is ADDED to your movement velocity, so once it exceeds `speed`
+   * you are moving backwards no matter what you hold. It used to be uncapped:
+   * a three-shot burst under LOW GRAVITY stacked to 25 u/s — three and a half
+   * times top speed — and shoved you backwards at 18 u/s while you sprinted the
+   * other way, for over a second. That is the "sliding left, can't go right"
+   * report, and it reads as broken controls rather than as a game effect.
+   *
+   * At 1.5x speed a blast still throws you properly and a burst still pushes
+   * you around, but sustained fire can no longer take the wheel outright.
+   */
+  maxKnockback: 7.2 * 1.5,
 };
 
 // ---------------------------------------------------------- AIM ASSIST
@@ -561,6 +576,22 @@ export const POTATO = {
 //
 // Each contract declares EITHER `onEvent` (count things that happened) or
 // `onTick` (accumulate time under a condition) — never both.
+/**
+ * Revenge.
+ *
+ * The most reliable social mechanic in the genre, and the cheapest: whoever
+ * killed you last is marked, and killing them back pays. It manufactures a
+ * personal story inside a four-minute match between strangers, which is
+ * exactly what a session game with no accounts is otherwise missing.
+ *
+ * `window` matters — a nemesis you are still chasing three minutes later is
+ * a grudge; one from thirty seconds ago is a rematch.
+ */
+export const REVENGE = {
+  window: 45,      // seconds the mark stays live
+  bonus: 75,       // extra score for taking them back down
+};
+
 export const CONTRACT = {
   duration: 45,     // seconds before an unfinished contract rotates out
   gap: 4,           // breather between contracts

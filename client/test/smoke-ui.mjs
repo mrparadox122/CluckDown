@@ -78,6 +78,16 @@ await page.mouse.up();
 await page.keyboard.up('KeyD');
 
 // Quick chat.
+//
+// Firing grabbed pointer lock, which hands the cursor to the canvas and makes
+// every HUD button unclickable — correct first-person behaviour, and the reason
+// the game announces "ESC TO FREE THE CURSOR". So do what a player does.
+// exitPointerLock() rather than a synthetic Escape: headless Chromium does not
+// treat a dispatched keypress as the user gesture that releases the lock, but
+// this is exactly what Escape does for a real player.
+await page.evaluate(() => document.exitPointerLock?.());
+await page.waitForTimeout(500);
+
 const qc = await page.$$('.qc-btn');
 if (qc[0]) await qc[0].click();
 await page.waitForTimeout(300);

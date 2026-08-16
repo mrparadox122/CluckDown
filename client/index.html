@@ -80,6 +80,16 @@
             <span>Antialiasing</span>
             <input id="gfx-antialias" type="checkbox" />
           </label>
+          <label class="setting toggle">
+            <span>Aim assist</span>
+            <input id="gfx-assist" type="checkbox" />
+          </label>
+          <p class="settings-hint">Aim assist gently pulls your crosshair onto a nearby chicken. On by default — aiming with a thumb is hard.</p>
+          <label class="setting toggle">
+            <span>Move the fire button</span>
+            <input id="gfx-fire-edit" type="checkbox" />
+          </label>
+          <p class="settings-hint">Thumb reach varies by hand and phone, so the fire button can be dragged anywhere. Turn this on, drag it in your next match, then turn it off.</p>
           <p class="settings-hint">Lower resolution and glow off give the biggest speed-up on older phones. Applies to your next match.</p>
         </div>
       </details>
@@ -117,6 +127,31 @@
   <!-- ===================== IN-GAME HUD ===================== -->
   <div id="hud" class="hidden">
     <div id="world-overlay"></div>
+    <!-- The crosshair is drawn where the shot will actually land (see
+         setCrosshairAt), and the minimap gives back the spatial awareness a
+         first-person view cannot. Both are unconditional — there is no other
+         camera to switch to. -->
+    <div id="crosshair" class="crosshair"></div>
+    <!-- Touch first-person controls.
+         `#look-zone` is a bare swipe surface, NOT a stick. Every successful
+         mobile shooter (CoD Mobile, PUBG, Standoff) does it this way: a stick
+         is a rate control, so precise aim means holding a direction for exactly
+         the right duration, which is impossible under pressure. A swipe is a
+         direct positional mapping — you move your thumb the amount you want to
+         turn. That single difference is most of "FPS is hard on mobile". -->
+    <div id="look-zone" class="look-zone"></div>
+    <button id="fire-btn" class="fire-btn" type="button" aria-label="Fire">
+      <span>FIRE</span>
+    </button>
+    <canvas id="minimap" class="minimap" width="150" height="150"></canvas>
+
+    <!-- Bottom-centre strips.
+         These MUST be direct children of #hud. Nested inside .hud-top they
+         positioned against it instead of the viewport, and .hud-top grows with
+         the killfeed — so a busy match pushed both of these into the middle of
+         the screen, right over the fight. -->
+    <div id="contract" class="contract hidden"></div>
+    <div id="action-prompt" class="action-prompt hidden"></div>
 
     <div class="hud-top">
       <div id="killfeed" class="killfeed"></div>
@@ -128,13 +163,8 @@
         <div id="mod-badge" class="mod-badge hidden"></div>
         <div id="objective" class="objective hidden"></div>
         <div id="match-clock" class="match-clock">4:00</div>
-        <!-- Your personal side-task. Bottom-centre rather than up here with the
-             mode pill: it changes every 45s and needs to catch the eye without
-             sitting in the middle of the fight. -->
-        <div id="contract" class="contract hidden"></div>
         <div class="hud-buttons">
           <button id="hud-mute" class="icon-btn hud-mute" type="button" aria-label="Mute">&#128266;</button>
-          <button id="hud-view" class="icon-btn hud-mute" type="button" aria-label="Camera view" title="Camera view">&#128247;</button>
           <button id="hud-fullscreen" class="icon-btn hud-mute" type="button" aria-label="Fullscreen" title="Fullscreen">&#9974;</button>
         </div>
         <button id="netstats" class="netstats" type="button" title="Network stats (N)"></button>
@@ -155,12 +185,15 @@
       <div class="respawn-inner">
         <div class="respawn-label">You got clucked</div>
         <div id="respawn-count" class="respawn-count">3</div>
+        <!-- Who did it, with what, and how close they were to dying themselves.
+             Not knowing why you died is what makes a shooter feel unfair; "12 HP
+             left" turns a frustration into a near miss. -->
+        <div id="killed-by" class="killed-by hidden"></div>
         <div class="respawn-sub">Spectating…</div>
       </div>
     </div>
 
     <div id="stick-left" class="stick-zone left"></div>
-    <div id="stick-right" class="stick-zone right"></div>
     <div id="touch-hint" class="touch-hint">Left stick moves · Right stick aims &amp; fires</div>
   </div>
 
@@ -174,7 +207,13 @@
         <tbody id="results-rows"></tbody>
       </table>
       <div id="results-rating" class="results-rating"></div>
-      <button id="again-btn" class="play-btn">Play again</button>
+      <!-- How close you came. Placement alone reads as "you lost"; the gap to
+           the chicken above you reads as "next time". -->
+      <div id="results-near" class="results-near"></div>
+      <button id="again-btn" class="play-btn">
+        <span id="again-label">Play again</span>
+        <i id="again-bar" class="again-bar"></i>
+      </button>
       <button id="menu-btn" class="ghost-btn">Main menu</button>
     </div>
   </section>

@@ -11,7 +11,24 @@ import {
 import { ratingDeltas } from '../rating.js';
 import { roomOpened, roomClosed, roomPopulation } from '../stats.js';
 
-const BOT_FILL_DELAY = 8; // seconds to wait for humans before padding with bots
+/**
+ * How long a public queue waits for other humans before padding with bots.
+ *
+ * This used to be 8 seconds, which — on top of the map vote — meant well over
+ * ten seconds of staring at a lobby before the first shot. For a free-tier
+ * browser game that is often the whole session: an empty server is the failure
+ * mode that kills small multiplayer games, not a missing feature.
+ *
+ * So the room fills almost immediately and starts. Nobody is stranded, because
+ * a human arriving later evicts a bot and drops straight into the running match
+ * (see takeSeat/evictBotSeat) — the seat is the same either way.
+ */
+const BOT_FILL_DELAY = 1.5;
+
+// Private rooms are the exception: friends are actively gathering, and filling
+// their match with bots before they arrive is the opposite of what they want.
+const BOT_FILL_DELAY_PRIVATE = 30;
+
 const POST_MATCH_SECONDS = 12;
 
 export class ArenaRoom extends Room {
@@ -28,7 +45,7 @@ export class ArenaRoom extends Room {
     this.world = createWorld({ mode });
     this.seats = new Array(this.cfg.maxPlayers).fill(null);
     // Friends need longer to gather than a public queue does.
-    this.botFillAt = this.code ? BOT_FILL_DELAY * 4 : BOT_FILL_DELAY;
+    this.botFillAt = this.code ? BOT_FILL_DELAY_PRIVATE : BOT_FILL_DELAY;
     this.postMatch = 0;
     this.fxQueue = [];
     this.fxFlushAt = 0;
@@ -116,6 +133,21 @@ export class ArenaRoom extends Room {
 
     this.broadcast('feed', { kind: 'join', name: p.name, color: p.color });
 
+    // Dropping into a match already in progress: give the newcomer the same
+    // spawn protection a respawn would, so "joined and was instantly dead" —
+    // the thing that makes hot-join feel hostile — can't happen.
+    if (this.world.phase === 'live') {
+      p.invulnUntil = this.world.time + PLAYER.spawnInvuln;
+      client.send('joinedInProgress', {
+        clock: this.world.clock,
+        map: this.world.map,
+        seat: p.seat,
+      });
+    }
+
+    // Only humans occupy client slots, so a room running with bots stays
+    // joinable — which is the entire point: the arena is always full, and real
+    // players displace bots as they arrive.
     if (this.clients.length >= this.cfg.maxPlayers) this.lock();
     this.reportPopulation();
   }
@@ -464,6 +496,9 @@ export class ArenaRoom extends Room {
     ps.deaths = p.deaths;
     ps.score = p.score;
     ps.respawnIn = p.alive ? 0 : Math.max(0, p.respawnAt - this.world.time);
+    ps.kx = p.kx;
+    ps.kz = p.kz;
+    ps.nemesis = this.world.time < p.nemesisUntil ? (p.nemesis ?? '') : '';
     ps.ack = p.lastSeq >>> 0;
     ps.bot = !!p.isBot;
     ps.carrying = p.carrying ?? 0;

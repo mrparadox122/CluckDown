@@ -35,6 +35,7 @@ page.on('pageerror', (e) => pageErrors.push(e.message));
 
 await page.goto(URL, { waitUntil: 'networkidle' });
 await page.fill('#name-input', 'SE');
+
 await page.click('#practice-btn');
 await passLobby(page);
 await page.waitForTimeout(5000);
@@ -127,80 +128,9 @@ check('kill feed takes under a third of the width',
 check('chat panel takes under a third of the width',
   layout.chatBox.w < layout.vw / 3, `${layout.chatBox.w}px of ${layout.vw}`);
 
-// --- 3. camera view modes ------------------------------------------------
-console.log('\n--- camera views ---');
-const readRig = () => page.evaluate(() => {
-  const r = window.__cluckdown.game.rig;
-  const c = r.camera.position;
-  return {
-    view: r.view,
-    zoomTarget: +r.zoomTarget.toFixed(2),
-    dist: +Math.hypot(c.x - r.focus.x, c.y - r.focus.y, c.z - r.focus.z).toFixed(1),
-    focus: [+r.focus.x.toFixed(1), +r.focus.z.toFixed(1)],
-  };
-});
-
-const settle = async () => {
-  await page.evaluate(() => new Promise((res) => {
-    const r = window.__cluckdown.game.rig;
-    const deadline = performance.now() + 12000;
-    const tick = () => {
-      const done = Math.abs(r.zoom - r.zoomTarget) < 0.01;
-      if (done || performance.now() > deadline) return res();
-      requestAnimationFrame(tick);
-    };
-    requestAnimationFrame(tick);
-  }));
-  return readRig();
-};
-
-const close = await settle();
-console.log('  close:', JSON.stringify(close));
-await page.evaluate(() => document.getElementById('hud-view').click());
-const mid = await settle();
-console.log('  mid:  ', JSON.stringify(mid));
-await page.evaluate(() => document.getElementById('hud-view').click());
-const full = await settle();
-console.log('  full: ', JSON.stringify(full));
-
-check('starts close', close.view === 'close');
-check('cycles close -> mid', mid.view === 'mid');
-check('cycles mid -> full', full.view === 'full');
-check('mid is further out than close', mid.dist > close.dist * 1.2, `${close.dist} -> ${mid.dist}`);
-check('full is further out than mid', full.dist > mid.dist, `${mid.dist} -> ${full.dist}`);
-check('full stops following the player', full.focus[0] === 0, `focus ${JSON.stringify(full.focus)}`);
-
-// Does the whole arena actually fit in full view?
-const fits = await page.evaluate(() => {
-  const g = window.__cluckdown.game;
-  const half = g.session.arenaSize / 2;
-  const corners = [[-half, -half], [half, -half], [-half, half], [half, half]];
-  return corners.map(([x, z]) => {
-    const p = g.projectFn(x, 0, z);
-    return p ? { x: Math.round(p.x), y: Math.round(p.y) } : null;
-  });
-});
-console.log('  arena corners on screen:', JSON.stringify(fits));
-check('every arena corner is on screen in full view',
-  fits.every((p) => p && p.x >= -20 && p.x <= layout.vw + 20 && p.y >= -20 && p.y <= layout.vh + 20),
-  JSON.stringify(fits));
-
-// The map should sit in the middle of the screen, not hug an edge.
-const cx = fits.reduce((a, p) => a + p.x, 0) / fits.length;
-const cy = fits.reduce((a, p) => a + p.y, 0) / fits.length;
-check('the map is centred in the viewport',
-  Math.abs(cx - layout.vw / 2) < layout.vw * 0.1 && Math.abs(cy - layout.vh / 2) < layout.vh * 0.15,
-  `map centre (${cx.toFixed(0)}, ${cy.toFixed(0)}) vs viewport (${layout.vw / 2}, ${layout.vh / 2})`);
-
-// Cycles back round.
-await page.evaluate(() => document.getElementById('hud-view').click());
-check('cycles full -> close', (await readRig()).view === 'close');
-
-// --- 4. the choice survives a reload -------------------------------------
-await page.evaluate(() => document.getElementById('hud-view').click());
-await page.waitForTimeout(400);
-const saved = await page.evaluate(() => JSON.parse(localStorage.getItem('cluckdown.gfx.v1') ?? '{}').view);
-check('camera choice is remembered', saved === 'mid', String(saved));
+// Sections 3 and 4 used to cover the camera cycle and the persisted view
+// setting. Cluckdown has one camera now, so both are gone — first person is
+// covered by controls.mjs (desktop) and fps-touch.mjs (phone).
 
 // --- 5. portrait shows the rotate prompt ---------------------------------
 console.log('\n--- orientation ---');

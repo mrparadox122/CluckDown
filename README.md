@@ -26,6 +26,20 @@ working on game feel.
 
 ### Controls
 
+First person is the default view. Settings has a Camera dropdown if you'd
+rather play top-down, and the in-game camera button cycles all four.
+
+**First person**
+
+| | Touch | Desktop |
+|---|---|---|
+| Move | Left joystick | `WASD` / arrows |
+| Look | Swipe the right half of the screen | Mouse (click to capture, `Esc` to release) |
+| Shoot | The FIRE button — draggable, see Settings | Hold left mouse / `Space` |
+| Chat | Quick-chat buttons | `T`, or the quick-chat buttons |
+
+**Top-down**
+
 | | Touch | Desktop |
 |---|---|---|
 | Move | Left joystick | `WASD` / arrows |
@@ -96,7 +110,17 @@ on the floor rather than sending it home, so shooting the carrier is worth it.
 Abandoned eggs walk themselves back after 15 seconds so a stalemate can't strand
 them.
 
-**Plant & Defuse** has one bomb. Both planting and defusing mean standing still
+**Plant & Defuse** was reported as flatly unlearnable, and the reason is
+structural: both of its actions are *holding still on a spot*, which is the one
+input nobody discovers by experimenting — standing still is what you do when you
+have run out of ideas. So the game says it out loud. A running prompt above the
+contract strip tracks exactly what to do next ("CARRY THE BOMB TO A RIVAL NEST"
+→ "STOP MOVING TO PLANT" → "PLANTING…" with a hold meter), the nest you should
+be running at pulses and spins, and the mode announces its goal at the whistle.
+The prompt is computed entirely client-side from state that was already synced,
+so it costs no extra traffic and works offline.
+
+Under the hood, **Plant & Defuse** has one bomb. Both planting and defusing mean standing still
 and holding, which turns it into a fight over a place rather than a race to
 touch a thing. Only the nest's owner can defuse, and only nests belonging to a
 present player can be planted in — otherwise an empty corner would be a free,
@@ -117,6 +141,42 @@ number.
 Rating is placement-based Elo: finishing above someone counts as beating them,
 scaled so a 4-player match moves your rating about as much as one duel would.
 It lives in `localStorage` and is sent to the server on join.
+
+## Revenge
+
+Whoever killed you last is marked for 45 seconds: a magenta ring in the world,
+a callout on the minimap, and a bonus for taking them back down. It is the
+cheapest social mechanic in the genre and the most reliable — it manufactures a
+personal story inside a four-minute match between strangers whose names you will
+never remember, which is exactly what a session game with no accounts otherwise
+lacks.
+
+Dying also brings up a **killed-by panel**: who, with what, from how far, and
+how much health they had left. That last number is the point. Perceived fairness
+in a shooter is driven almost entirely by whether you understand why you died,
+and "Nugget, 12 HP left" turns "this game is rigged" into "I nearly had them" —
+the difference between closing the tab and queueing again.
+
+## The between-match loop
+
+Three things live here, all for the same reason: the results screen used to make
+*doing nothing* the default action, and doing nothing means leaving.
+
+- **Auto-requeue.** An 8-second countdown on the Play again button, so the
+  default outcome is another match. Any pointer, key, scroll or touch cancels
+  it — someone reading their rating has not decided to leave, and yanking them
+  into a match mid-read is worse than letting them choose.
+- **Near-miss framing.** Not "2nd place" but "40 points behind Nugget. So
+  close." Same data; the second one is a rematch rather than a verdict.
+- **Instant matches.** A public queue now waits 1.5 seconds for other humans
+  before filling with bots, down from 8. A human arriving later evicts a bot and
+  drops straight into the running match with spawn protection, so nobody is
+  stranded and nobody joins to find an empty arena. Private rooms keep a 30
+  second wait, because friends gathering actually do want to wait for each
+  other.
+
+An empty server is the failure mode that kills small multiplayer games — not a
+missing feature. This is the part that addresses it.
 
 ## Contracts
 
@@ -284,6 +344,97 @@ players got desktop-sized text eating the play area. The mobile rules are now
 keyed on `max-height`, because on a landscape phone height is the scarce
 dimension. `npm run test:mobile` runs the whole suite at 667×375 for this reason.
 
+## First person
+
+**First person is the default view.** The camera button cycles
+**First person → Close → Mid → Full map**, and Settings has a Camera dropdown,
+so the top-down game is still one tap away for anyone who prefers it.
+
+This is cheaper than it sounds, because the simulation is already 2D: a position
+and a single aim angle, which is exactly what a first-person camera needs. The
+sim never learns that first person exists. Everything below is client-side.
+
+| | Top-down | First person |
+|---|---|---|
+| Camera | 22 units up, fixed dimetric tilt | at the chicken's eye height, 1.15 |
+| Field of view | 0.8 rad | 1.15 rad |
+| Look | — | yaw **and pitch**, clamped to -0.95..+0.42 rad |
+| Movement | world-space, W is north | facing-relative, W forward and A/D strafe |
+| Aim (desktop) | mouse position on the ground | mouse look under pointer lock |
+| Aim (touch) | right stick, absolute | **swipe anywhere on the right half** |
+| Fire (touch) | holding the right stick | a dedicated, **repositionable** button |
+| Aim assist | on | **off** |
+| Extras | none | crosshair, minimap, recoil kick |
+
+### Why the touch scheme changed
+
+The report was "FPS controls are harder on mobile", and the cause was structural
+rather than a sensitivity number. The first version used the right stick to
+look, as a rate control: hold right, keep turning right. Hitting a *specific*
+angle therefore meant holding a direction for exactly the right number of
+milliseconds — not something a thumb can do under pressure.
+
+Every shipped mobile shooter (Call of Duty Mobile, PUBG Mobile, Standoff) uses a
+bare **swipe surface** instead: a positional mapping where you move your thumb by
+the amount you want to turn. Twice the swipe is twice the turn, every time, so
+muscle memory has something stable to learn. `test:fps-touch` asserts exactly
+that proportionality, because it is the whole point of the change.
+
+Three consequences follow from it:
+
+- **Fire moved to its own button.** The look surface is a drag target now, so it
+  cannot double as a fire trigger. The button sits above the look surface in
+  z-order and both are tracked by `pointerId`, so holding fire with one thumb
+  while swiping to look with the other works — which is how the game is
+  actually played.
+- **The fire button can be dragged.** Thumb reach varies enormously by hand and
+  phone size. Settings, *Move the fire button* enables drag mode; the position is
+  stored as viewport fractions so it survives rotation and a change of device.
+  Editing sits behind an explicit toggle rather than a long-press, because a
+  long-press on a fire button is just... firing.
+- **Vertical look exists.** Previously the view only turned left and right,
+  which is what "we only move left and right" meant. Pitch is damped relative to
+  yaw (`FP_PITCH_RATIO`), because everything worth shooting stands on the ground
+  — pitch is for looking, not aiming, and a twitchy vertical axis only makes the
+  horizon seasick.
+
+### The crosshair tells the truth
+
+Shots travel along the yaw at chest height; pitch does not tilt them, because
+the simulation is flat. A reticle nailed to the centre of the screen would
+therefore start lying the moment the view tilted.
+
+Instead the crosshair is drawn at the **projected world position** of the aim
+point, 16 units down the firing line. Level, it sits near the centre; tilted, it
+moves to wherever the shot will actually be. With aim assist deliberately off in
+first person, that honesty is the entire contract with the player.
+
+### Other first-person notes
+
+**Aim assist is off.** The camera renders your *local* yaw so looking around is
+instant rather than a network round-trip, while assist would be quietly steering
+the server's aim somewhere else. `p.input.fp` carries this to the simulation.
+
+**Your own effects are suppressed.** Your gun goes off roughly where your
+eyeballs are, so the muzzle flash (a 0.9-unit glowing sphere) and the tracer (a
+3.2-unit stretched box) both rendered *inside* the camera — a full-screen white
+flash on every shot. The flash is now skipped for your own shots, your tracer
+starts 3.2 units ahead, and a small recoil kick replaces them. It reads as
+"I fired" better than the flash did anyway.
+
+**The minimap is not decoration.** Losing the overview is the real cost of first
+person in a four-player arena — you can no longer see who is behind you, or
+which corner the bomber came from — so it draws players, the bomber, pickups,
+nests, the hill zone and the bomb, rotated so your facing is always up.
+
+**Dying** lifts the camera 6 units and tilts it down, because there is nothing
+to look through once you are dead.
+
+**On desktop, pointer lock hides the cursor**, which makes every HUD button
+unclickable until Esc gives it back. That is correct FPS behaviour and totally
+baffling unannounced, so the game says "ESC TO FREE THE CURSOR" the first time
+it captures the pointer.
+
 ## Graphics settings
 
 Under **Graphics** on the menu, aimed at older phones:
@@ -382,6 +533,36 @@ npm install -D playwright && npx playwright install chromium
 | `test:perf` | Draw-call and material counts, thin instances, graphics settings |
 | `test:stats` | Server status panel and the in-game network readout |
 | `test:tasks` | Both new modes end-to-end in a browser: nests and eggs render, the bomb is pickable, the contract strip names and counts its task, the zone marker follows a relocation |
+| `test:control` | **Knockback can never take the wheel** — see below — plus movement symmetry on every map and in every mode |
+| `test:fps` | First person on desktop: camera at eye level and on the player, own body hidden, facing-relative movement, mouse look in both axes, crosshair, minimap, and everything restored on the way out |
+| `test:fps-touch` | First person on an emulated phone: swipe-to-look **proportionality**, pitch and its clamp, the fire button, firing and looking with two thumbs at once, and dragging the fire button to a new home |
+| `test:retention` | Killed-by panel, the nemesis ring, the auto-requeue countdown and its cancellation |
+
+### The knockback bug, and why `test:control` exists
+
+Players reported "in some maps I slide left easily but can't go right", which
+sounded like a map or a control bug and was neither. Knockback is *added* to
+movement velocity and was uncapped, so it stacked:
+
+| | impulse | vs top speed (7.2) |
+|---|---|---|
+| one bullet | 3.5 | recoverable |
+| one bullet, LOW GRAVITY | 8.4 | already more than you can walk |
+| three-shot burst, LOW GRAVITY | 25.2 | 3.5x top speed, decaying over ~2s |
+
+Sprinting *into* that burst, you moved backwards at up to 18 u/s and ended two
+seconds later 5.8 units behind where you started. "Some maps" was really "some
+matches" — the ones that rolled LOW GRAVITY, whose badge nobody reads. And
+because client prediction ignored knockback entirely, your screen showed you
+walking forward while the server dragged you back, which is why it read as
+broken controls rather than as being shot.
+
+Two fixes: `PLAYER.maxKnockback` caps the accumulated shove at 1.5x top speed
+(a blast still throws you; sustained fire can no longer steer you), and the
+client now predicts knockback, carry-slow and warmup speed exactly as the
+server applies them. `test:control` pins both, and also proves movement is
+symmetric on every map and in every mode — because the original report was
+directional and "I checked, it's fine" is not evidence.
 
 Two of the browser objective checks drive the *local player* onto the bomb and
 the potato rather than waiting for a bot to blunder into a 1.5-unit radius. That
@@ -646,8 +827,10 @@ bugs. Don't "clean them up" without checking:
   buffer.** On a jittery connection that shows as rubber-banding, and at low
   framerates the factor clamps to 1 and it snaps. Proper snapshot interpolation
   (buffer two states, render ~100ms behind) is the fix and costs nothing on the GPU.
-- **Client prediction ignores knockback**, so high-knockback situations (a blast,
-  or the LOW GRAVITY modifier) produce a visible correction on your own chicken.
+- First person gives up a lot of what makes the top-down view work: you cannot
+  see the bomber creeping up behind you, and reading a four-way fight is much
+  harder. The minimap covers some of that, not all of it. It is offered as a
+  choice for players who want it, and the top-down view remains the default.
 - Under a very slow renderer the offline practice sim runs slower than real time,
   because per-frame delta is clamped. That's the right trade — better than
   fast-forwarding the match — and online play is unaffected; the server owns the clock.

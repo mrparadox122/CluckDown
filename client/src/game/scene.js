@@ -19,33 +19,29 @@ import '@babylonjs/core/Meshes/thinInstanceMesh';
 import { hardwareScaling } from '../graphics.js';
 import { MAPS, DEFAULT_MAP, HILL } from '@cluckdown/shared';
 
-// The reference screenshot is a dimetric view — tilted ~58° off horizontal,
-// never straight down and never rotating with aim. Camera follows position
-// only, Brawl-Stars style, so the arena stays readable.
-const CAM_HEIGHT = 22;
-const CAM_BACK = 13.5;
-const CAM_LERP = 6; // higher = snappier follow
-const CAM_FOV = 0.8;
-// How far past the wall the camera is allowed to show before it stops following.
-const VOID_MARGIN = 1.5;
+// Cluckdown is a first-person game. Everything here is the camera that sits
+// behind the chicken's eyes.
+//
+// Eye height is deliberately chicken-height, not human-height: at 1.15 the
+// 2.6-unit walls actually enclose you. Raise it much past 1.6 and you look
+// straight over the top into the abyss the arena floats above.
+const FPS_EYE = 1.15;
+const FPS_FOV = 1.15;      // ~66 degrees
+const FPS_NEAR = 0.12;     // your own muzzle would clip against anything larger
+const FPS_YAW_LERP = 22;   // high: looking around must feel instant
+const FPS_RECOIL_KICK = 0.035;   // radians per shot
+const FPS_RECOIL_RECOVER = 9;    // per second
 
-// Camera distance multipliers. 1.0 is the neutral framing CAM_HEIGHT/CAM_BACK
-// describe; smaller is closer.
-const ZOOM_ALIVE = 0.85;    // in the fight
-const ZOOM_DEAD = 1.45;     // dead — wide enough to spectate the whole arena
-const ZOOM_RESPAWN = 0.62;  // the moment you pop back in
-const ZOOM_RATE_IN = 3.2;
-const ZOOM_RATE_OUT = 1.5;      // dying pulls back slowly, it reads as deliberate
-const ZOOM_RATE_RESPAWN = 2.6;  // then eases open from the punch
-const PUNCH_LOCKOUT = 0.6;      // seconds a respawn punch outranks alive/dead state
+// Pitch limits. Up is capped hard because there is nothing above the arena but
+// void; down is generous because that is where the chickens are.
+export const FPS_PITCH_MIN = -0.95;
+export const FPS_PITCH_MAX = 0.42;
 
-// Player-chosen framing. 'full' is computed per aspect ratio rather than fixed,
-// because "the whole map fits" means something different on a 21:9 phone in
-// landscape than on a tablet.
-export const VIEW_MODES = ['close', 'mid', 'full'];
-export const VIEW_LABELS = { close: 'Close', mid: 'Mid', full: 'Full map' };
-const VIEW_MUL = { close: 1, mid: 1.45 };
-const FIT_MARGIN = 3; // world units of breathing room around the arena
+// Spectator orbit, used while dead. With no top-down view left, this is the
+// only overhead shot anyone ever gets.
+const SPECTATE_HEIGHT = 9;
+const SPECTATE_RADIUS = 7;
+const SPECTATE_SPIN = 0.22; // radians per second
 
 export function createStage(canvas, gfx = { resolution: 1, glow: true, antialias: true }, modifier = 'none') {
   const engine = new Engine(canvas, gfx.antialias, {
@@ -64,9 +60,9 @@ export function createStage(canvas, gfx = { resolution: 1, glow: true, antialias
   scene.fogDensity = 0.011;
   scene.blockMaterialDirtyMechanism = true;
 
-  const camera = new UniversalCamera('cam', new Vector3(0, CAM_HEIGHT, -CAM_BACK), scene);
-  camera.fov = CAM_FOV;
-  camera.minZ = 1;
+  const camera = new UniversalCamera('cam', new Vector3(0, FPS_EYE, 0), scene);
+  camera.fov = FPS_FOV;
+  camera.minZ = FPS_NEAR;
   camera.maxZ = 200;
   camera.setTarget(Vector3.Zero());
   // No player camera control at all — the angle is part of the game's identity.
@@ -281,198 +277,140 @@ export function buildArena(scene, size, mapId = DEFAULT_MAP) {
  * Smooth follow + screen shake. Shake is applied after the lerp so it never
  * accumulates into the camera's resting position.
  */
+/**
+ * The camera.
+ *
+ * Cluckdown is first person, so this is simply "where the chicken's eyes are".
+ * There used to be three top-down framings alongside it and a good deal of zoom
+ * machinery to move between them; all of that is gone, and the file is roughly
+ * a third the size for it.
+ *
+ * The simulation is still 2D — a position and one aim angle — which is exactly
+ * what a first-person camera needs. Pitch exists only here; it never reaches
+ * the sim, because everything in the game stands on the same ground plane.
+ */
 export class CameraRig {
   constructor(camera, arenaSize, engine) {
     this.camera = camera;
     this.engine = engine;
-    this.focus = new Vector3(0, 0, 0);
-    this.shake = 0;
-    // Pull back a little on bigger arenas so framing feels consistent.
-    const scale = Math.max(0.72, arenaSize / 40);
-    this.baseHeight = CAM_HEIGHT * scale;
-    this.baseBack = CAM_BACK * scale;
     this.half = arenaSize / 2;
 
-    this.zoom = ZOOM_ALIVE;
-    this.zoomTarget = ZOOM_ALIVE;
-    this.zoomRate = ZOOM_RATE_IN;
-    this.punchTimer = 0;
-    this.view = 'close';
+    this.camera.fov = FPS_FOV;
+    this.camera.minZ = FPS_NEAR;
+
+    this.focus = new Vector3(0, 0, 0);
+    this.shake = 0;
+    this.recoil = 0;
+
+    // Smoothed separately from the raw input so a 40Hz patch, or a dropped
+    // frame, doesn't make the whole world step sideways.
+    this.yaw = 0;
+    this.yawHas = false;
+
+    // Spectator orbit, used while dead.
+    this.spectateAngle = 0;
     this.alive = true;
-    this.fitOffsetZ = 0;
-
-    this.limits = null;
-    this.recomputeLimits();
-    this.snapTo(0, 0);
   }
 
-  // Distance is derived from zoom, so everything downstream — framing and the
-  // follow limits below — reacts to it for free.
-  get height() { return this.baseHeight * this.zoom; }
+  /** Kept for the resize handler; there are no follow limits to recompute now. */
+  recomputeLimits() {}
 
-  get back() { return this.baseBack * this.zoom; }
-
-  /**
-   * The camera keeps the player dead centre, everywhere in the arena.
-   *
-   * An earlier version clamped the follow so empty space past the walls could
-   * never come into frame. It framed nicely but it meant your chicken slid off
-   * toward a screen edge whenever you fought near a wall, which is exactly
-   * where fights happen. Centring is worth more than tidy edges, so the void
-   * is handled by actually building something out there (see buildArena's slab
-   * and abyss) rather than by refusing to look at it.
-   *
-   * These bounds are only a safety net: a player can never leave the arena, so
-   * the clamp never actually engages during play.
-   */
-  recomputeLimits() {
-    this.limits = { x: this.half, zMax: this.half, zMin: -this.half };
-    // A rotation or resize changes what "the whole map" costs.
-    if (this.view === 'full') this.applyZoomTarget();
-  }
-
-  /**
-   * Zoom at which the entire arena is visible.
-   *
-   * Distance scales linearly with zoom and the camera pitch does not change, so
-   * the ground footprint at zoom 1 can be measured once and scaled. Both axes
-   * are checked because a wide landscape phone runs out of vertical coverage
-   * first, and a tall one runs out of horizontal.
-   */
-  fitView() {
-    const aspect = this.engine ? this.engine.getRenderWidth() / this.engine.getRenderHeight() : 1.6;
-    const halfFov = CAM_FOV / 2;
-    const pitch = Math.atan2(this.baseHeight, this.baseBack);
-    const dist = Math.hypot(this.baseHeight, this.baseBack);
-
-    // Ground coverage at zoom 1, measured relative to the focus point. The view
-    // is tilted, so these are NOT symmetric: it sees much further beyond the
-    // focus than in front of it.
-    const far = this.baseHeight / Math.tan(Math.max(0.05, pitch - halfFov)) - this.baseBack;
-    const near = this.baseHeight / Math.tan(Math.min(Math.PI / 2 - 0.01, pitch + halfFov)) - this.baseBack;
-    const halfW = dist * Math.tan(halfFov) * aspect;
-
-    const needed = this.half + FIT_MARGIN;
-    const zoom = Math.max(1, (needed * 2) / (far - near), needed / halfW);
-
-    // Because coverage is lopsided, sitting the focus on the arena centre would
-    // hang the far half in empty space and push the near edge off the bottom of
-    // the screen. Offsetting the focus by the midpoint of the covered strip is
-    // what actually centres the *map* in the viewport.
-    return { zoom, offsetZ: -((far + near) / 2) * zoom };
-  }
-
-  /** close = in the fight, mid = pulled back, full = whole map, centred. */
-  setView(view) {
-    if (!VIEW_MODES.includes(view) || view === this.view) return this.view;
-    this.view = view;
-    this.zoomRate = ZOOM_RATE_IN;
-    this.applyZoomTarget();
-    return this.view;
-  }
-
-  cycleView() {
-    return this.setView(VIEW_MODES[(VIEW_MODES.indexOf(this.view) + 1) % VIEW_MODES.length]);
-  }
-
-  applyZoomTarget() {
-    if (this.view === 'full') {
-      // Full map ignores the alive/dead framing — it is already as wide as it
-      // gets, and stacking the death pull-back on top just pushes the arena
-      // into the distance.
-      const fit = this.fitView();
-      this.zoomTarget = fit.zoom;
-      this.fitOffsetZ = fit.offsetZ;
-      return;
-    }
-    this.zoomTarget = (this.alive ? ZOOM_ALIVE : ZOOM_DEAD) * VIEW_MUL[this.view];
-  }
-
-  snapTo(x, z) {
-    this.focus.set(x, 0, z);
-    this.camera.position.set(x, this.height, z - this.back);
-    this.camera.setTarget(this.focus);
+  setAlive(alive) {
+    if (alive === this.alive) return;
+    this.alive = alive;
+    if (!alive) this.spectateAngle = this.yaw;
   }
 
   addShake(amount) {
     this.shake = Math.min(1.4, this.shake + amount);
   }
 
-  /**
-   * Alive: sit in close on the action. Dead: drift back for a spectator view.
-   *
-   * Pulling back also re-centres the camera on its own — a wider view shrinks
-   * the follow limits, so the clamp in update() walks the focus toward the
-   * middle of the arena without any special spectator-camera code.
-   */
-  setAlive(alive) {
-    // A respawn punch briefly outranks this. The 'respawn' effect and the
-    // alive=true state arrive in separate messages, so for a frame or two the
-    // state can still read "dead" — without this guard the camera would yank
-    // straight back out again mid-punch.
-    if (!alive && this.punchTimer > 0) return;
-    if (alive === this.alive) return;
-    this.alive = alive;
-    // Dying eases out slowly (you've got time, you're dead); living snaps in.
-    this.zoomRate = alive ? ZOOM_RATE_IN : ZOOM_RATE_OUT;
-    this.applyZoomTarget();
+  /** A shot was fired: kick the view up a touch. */
+  addRecoil() {
+    this.recoil = Math.min(0.12, this.recoil + FPS_RECOIL_KICK);
   }
 
   /**
-   * Respawn: slam the camera onto the player's new corner, tight, then let it
-   * breathe back out. Without this you reappear somewhere across the map with
-   * no visual cue and spend a second wondering which chicken is yours.
+   * Respawn: snap the camera to the new corner so "I'm back" is unmissable.
+   *
+   * In first person there is no zoom punch to play, so this is a hard cut plus
+   * a nudge of shake — which reads as landing rather than as a glitch.
    */
   respawnPunch(x, z) {
-    // In full-map view there is nothing to punch in to.
-    if (this.view === 'full') return;
-    this.zoom = ZOOM_RESPAWN;
-    this.zoomTarget = ZOOM_ALIVE;
-    this.zoomRate = ZOOM_RATE_RESPAWN;
-    this.punchTimer = PUNCH_LOCKOUT;
-
-    // Cut straight to the new position instead of sliding across the arena.
-    this.recomputeLimits();
-    const lim = this.limits;
-    this.focus.x = Math.max(-lim.x, Math.min(lim.x, x));
-    this.focus.z = Math.max(lim.zMin, Math.min(lim.zMax, z));
+    this.focus.set(x, 0, z);
+    this.yawHas = false; // don't sweep the view across the arena to get here
     this.addShake(0.22);
   }
 
-  update(dt, targetX, targetZ) {
-    if (this.punchTimer > 0) this.punchTimer -= dt;
+  snapTo(x, z) {
+    this.focus.set(x, 0, z);
+    this.camera.position.set(x, FPS_EYE, z);
+  }
 
-    // Full map is a fixed overview: stop following and frame the whole arena.
-    if (this.view === 'full') {
-      targetX = 0;
-      targetZ = this.fitOffsetZ ?? 0;
-    }
+  /**
+   * @param aim      where the player is looking, in radians
+   * @param alive    false switches to the spectator orbit
+   * @param pitch    vertical look, already clamped by the caller
+   * @param watch    optional {x, z} to spectate — normally your killer
+   */
+  update(dt, targetX, targetZ, aim = 0, alive = true, pitch = 0, watch = null) {
+    this.recoil = Math.max(0, this.recoil - dt * FPS_RECOIL_RECOVER);
+    if (!alive) return this.updateSpectator(dt, targetX, targetZ, watch);
 
-    if (Math.abs(this.zoom - this.zoomTarget) > 0.0005) {
-      const zt = 1 - Math.exp(-this.zoomRate * dt);
-      this.zoom += (this.zoomTarget - this.zoom) * zt;
-      this.recomputeLimits(); // distance changed, so the follow limits did too
-    }
+    // Shortest-path yaw interpolation, or turning past +/-180 spins the world.
+    if (!this.yawHas) { this.yaw = aim; this.yawHas = true; }
+    let d = (aim - this.yaw) % (Math.PI * 2);
+    if (d > Math.PI) d -= Math.PI * 2;
+    if (d < -Math.PI) d += Math.PI * 2;
+    this.yaw += d * Math.min(1, FPS_YAW_LERP * dt);
 
-    const lim = this.limits;
-    const tx = Math.max(-lim.x, Math.min(lim.x, targetX));
-    const tz = Math.max(lim.zMin, Math.min(lim.zMax, targetZ));
-
-    const t = 1 - Math.exp(-CAM_LERP * dt); // frame-rate independent lerp
-    this.focus.x += (tx - this.focus.x) * t;
-    this.focus.z += (tz - this.focus.z) * t;
+    this.focus.set(targetX, 0, targetZ);
 
     let sx = 0;
     let sy = 0;
     if (this.shake > 0.001) {
-      const s = this.shake * this.shake; // ease out — big hits punch, small ones nudge
-      sx = (Math.random() * 2 - 1) * s * 1.6;
-      sy = (Math.random() * 2 - 1) * s * 1.6;
+      const sh = this.shake * this.shake; // ease out: big hits punch, small ones nudge
+      // Much smaller than a third-person shake would be. At eye level, screen
+      // shake stops reading as impact and starts reading as nausea.
+      sx = (Math.random() * 2 - 1) * sh * 0.35;
+      sy = (Math.random() * 2 - 1) * sh * 0.35;
       this.shake = Math.max(0, this.shake - dt * 2.6);
     }
 
-    this.camera.position.set(this.focus.x + sx, this.height + sy, this.focus.z - this.back);
-    this.camera.setTarget(this.focus);
+    const look = pitch + this.recoil;
+    // Spherical, so looking down doesn't shorten the horizontal component and
+    // change the apparent turn rate.
+    const cp = Math.cos(look);
+    this.camera.position.set(targetX + sx, FPS_EYE + sy, targetZ);
+    this.camera.setTarget(new Vector3(
+      targetX + Math.sin(this.yaw) * cp * 10,
+      FPS_EYE + Math.sin(look) * 10,
+      targetZ + Math.cos(this.yaw) * cp * 10,
+    ));
+  }
+
+  /**
+   * Dead: rise up and watch.
+   *
+   * With no top-down view left in the game, this is the only overhead anyone
+   * ever gets, so it does real work rather than just parking the camera. It
+   * orbits slowly above the spot you fell on, and if your killer is still alive
+   * it keeps them framed — which turns the respawn wait into something to watch
+   * and feeds the revenge mark waiting for you when you come back.
+   */
+  updateSpectator(dt, x, z, watch) {
+    this.spectateAngle += dt * SPECTATE_SPIN;
+    this.shake = 0;
+
+    const cx = x + Math.sin(this.spectateAngle) * SPECTATE_RADIUS;
+    const cz = z + Math.cos(this.spectateAngle) * SPECTATE_RADIUS;
+    this.camera.position.set(cx, SPECTATE_HEIGHT, cz);
+
+    // Frame the killer if they are still up, otherwise the place you died.
+    const tx = watch ? watch.x : x;
+    const tz = watch ? watch.z : z;
+    this.focus.set(tx, 0, tz);
+    this.camera.setTarget(new Vector3(tx, 0.85, tz));
   }
 }
 

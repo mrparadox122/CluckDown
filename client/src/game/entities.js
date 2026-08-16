@@ -96,6 +96,7 @@ export class PlayerView {
     this.z = player.z;
     this.aim = player.aim;
     this.bob = Math.random() * Math.PI * 2;
+    this.hidden = false;
     this.flash = 0;
     this.visible = true;
 
@@ -129,12 +130,36 @@ export class PlayerView {
     this.crown.position.y = 2.15;
     this.crown.isPickable = false;
     this.crown.setEnabled(false);
+
+    // Nemesis ring: whoever killed you last. Deliberately at ground level and
+    // in a colour nothing else uses, so "that one owes me" is legible from
+    // across the arena without competing with the crown above their head.
+    this.grudge = MeshBuilder.CreateTorus('grudge', {
+      diameter: 2.4, thickness: 0.11, tessellation: 22,
+    }, scene);
+    this.grudge.material = emissiveMat(scene, 'grudgeMat', '#ff4df0', { intensity: 1.0 });
+    this.grudge.parent = this.root;
+    this.grudge.position.y = 0.06;
+    this.grudge.isPickable = false;
+    this.grudge.setEnabled(false);
   }
 
   setVisible(v) {
     if (this.visible === v) return;
     this.visible = v;
-    this.root.setEnabled(v);
+    this.root.setEnabled(v && !this.hidden);
+  }
+
+  /**
+   * Hides the body without touching alive/dead state.
+   *
+   * Used for your own chicken in first person, where the camera sits inside
+   * the mesh and would otherwise render the inside of your own beak.
+   */
+  setHidden(h) {
+    if (this.hidden === h) return;
+    this.hidden = h;
+    this.root.setEnabled(this.visible && !h);
   }
 
   hit() { this.flash = 1; }
@@ -197,6 +222,14 @@ export class PlayerView {
       if (target.bounty) {
         this.crown.rotation.y += dt * 1.6;
         this.crown.position.y = 2.15 + Math.sin(this.bob * 0.8) * 0.06;
+      }
+    }
+
+    if (this.grudge) {
+      this.grudge.setEnabled(!!target.nemesis);
+      if (target.nemesis) {
+        this.grudge.rotation.y -= dt * 2.2;
+        this.grudge.scaling.setAll(1 + Math.abs(Math.sin(this.bob * 1.1)) * 0.07);
       }
     }
 
@@ -395,15 +428,23 @@ export class NestView {
     }
   }
 
-  update(dt, nest) {
+  /**
+   * @param target true when this is somewhere the local player should be
+   *               heading — a plantable nest while carrying the bomb, or one
+   *               worth raiding. "Go to a rival nest" means nothing until one
+   *               of them is lit up.
+   */
+  update(dt, nest, target = false) {
     this.t += dt;
     this.pad.position.set(nest.x, 0.04, nest.z);
     this.ring.position.set(nest.x, 0.09, nest.z);
-    this.ring.rotation.y += dt * 0.4;
+    this.ring.rotation.y += dt * (target ? 1.6 : 0.4);
     // Breathe faster when the nest is nearly empty — that is when its owner
     // most needs to notice it.
     const panic = nest.eggs <= 1 ? 1 : 0;
-    this.pad.material.alpha = 0.14 + Math.abs(Math.sin(this.t * (1.2 + panic * 4))) * 0.12;
+    const beat = Math.abs(Math.sin(this.t * (target ? 5 : 1.2 + panic * 4)));
+    this.pad.material.alpha = (target ? 0.26 : 0.14) + beat * 0.12;
+    this.ring.scaling.setAll(target ? 1 + beat * 0.06 : 1);
     this.setCount(Math.min(nest.eggs, 12), nest.x, nest.z);
   }
 

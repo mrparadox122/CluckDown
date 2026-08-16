@@ -43,6 +43,7 @@ export class Hud {
     this.netStatsEl = $('netstats');
     this.objectiveEl = $('objective');
     this.contractEl = $('contract');
+    this.promptEl = $('action-prompt');
     this.roomChip = $('room-chip');
     this.onChat = onChat;
     // Compact by default; expanded shows the full breakdown.
@@ -80,6 +81,10 @@ export class Hud {
     this.objectiveEl.classList.add('hidden');
     this.contractEl.classList.add('hidden');
     this.contractShown = null;
+    this.promptEl.classList.add('hidden');
+    this.promptShown = null;
+    this.setKilledBy(null);
+    this.clearMarkers();
     this.roomChip.classList.add('hidden');
   }
 
@@ -226,6 +231,231 @@ export class Hud {
     this.contractFill.style.transform = `scaleX(${Math.max(0, Math.min(1, pct))})`;
     this.contractTime.textContent = `${Math.ceil(contract.secondsLeft)}s`;
     el.classList.toggle('urgent', contract.secondsLeft <= 10);
+  }
+
+  /**
+   * Off-screen and on-screen markers for things that matter.
+   *
+   * First person took away the overview, and two things broke with it:
+   *
+   *  - the bomber could creep up behind you with no warning at all, which turns
+   *    a tense mechanic into an unfair one;
+   *  - "run the eggs home" and "carry the bomb to a rival nest" both assumed
+   *    you could see where that was.
+   *
+   * One system fixes both. A marker in front of you sits on the thing it names;
+   * a marker behind you is pinned to the edge of the screen and points at it,
+   * with the distance so you can judge whether to run or fight.
+   *
+   * @param items [{ key, x, z, icon, color, dist, bearing, urgent }]
+   */
+  setMarkers(items, project, viewport) {
+    this.markers ??= new Map();
+    const seen = new Set();
+
+    for (const it of items) {
+      seen.add(it.key);
+      let el = this.markers.get(it.key);
+      if (!el) {
+        el = el2('div', 'marker');
+        el.append(el2('span', 'mk-icon'), el2('span', 'mk-dist'));
+        this.overlay.append(el);
+        this.markers.set(it.key, el);
+      }
+
+      const pt = project(it.x, 1.2, it.z);
+      const { w, h } = viewport;
+      const pad = 26;
+
+      // project() returns null when the point is behind the camera — which is
+      // exactly the marker that matters most, so those are placed by bearing
+      // rather than dropped.
+      let x;
+      let y;
+      let off;
+      if (pt) {
+        x = pt.x;
+        y = pt.y;
+        off = x < pad || x > w - pad || y < pad || y > h - pad;
+      } else {
+        off = true;
+        x = angleTo(it.bearing) > 0 ? w - pad : pad;
+        y = h / 2;
+      }
+
+      if (off) {
+        x = Math.max(pad, Math.min(w - pad, x));
+        y = Math.max(pad, Math.min(h - pad, y));
+      }
+
+      el.className = `marker${off ? ' is-off' : ''}${it.urgent ? ' is-urgent' : ''}`;
+      el.style.transform = `translate(${x}px, ${y}px) translate(-50%, -50%)`;
+      el.style.setProperty('--mk', it.color ?? '#ffffff');
+      el.firstChild.textContent = it.icon;
+      el.lastChild.textContent = it.dist != null ? `${Math.round(it.dist)}m` : '';
+    }
+
+    for (const [key, el] of this.markers) {
+      if (seen.has(key)) continue;
+      el.remove();
+      this.markers.delete(key);
+    }
+  }
+
+  clearMarkers() {
+    for (const el of this.markers?.values() ?? []) el.remove();
+    this.markers?.clear();
+  }
+
+  /**
+   * Moves the reticle to where the shot will actually land.
+   *
+   * Pitch is a look control, not an aim one — everything in this game stands on
+   * the ground plane — so a reticle nailed to screen centre starts lying the
+   * moment the view tilts. This takes the projected aim point instead, which
+   * stays truthful at any pitch. Passing null hides it, which is what happens
+   * while you are dead.
+   */
+  setCrosshairAt(pt) {
+    const el = $('crosshair');
+    if (!pt) { el.style.opacity = '0'; return; }
+    el.style.opacity = '1';
+    el.style.transform = `translate(${pt.x}px, ${pt.y}px) translate(-50%, -50%)`;
+  }
+
+  /**
+   * The first-person minimap.
+   *
+   * Losing the overview is the real cost of first person in a 4-player arena —
+   * you can no longer see who is behind you, where the objective is, or which
+   * corner the bomber came from. A 2D canvas costs almost nothing and hands
+   * all of that back.
+   *
+   * Drawn rotated so "up" is always where you're facing, which is what makes a
+   * minimap readable at a glance rather than a puzzle to translate.
+   */
+  drawMinimap({ half, players, self, selfX, selfZ, aim, bomber, pickups, nests, hill, bomb }) {
+    const cv = $('minimap');
+    const ctx = cv.getContext('2d');
+    const R = cv.width / 2;
+    const scale = (R - 6) / (half || 20);
+
+    ctx.clearRect(0, 0, cv.width, cv.height);
+
+    // World -> minimap, rotated so the player's facing points up the screen.
+    const sin = Math.sin(-aim);
+    const cos = Math.cos(-aim);
+    const to = (wx, wz) => {
+      const dx = (wx - selfX) * scale;
+      const dz = (wz - selfZ) * scale;
+      return [R + (dx * cos - dz * sin), R + (dx * sin + dz * cos) * -1];
+    };
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(R, R, R - 2, 0, Math.PI * 2);
+    ctx.clip();
+
+    ctx.fillStyle = 'rgba(6,7,14,0.72)';
+    ctx.fillRect(0, 0, cv.width, cv.height);
+
+    // Arena bounds, so you can tell how close to a wall you are.
+    ctx.strokeStyle = 'rgba(255,255,255,0.28)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    const corners = [[-half, -half], [half, -half], [half, half], [-half, half]];
+    corners.forEach(([wx, wz], i) => {
+      const [x, y] = to(wx, wz);
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    });
+    ctx.closePath();
+    ctx.stroke();
+
+    const dot = (wx, wz, color, size, ring = false) => {
+      const [x, y] = to(wx, wz);
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.arc(x, y, size, 0, Math.PI * 2);
+      ctx.fill();
+      if (!ring) return;
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.arc(x, y, size + 3, 0, Math.PI * 2);
+      ctx.stroke();
+    };
+
+    if (hill) dot(hill.x, hill.z, 'rgba(255,204,61,0.5)', 7);
+    for (const n of nests ?? []) dot(n.x, n.z, 'rgba(255,255,255,0.35)', 4);
+    if (bomb) dot(bomb.x, bomb.z, '#ff3b30', 3.5, true);
+    for (const pk of pickups ?? []) dot(pk.x, pk.z, 'rgba(53,224,127,0.8)', 2);
+    if (bomber) dot(bomber.x, bomber.z, '#ff2d4b', 4, true);
+
+    for (const p of players ?? []) {
+      if (!p.alive || p.isSelf) continue;
+      // Your nemesis gets the same colour it wears in the world.
+      dot(p.x, p.z, self?.nemesis === p.id ? '#ff4df0' : p.color, 3.5);
+    }
+
+    ctx.restore();
+
+    // You: always dead centre, always pointing up. A triangle rather than a dot
+    // so facing is unmistakable.
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath();
+    ctx.moveTo(R, R - 6);
+    ctx.lineTo(R - 4.5, R + 4);
+    ctx.lineTo(R + 4.5, R + 4);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.strokeStyle = 'rgba(255,255,255,0.22)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(R, R, R - 2, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+
+  /**
+   * "What do I do right now."
+   *
+   * Plant & Defuse was reported as simply unlearnable, and the reason is that
+   * both of its actions are *holding still on a spot* — the one input nobody
+   * discovers by experimenting, because standing still is what you do when you
+   * have run out of ideas. So the game has to say it.
+   *
+   * Same rebuild-only-on-change treatment as the contract strip: this runs
+   * every frame.
+   */
+  setActionPrompt(prompt) {
+    const el = this.promptEl;
+    if (!prompt) {
+      if (this.promptShown !== null) {
+        this.promptShown = null;
+        el.classList.add('hidden');
+        el.replaceChildren();
+      }
+      return;
+    }
+
+    if (this.promptShown !== prompt.text) {
+      this.promptShown = prompt.text;
+      el.classList.remove('hidden');
+      el.replaceChildren();
+      this.promptText = el2('span', 'prompt-text', prompt.text);
+      this.promptMeter = el2('div', 'prompt-meter');
+      this.promptFill = el2('i');
+      this.promptMeter.append(this.promptFill);
+      el.append(this.promptText, this.promptMeter);
+    }
+
+    // The meter only appears once something is actually being held, so an
+    // empty bar never sits there implying the player is making progress.
+    const pct = Math.max(0, Math.min(1, prompt.progress ?? 0));
+    this.promptMeter.classList.toggle('hidden', pct <= 0);
+    this.promptFill.style.transform = `scaleX(${pct})`;
+    el.classList.toggle('urgent', !!prompt.urgent);
+    el.classList.toggle('holding', pct > 0);
   }
 
   /**
@@ -542,4 +772,59 @@ export class Hud {
       this.respawnOverlay.classList.add('hidden');
     }
   }
+
+  /**
+   * The "killed by" panel.
+   *
+   * Perceived fairness in a shooter is driven almost entirely by whether you
+   * understand why you died — so this reports who, with what, from how far, and
+   * crucially how much health they had left. "Nugget, 12 HP left" turns "this
+   * game is rigged" into "I nearly had them", which is the difference between
+   * closing the tab and queueing again.
+   */
+  setKilledBy(info) {
+    const el = $('killed-by');
+    if (!info) {
+      el.classList.add('hidden');
+      el.replaceChildren();
+      return;
+    }
+
+    el.classList.remove('hidden');
+    el.replaceChildren();
+
+    const who = el2('span', 'kb-name', info.name ?? 'The arena');
+    if (info.color) who.style.color = info.color;
+
+    const how = KILL_KINDS[info.kind] ?? 'got you';
+    el.append(el2('span', 'kb-lead', 'Killed by'), who, el2('span', 'kb-how', how));
+
+    if (typeof info.hp === 'number') {
+      // The near-miss detail. Below a third of their health it is worth
+      // shouting about, because that is the one that stings in a good way.
+      const hp = el2('span', `kb-hp${info.hp <= 33 ? ' close' : ''}`, `${info.hp} HP left`);
+      el.append(hp);
+    }
+    if (typeof info.dist === 'number') el.append(el2('span', 'kb-dist', `${info.dist}m`));
+    if (info.name) el.append(el2('span', 'kb-revenge', '⚔ MARKED FOR REVENGE'));
+  }
+}
+
+// How each damage source reads in the killed-by panel.
+const KILL_KINDS = {
+  bullet: 'shot you',
+  shot: 'shot you',
+  blast: 'blew you up',
+  bomb: 'blew you up',
+  burn: 'set you alight',
+  potato: 'passed you the potato',
+  zone: 'left you outside the zone',
+};
+
+/** Normalises an angle to (-PI, PI], so its sign says "left" or "right". */
+function angleTo(a) {
+  let d = (a ?? 0) % (Math.PI * 2);
+  if (d > Math.PI) d -= Math.PI * 2;
+  if (d < -Math.PI) d += Math.PI * 2;
+  return d;
 }

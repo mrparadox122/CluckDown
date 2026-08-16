@@ -1,14 +1,15 @@
 // Aim assist and ammo types.
 //
-// Pure simulation. Each feature is checked by running the same scenario with it
-// on and off, so the assertion is about the difference it makes rather than
-// about a number I picked.
+// Ammo is pure simulation. Aim assist is not: it runs on the CLIENT, shaping
+// the look angle before it is sent, so these drive the same pure helpers the
+// client drives — plus one check that the server adds nothing of its own.
 //
 //   node shared/test/combat.mjs
 
 import {
   createWorld, addPlayer, applyInput, stepWorld,
   AIM_ASSIST, AMMO, PLAYER, BULLET, TICK_DT, rollPickup, PICKUP_WEIGHTS,
+  pickAimTarget, pullAim,
 } from '../src/index.js';
 import { angleDelta } from '../src/math.js';
 
@@ -32,34 +33,39 @@ const add = (world, id, seat, x, z) => {
 };
 
 // ------------------------------------------------------------- aim assist
+//
+// Assist is applied by the CLIENT to its own look angle before that angle is
+// sent, not by the server to the angle it received — see shared/src/aim.js. So
+// these drive the same pure functions the client drives, rather than stepping a
+// world and reading p.aim back out.
 console.log('\n--- aim assist ---');
 
+const ME = { id: 'me', x: 0, z: 0, team: null };
+const foeAt = (x, z, extra = {}) => ({
+  id: 'foe', x, z, alive: true, team: null, invuln: false, mx: 0, mz: 0, ...extra,
+});
+
 /** Aims deliberately WIDE of a target and reports how far off we end up. */
-function aimError({ offsetRad, moving = false, bot = false }) {
-  const world = arena();
-  const me = add(world, 'me', 0, 0, 0);
-  const foe = add(world, 'foe', 1, 0, 12); // due +Z
-  me.isBot = bot;
+function aimError({ offsetRad, foe = foeAt(1, 12), frames = 60 }) {
+  const trueAngle = Math.atan2(foe.x - ME.x, foe.z - ME.z);
+  const raw = trueAngle + offsetRad;
 
-  const trueAngle = Math.atan2(foe.x - me.x, foe.z - me.z);
-  const aimed = trueAngle + offsetRad;
-  const ax = Math.sin(aimed);
-  const az = Math.cos(aimed);
-
-  for (let t = 0; t < 60; t++) {
-    applyInput(world, 'me', { mx: 0, mz: 0, ax, az, shoot: false, seq: t });
-    if (moving) applyInput(world, 'foe', { mx: 1, mz: 0, ax: 0, az: 0, shoot: false, seq: t });
-    stepWorld(world, TICK_DT);
+  let aim = raw;
+  let locked = null;
+  for (let t = 0; t < frames; t++) {
+    // `raw` never moves: it is what the player is actually asking for, and
+    // target acquisition is always measured against it.
+    const target = pickAimTarget(ME, [foe], raw, locked);
+    if (!target) { locked = null; aim = raw; continue; }
+    if (locked !== target.id) aim = raw;
+    locked = target.id;
+    aim = pullAim(ME, target, aim, TICK_DT);
   }
-  return {
-    error: Math.abs(angleDelta(me.aim, Math.atan2(foe.x - me.x, foe.z - me.z))),
-    locked: me.aimTarget,
-  };
+  return { error: Math.abs(angleDelta(aim, trueAngle)), locked };
 }
 
 const inCone = aimError({ offsetRad: 0.25 });
 const outOfCone = aimError({ offsetRad: 1.2 });
-const asBot = aimError({ offsetRad: 0.25, bot: true });
 
 console.log(`  aimed 0.25rad off: error ${inCone.error.toFixed(3)}rad, locked=${inCone.locked}`);
 console.log(`  aimed 1.20rad off: error ${outOfCone.error.toFixed(3)}rad, locked=${outOfCone.locked}`);
@@ -69,47 +75,58 @@ check('assist pulls aim onto a target inside the cone', inCone.error < 0.05,
 check('assist acquires a lock', inCone.locked === 'foe', String(inCone.locked));
 check('assist ignores targets outside the cone', outOfCone.error > 1.0,
   `${outOfCone.error.toFixed(3)}rad off, locked=${outOfCone.locked}`);
-check('bots get no assist', asBot.error > 0.2 && !asBot.locked,
-  `${asBot.error.toFixed(3)}rad off, locked=${asBot.locked}`);
 
-// Sticky: acquire, then drift out past the acquire cone but inside the sticky one.
+// Dead, invulnerable and same-team chickens are all invisible to it.
+check('a dead chicken is never a target',
+  !pickAimTarget(ME, [foeAt(1, 12, { alive: false })], Math.atan2(1, 12)));
+check('a spawn-shielded chicken is never a target',
+  !pickAimTarget(ME, [foeAt(1, 12, { invuln: true })], Math.atan2(1, 12)));
+check('a team-mate is never a target',
+  !pickAimTarget({ ...ME, team: 0 }, [foeAt(1, 12, { team: 0 })], Math.atan2(1, 12)));
+check('an enemy on the OTHER team still is',
+  !!pickAimTarget({ ...ME, team: 0 }, [foeAt(1, 12, { team: 1 })], Math.atan2(1, 12)));
+
+// Sticky: acquire, then drift out past the acquire cone but inside the sticky
+// one. This is what makes it feel like a lock instead of a twitch.
 const sticky = (() => {
-  const world = arena();
-  const me = add(world, 'me', 0, 0, 0);
-  const foe = add(world, 'foe', 1, 0, 12);
-  const trueAngle = Math.atan2(foe.x - me.x, foe.z - me.z);
-  for (let t = 0; t < 40; t++) {
-    applyInput(world, 'me', { mx: 0, mz: 0, ax: Math.sin(trueAngle), az: Math.cos(trueAngle), shoot: false, seq: t });
-    stepWorld(world, TICK_DT);
-  }
-  const acquired = me.aimTarget;
-  // Now aim between the acquire cone and the sticky cone.
+  const foe = foeAt(1, 12);
+  const trueAngle = Math.atan2(foe.x - ME.x, foe.z - ME.z);
+  const acquired = pickAimTarget(ME, [foe], trueAngle, null)?.id ?? null;
   const wide = trueAngle + (AIM_ASSIST.cone + AIM_ASSIST.stickyCone) / 2;
-  for (let t = 0; t < 20; t++) {
-    applyInput(world, 'me', { mx: 0, mz: 0, ax: Math.sin(wide), az: Math.cos(wide), shoot: false, seq: t });
-    stepWorld(world, TICK_DT);
-  }
-  return { acquired, keptAfterDrift: me.aimTarget };
+  return {
+    acquired,
+    keptAfterDrift: pickAimTarget(ME, [foe], wide, acquired)?.id ?? null,
+    // ...but turning right away does drop it.
+    droppedWhenTurned: pickAimTarget(ME, [foe], trueAngle + AIM_ASSIST.stickyCone + 0.3, acquired)?.id ?? null,
+  };
 })();
 check('a lock survives drift past the acquire cone',
   sticky.acquired === 'foe' && sticky.keptAfterDrift === 'foe',
   `acquired=${sticky.acquired} kept=${sticky.keptAfterDrift}`);
+check('...but turning away deliberately still drops it',
+  sticky.droppedWhenTurned === null, String(sticky.droppedWhenTurned));
 
-// Not aiming at all must not steer you.
-const idle = (() => {
+// A target outside the acquire range is not picked up at all.
+check('range is respected', !pickAimTarget(ME, [foeAt(0, AIM_ASSIST.range + 5)], 0));
+
+// The simulation itself must no longer touch aim: whatever the client sends is
+// exactly what gets fired.
+const untouched = (() => {
   const world = arena();
   const me = add(world, 'me', 0, 0, 0);
-  add(world, 'foe', 1, 0, 12);
-  me.aimRaw = Math.PI; // the stick is asking to face away
-  me.aim = Math.PI;
+  add(world, 'foe', 1, 0, 12); // right in front, well inside every cone
+  const asked = 0.3;           // ...and we are deliberately aiming past them
   for (let t = 0; t < 30; t++) {
-    applyInput(world, 'me', { mx: 0, mz: 0, ax: 0, az: 0, shoot: false, seq: t });
+    applyInput(world, 'me', {
+      mx: 0, mz: 0, ax: Math.sin(asked), az: Math.cos(asked), shoot: false, seq: t,
+    });
     stepWorld(world, TICK_DT);
   }
-  return { aim: me.aim, target: me.aimTarget };
+  return Math.abs(angleDelta(me.aim, asked));
 })();
-check('idle players are not steered', Math.abs(angleDelta(idle.aim, Math.PI)) < 0.01 && !idle.target,
-  `aim=${idle.aim.toFixed(2)} target=${idle.target}`);
+console.log(`  server drift from the angle sent: ${untouched.toFixed(4)}rad`);
+check('the server fires exactly the angle it was sent, with no assist of its own',
+  untouched < 1e-6, `${untouched.toFixed(6)}rad`);
 
 // ------------------------------------------------------------- ammo types
 console.log('\n--- ammo types ---');

@@ -39,7 +39,20 @@ await page.waitForTimeout(3000);
 // Let bots rack up a few kills so the table has real numbers, then jump the
 // clock to force the match to end.
 await page.evaluate(() => { window.__cluckdown.session.world.clock = 2; });
-await page.waitForTimeout(20000);
+
+// Wait for the results screen, then cancel the auto-requeue immediately.
+//
+// The results screen now counts down to a rematch, and it will happily fire in
+// the middle of a slow test and drag the browser back into a match — which is
+// the whole point of the feature. A click cancels it, which is exactly what a
+// real player reading the scoreboard does.
+for (let i = 0; i < 200; i++) {
+  const up = await page.evaluate(() => !document.getElementById('results').classList.contains('hidden'));
+  if (up) break;
+  await page.waitForTimeout(150);
+}
+await page.mouse.click(500, 60);
+await page.waitForTimeout(300);
 
 console.log('results visible:', !(await page.getAttribute('#results', 'class'))?.includes('hidden'));
 console.log('title:', await page.textContent('#results-title'));

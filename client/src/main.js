@@ -30,6 +30,13 @@ let session = null;
 let hud = null;
 let matchAbort = null;
 let lastResult = null;
+
+// Auto-requeue. The results screen used to make "do nothing" the default
+// action, and doing nothing means leaving — so the countdown makes "play again"
+// the thing that happens if you don't intervene. Any interaction cancels it,
+// because a player who is reading the table has not decided to leave.
+let requeueTimer = null;
+let requeueLeft = 0;
 let privateCode = '';
 // Remembers that the player was in fullscreen when a match ended, so "Play
 // again" can put them back without them having to ask twice.
@@ -42,6 +49,10 @@ let myVote = null;
 // ------------------------------------------------------------------ helpers
 
 function show(name) {
+  // Leaving the results screen for ANY reason kills the auto-requeue. Without
+  // this it keeps counting while the player sits on the menu and then yanks
+  // them into a match they didn't ask for.
+  if (name !== 'results') stopRequeue();
   for (const [key, el] of Object.entries(screens)) el.classList.toggle('hidden', key !== name);
   if (name) hud?.hide();
 }
@@ -268,6 +279,9 @@ function launch(newSession) {
   document.body.classList.add('in-match');
 
   session.on('matchEnd', (result) => showResults(result));
+  // Hot-join: the match was already running. Say so, or a clock reading 0:47
+  // and a scoreboard full of kills you didn't miss reads as a bug.
+  session.on('joinedInProgress', () => toast('Dropped into a match in progress'));
   session.on('error', ({ message }) => {
     toast(message || 'Connection lost');
     endMatch();
@@ -290,6 +304,66 @@ function endMatch() {
 }
 
 // ----------------------------------------------------------------- results
+
+/**
+ * Starts the "next match in N" countdown on the results screen.
+ *
+ * Cancelled by any pointer or key event anywhere: someone scrolling the
+ * scoreboard or reading their rating is engaged, and yanking them into a new
+ * match mid-read is worse than letting them choose.
+ */
+function startRequeue(seconds = 8) {
+  stopRequeue();
+  requeueLeft = seconds;
+
+  const label = $('again-label');
+  const bar = $('again-bar');
+  bar.style.transform = 'scaleX(1)';
+
+  const tick = () => {
+    requeueLeft -= 0.1;
+    if (requeueLeft <= 0) {
+      stopRequeue();
+      playAgain();
+      return;
+    }
+    label.textContent = `Play again in ${Math.ceil(requeueLeft)}`;
+    bar.style.transform = `scaleX(${requeueLeft / seconds})`;
+  };
+  label.textContent = `Play again in ${seconds}`;
+  requeueTimer = setInterval(tick, 100);
+
+  for (const ev of ['pointerdown', 'keydown', 'wheel', 'touchstart']) {
+    window.addEventListener(ev, cancelRequeue, { once: true, passive: true });
+  }
+}
+
+function stopRequeue() {
+  clearInterval(requeueTimer);
+  requeueTimer = null;
+  $('again-bar').style.transform = 'scaleX(0)';
+  // Reset the caption too. Without this the button keeps reading "Play again
+  // in 1" after the countdown has already fired, which is stale the moment
+  // anyone lands back on this screen.
+  $('again-label').textContent = 'Play again';
+}
+
+function cancelRequeue() {
+  if (!requeueTimer) return;
+  stopRequeue();
+}
+
+/** The rematch itself — shared by the button and the countdown. */
+function playAgain() {
+  // Requesting fullscreen is only allowed from a user gesture. The countdown is
+  // not one, so an auto-requeue simply comes back windowed rather than failing.
+  if (wantFullscreen && !isFullscreen() && requeueTimer === null) {
+    try { toggleFullscreen(); } catch { /* not a gesture; carry on windowed */ }
+  }
+  wantFullscreen = false;
+  if (lastResult?.offline) startOffline();
+  else startOnline(privateCode); // keep the party together for a rematch
+}
 
 function showResults(result) {
   const selfId = session?.selfId;
@@ -369,8 +443,25 @@ function showResults(result) {
     ratingEl.textContent = result.offline ? 'Offline practice — no rating change.' : 'Unranked match.';
   }
 
+  // Near-miss framing. "2nd" is a verdict; "40 points behind Nugget" is a
+  // rematch. Same data, and the second one is what brings people back.
+  const nearEl = $('results-near');
+  nearEl.textContent = '';
+  if (me && me.place > 1) {
+    const above = ranking[me.place - 2];
+    const gap = (above?.score ?? 0) - (me.score ?? 0);
+    if (above && gap > 0) {
+      nearEl.textContent = `${gap} point${gap === 1 ? '' : 's'} behind ${above.name}. So close.`;
+    }
+  } else if (me?.place === 1 && ranking[1]) {
+    const gap = (me.score ?? 0) - (ranking[1].score ?? 0);
+    nearEl.textContent = gap > 0 ? `Won by ${gap}. ${ranking[1].name} was breathing down your neck.` : '';
+  }
+
   sfx.play('matchEnd');
   endMatch();
+
+  startRequeue();
 
   // Drop out of fullscreen for the results screen. It's a scrollable page, and
   // on a landscape phone the podium plus the table overflow a short viewport —
@@ -460,6 +551,29 @@ function bindGraphics() {
   res.addEventListener('change', (e) => apply({ resolution: Number(e.target.value) }));
   $('gfx-glow').addEventListener('change', (e) => apply({ glow: e.target.checked }));
   $('gfx-antialias').addEventListener('change', (e) => apply({ antialias: e.target.checked }));
+
+  // Aim assist. Live, like the fire-button editor below — it is a feel setting
+  // and the only way to judge it is to try it.
+  const assist = $('gfx-assist');
+  assist.checked = gfx.assist !== false;
+  assist.addEventListener('change', (e) => {
+    gfx = { ...gfx, assist: e.target.checked };
+    saveGfx(gfx);
+    sfx.play('uiClick');
+    game?.setAssist(gfx.assist);
+  });
+
+  // Fire-button layout editing. Also live: the whole point is to drag it while
+  // looking at the match it will be used in.
+  const fireEdit = $('gfx-fire-edit');
+  fireEdit.checked = !!gfx.fireEdit;
+  fireEdit.addEventListener('change', (e) => {
+    gfx = { ...gfx, fireEdit: e.target.checked };
+    saveGfx(gfx);
+    sfx.play('uiClick');
+    game?.setFireEdit(gfx.fireEdit);
+    if (gfx.fireEdit) toast('Drag the FIRE button where you want it.', 3200);
+  });
 }
 
 // --------------------------------------------------------------- server
@@ -623,15 +737,6 @@ function bindMobile() {
     syncFs();
   }
 
-  $('hud-view').addEventListener('click', () => {
-    if (!game) return;
-    sfx.play('uiClick');
-    const { view, label } = game.cycleView();
-    gfx = { ...gfx, view };
-    saveGfx(gfx);
-    toast(`Camera: ${label}`, 1200);
-  });
-
   // Worth attempting on load too — it works on Android Chrome when already
   // fullscreen, and fails harmlessly everywhere else.
   lockLandscape();
@@ -658,14 +763,14 @@ function bind() {
   });
 
   $('again-btn').addEventListener('click', () => {
-    // Requesting fullscreen is only allowed from a user gesture, and this click
-    // is one — so a player who was fullscreen gets it back automatically.
+    // This click IS a user gesture, so fullscreen can be restored here even
+    // though the countdown path cannot.
+    stopRequeue();
     if (wantFullscreen && !isFullscreen()) toggleFullscreen();
-    wantFullscreen = false;
-    if (lastResult?.offline) startOffline();
-    else startOnline(privateCode); // keep the party together for a rematch
+    playAgain();
   });
   $('menu-btn').addEventListener('click', () => {
+    stopRequeue();
     wantFullscreen = false;
     privateCode = '';
     $('code-display').classList.add('hidden');

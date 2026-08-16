@@ -8,9 +8,9 @@
 import {
   PLAYER, BULLET, BOMBER, PICKUP, SCORE, MODES,
   MULTIKILL_WINDOW, SEAT_COLORS, MODIFIER_POOL, modValue,
-  TEAM_COLORS, teamForSeat, HILL, SHRINK, AIM_ASSIST, AMMO, rollPickup,
+  TEAM_COLORS, teamForSeat, HILL, SHRINK, AMMO, rollPickup,
   MAPS, DEFAULT_MAP, pickMapCandidates, BOUNTY, POTATO,
-  CONTRACT, CONTRACTS, CONTRACT_LIST, HEIST, BOMB,
+  CONTRACT, CONTRACTS, CONTRACT_LIST, HEIST, BOMB, REVENGE,
 } from './constants.js';
 import {
   clamp, clampUnit, norm, len, dist2, segPointDist2, mulberry32, angleDelta,
@@ -198,6 +198,9 @@ export function addPlayer(world, { id, name, seat, isBot = false }) {
     contractAt: 0,
     contractsDone: 0,
     eggsHeld: 0,
+    nemesis: null,    // who killed you last, while the mark is live
+    nemesisUntil: 0,
+    revenges: 0,
     hillBank: 0,   // fractional hill score awaiting a whole point
     kills: 0, deaths: 0, score: 0,
     streak: 0, lastKillAt: -99,
@@ -292,8 +295,19 @@ function stepPlayers(world, dt) {
     // and obvious, so hoarding is punished without needing a hard cap.
     if (p.carrying > 0) moveScale *= 1 - Math.min(HEIST.maxCarrySlow, HEIST.carrySlow * p.carrying);
     if (world.bomb?.carriedBy === p.id) moveScale *= 1 - BOMB.carrySlow;
-    let vx = inp.mx * PLAYER.speed * moveScale + p.kx;
-    let vz = inp.mz * PLAYER.speed * moveScale + p.kz;
+    // Cap the accumulated shove before it is used. Every knockback source —
+    // bullets, the bomber, the plant bomb, the potato — funnels through here,
+    // so one clamp covers all of them and none of them can stack past the point
+    // where the player stops being able to steer.
+    const kMag = len(p.kx, p.kz);
+    if (kMag > PLAYER.maxKnockback) {
+      const s = PLAYER.maxKnockback / kMag;
+      p.kx *= s;
+      p.kz *= s;
+    }
+
+    const vx = inp.mx * PLAYER.speed * moveScale + p.kx;
+    const vz = inp.mz * PLAYER.speed * moveScale + p.kz;
 
     p.x = clamp(p.x + vx * dt, -half + r, half - r);
     p.z = clamp(p.z + vz * dt, -half + r, half - r);
@@ -308,7 +322,9 @@ function stepPlayers(world, dt) {
     if (len(inp.ax, inp.az) > 0.15) p.aimRaw = Math.atan2(inp.ax, inp.az);
     else if (len(inp.mx, inp.mz) > 0.15) p.aimRaw = Math.atan2(inp.mx, inp.mz);
 
-    applyAimAssist(world, p, dt);
+    if (p.nemesis && world.time >= p.nemesisUntil) p.nemesis = null;
+
+    applyAim(p);
     stepBurn(world, p, dt);
     stepPotatoBurn(world, p, dt);
     if (p.ammoUntil && world.time >= p.ammoUntil) { p.ammo = 'none'; p.ammoUntil = 0; }
@@ -320,75 +336,17 @@ function stepPlayers(world, dt) {
 }
 
 /**
- * Pulls a player's aim onto a nearby enemy and keeps it there.
+ * The simulation takes the aim angle it is given.
  *
- * Two cones rather than one: a tight `cone` to ACQUIRE a target, and a wider
- * `stickyCone` to KEEP one. That is what makes it feel like a lock instead of a
- * twitch — once you're on someone, small thumb wobble doesn't shake you off,
- * but deliberately turning away does drop them.
- *
- * Humans only. Bots aim with deliberate error and assist would erase it.
+ * Aim assist used to live here, rewriting p.aim server-side. It moved to the
+ * client (see shared/src/aim.js) because first person renders the player's own
+ * look angle: a server that steered the aim somewhere else would leave the
+ * crosshair pointing at one thing and the bullet hitting another. The client
+ * now shapes its own input before sending, so everything agrees by
+ * construction.
  */
-function applyAimAssist(world, p, dt) {
-  const raw = p.aimRaw;
-
-  // Off, or a bot: the stick is the aim, full stop.
-  if (!AIM_ASSIST.enabled || p.isBot || AIM_ASSIST.strength <= 0) {
-    p.aim = raw;
-    p.aimTarget = null;
-    return;
-  }
-
-  // Not aiming? Don't quietly steer someone who isn't asking to shoot.
-  if (len(p.input.ax, p.input.az) < AIM_ASSIST.minAimInput && !p.input.shoot) {
-    p.aim = raw;
-    p.aimTarget = null;
-    return;
-  }
-
-  let best = null;
-  let bestScore = Infinity;
-
-  for (const t of world.players.values()) {
-    if (t.id === p.id || !t.alive || world.time < t.invulnUntil) continue;
-    if (t.team !== null && t.team === p.team) continue;
-
-    const d = Math.sqrt(dist2(p.x, p.z, t.x, t.z));
-    const sticky = t.id === p.aimTarget;
-    if (d > (sticky ? AIM_ASSIST.stickyRange : AIM_ASSIST.range)) continue;
-
-    // Measured against the RAW stick angle, not the assisted one. Testing the
-    // assisted angle would compare the lock against itself — the offset would
-    // always be ~0 and you could never shake a target off by turning away.
-    const off = Math.abs(angleDelta(raw, Math.atan2(t.x - p.x, t.z - p.z)));
-    if (off > (sticky ? AIM_ASSIST.stickyCone : AIM_ASSIST.cone)) continue;
-
-    // Closest to the centre of your aim wins, then closest by distance. A
-    // current lock gets a discount so it holds through a contested moment.
-    const score = off * (sticky ? 0.5 : 1) + d * 0.01;
-    if (score < bestScore) { bestScore = score; best = t; }
-  }
-
-  if (!best) {
-    p.aim = raw;
-    p.aimTarget = null;
-    return;
-  }
-  p.aimTarget = best.id;
-
-  // Lead the target so the shot meets them rather than trailing behind.
-  const d = Math.sqrt(dist2(p.x, p.z, best.x, best.z));
-  const flight = d / BULLET.speed;
-  const tx = best.x + (best.input?.mx ?? 0) * PLAYER.speed * flight * AIM_ASSIST.lead;
-  const tz = best.z + (best.input?.mz ?? 0) * PLAYER.speed * flight * AIM_ASSIST.lead;
-  const want = Math.atan2(tx - p.x, tz - p.z);
-
-  // Ease from wherever the aim currently is toward the target. p.aim persists
-  // between ticks (it is only snapped back to raw when there is no target), so
-  // the pull accumulates instead of being erased and reapplied every frame.
-  // Frame-rate independent, so `strength` feels the same at 30fps as at 144.
-  const k = 1 - Math.exp(-AIM_ASSIST.strength * 12 * dt);
-  p.aim += angleDelta(p.aim, want) * k;
+function applyAim(p) {
+  p.aim = p.aimRaw;
 }
 
 /** The cursed egg burns its holder for as long as they are carrying it. */
@@ -624,6 +582,7 @@ function killPlayer(world, target, byId, kind) {
 
   const killer = byId != null ? world.players.get(byId) : null;
   let multi = 0;
+  let revenge = false;
   const wasBounty = world.bounty === target.id;
   if (killer && killer !== target) {
     killer.kills++;
@@ -632,6 +591,20 @@ function killPlayer(world, target, byId, kind) {
     killer.streak = world.time - killer.lastKillAt <= MULTIKILL_WINDOW ? killer.streak + 1 : 1;
     killer.lastKillAt = world.time;
     multi = killer.streak;
+
+    // Settling the score: did the killer just take down their own nemesis?
+    if (killer.nemesis === target.id && world.time < killer.nemesisUntil) {
+      revenge = true;
+      killer.revenges++;
+      killer.score += REVENGE.bonus;
+      killer.nemesis = null;
+      killer.nemesisUntil = 0;
+    }
+
+    // ...and the victim now has one. Set after the check above, so killing
+    // someone never marks them as their own killer's nemesis in the same beat.
+    target.nemesis = killer.id;
+    target.nemesisUntil = world.time + REVENGE.window;
   }
 
   // The crown is vacated the instant its holder dies.
@@ -645,7 +618,16 @@ function killPlayer(world, target, byId, kind) {
     kind, // 'bullet' | 'blast' | 'zone' | 'burn' | 'potato'
     multi,
     bounty: wasBounty,
+    revenge,
     color: target.color,
+    // Everything the "you were killed by" panel needs, so the client never has
+    // to guess at what happened to it.
+    byName: killer && killer !== target ? killer.name : null,
+    byColor: killer && killer !== target ? killer.color : null,
+    byHp: killer && killer !== target ? Math.max(0, Math.round(killer.hp)) : null,
+    byDist: killer && killer !== target
+      ? Math.round(Math.sqrt(dist2(target.x, target.z, killer.x, killer.z)) * 10) / 10
+      : null,
   });
 
   if (world.teamScores && killer && killer.team !== null) {
@@ -1465,6 +1447,8 @@ export function snapshot(world) {
       ammo: p.ammoUntil > world.time ? p.ammo : 'none',
       burning: p.burnUntil > world.time,
       respawnIn: p.alive ? 0 : Math.max(0, p.respawnAt - world.time),
+      kx: p.kx, kz: p.kz,
+      nemesis: world.time < p.nemesisUntil ? p.nemesis : null,
       seq: p.lastSeq, isBot: p.isBot,
       carrying: p.carrying, contract: contractInfo(p),
     })),

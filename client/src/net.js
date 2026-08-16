@@ -24,7 +24,9 @@ const PING_WINDOW = 12; // samples kept for average / jitter
 
 class BaseSession {
   constructor() {
-    this.handlers = { fx: [], feed: [], chat: [], matchEnd: [], error: [] };
+    this.handlers = {
+      fx: [], feed: [], chat: [], matchEnd: [], error: [], joinedInProgress: [],
+    };
   }
 
   /**
@@ -65,6 +67,9 @@ export class OnlineSession extends BaseSession {
     room.onMessage('feed', (f) => this.emit('feed', f));
     room.onMessage('chat', (m) => this.emit('chat', m));
     room.onMessage('matchEnd', (m) => this.emit('matchEnd', m));
+    // Dropped into a match already running — the client shows a heads-up so
+    // the clock reading 0:47 is not a mystery.
+    room.onMessage('joinedInProgress', (m) => this.emit('joinedInProgress', m));
     room.onError((code, message) => this.emit('error', { code, message }));
 
     // Round-trip timing. The server echoes our own timestamp back, so this is a
@@ -188,6 +193,9 @@ export class OnlineSession extends BaseSession {
         ammo: p.ammo || 'none', burning: !!p.burning,
         kills: p.kills, deaths: p.deaths, score: p.score,
         respawnIn: p.respawnIn,
+        kx: p.kx ?? 0,
+        kz: p.kz ?? 0,
+        nemesis: p.nemesis || null,
         carrying: p.carrying ?? 0,
         contract: p.contract
           ? {
@@ -342,6 +350,9 @@ export class LocalSession extends BaseSession {
       burning: p.burnUntil > this.world.time,
       kills: p.kills, deaths: p.deaths, score: p.score,
       respawnIn: p.alive ? 0 : Math.max(0, p.respawnAt - this.world.time),
+      kx: p.kx,
+      kz: p.kz,
+      nemesis: this.world.time < p.nemesisUntil ? p.nemesis : null,
       carrying: p.carrying,
       contract: contractInfo(p),
       isBot: p.isBot,

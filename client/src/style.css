@@ -503,6 +503,42 @@ input[type="text"]:focus { border-color: var(--hot); box-shadow: 0 0 0 3px rgba(
 .respawn-count { font-size: 70px; font-weight: 900; line-height: 1; text-shadow: 0 0 30px var(--hot-glow); }
 .respawn-sub { font-size: 12px; color: var(--muted); letter-spacing: 2px; }
 
+/* Killed-by panel. Death used to be a black screen and a number, which is
+   exactly when someone alt-tabs — this gives the wait something to read, and
+   turns "that was unfair" into "I nearly had them". */
+.killed-by {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  margin: 8px 0 4px;
+  padding: 8px 14px;
+  border-radius: 10px;
+  background: rgba(6, 7, 14, 0.75);
+  border: 1px solid var(--edge);
+  font-size: 12.5px;
+}
+.kb-lead, .kb-how { color: var(--muted); }
+.kb-name { font-weight: 800; }
+.kb-hp {
+  font-variant-numeric: tabular-nums;
+  padding: 1px 7px;
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.08);
+}
+/* They were nearly dead — the detail that makes it sting in a good way. */
+.kb-hp.close { color: var(--gold); background: rgba(255, 204, 61, 0.16); }
+.kb-dist { color: var(--muted); font-variant-numeric: tabular-nums; }
+.kb-revenge {
+  flex-basis: 100%;
+  text-align: center;
+  font-size: 10.5px;
+  font-weight: 800;
+  letter-spacing: 1.6px;
+  color: #ff4df0;
+}
+
 .stick-zone {
   position: absolute;
   bottom: 0;
@@ -575,9 +611,27 @@ input[type="text"]:focus { border-color: var(--hot); box-shadow: 0 0 0 3px rgba(
 .results-table tr.is-self td { background: rgba(255, 45, 75, 0.14); font-weight: 700; }
 .results-table .rt-dot { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 6px; vertical-align: middle; }
 
-.results-rating { font-size: 14px; margin-bottom: 14px; min-height: 20px; }
+.results-rating { font-size: 14px; margin-bottom: 6px; min-height: 20px; }
 .results-rating .up { color: var(--good); }
 .results-rating .down { color: var(--hot); }
+
+/* Near-miss line. Deliberately understated — a nudge, not a taunt. */
+.results-near { font-size: 12.5px; color: var(--gold); min-height: 17px; margin-bottom: 12px; }
+.results-near:empty { min-height: 0; margin-bottom: 4px; }
+
+/* The auto-requeue button doubles as its own countdown bar. */
+#again-btn { position: relative; overflow: hidden; }
+.again-bar {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  width: 100%;
+  height: 4px;
+  background: rgba(255, 255, 255, 0.55);
+  transform: scaleX(0);
+  transform-origin: left center;
+  transition: transform .12s linear;
+}
 
 /* ============================= TOAST ============================= */
 
@@ -993,6 +1047,154 @@ input[type="text"]:focus { border-color: var(--hot); box-shadow: 0 0 0 3px rgba(
 }
 .contract-time { font-size: 10px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .contract.urgent .contract-time { color: var(--hot); }
+/* ======================= FIRST PERSON =======================
+   Only rendered in the 'fps' camera mode. */
+
+/* Positioned by JS each frame at the projected aim point — see setCrosshairAt.
+   left/top stay at 0 because the transform carries the whole position. */
+.crosshair {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 22px;
+  height: 22px;
+  pointer-events: none;
+  will-change: transform;
+}
+/* Two bars and a centre dot. Deliberately thin and slightly transparent — a
+   heavy reticle on a 375px-tall phone screen covers the target it is aiming at. */
+.crosshair::before,
+.crosshair::after {
+  content: "";
+  position: absolute;
+  background: rgba(255, 255, 255, 0.85);
+  box-shadow: 0 0 4px #000;
+}
+.crosshair::before { left: 50%; top: 0; width: 1.5px; height: 100%; margin-left: -0.75px; }
+.crosshair::after { top: 50%; left: 0; height: 1.5px; width: 100%; margin-top: -0.75px; }
+
+.minimap {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  width: 150px;
+  height: 150px;
+  border-radius: 50%;
+  pointer-events: none;
+}
+/* The killfeed shares the top-left corner with the minimap, so it steps down
+   out of the way — and gets a hard ceiling, because pushed down by the minimap
+   it was running into the scoreboard on a busy round. */
+#hud .killfeed {
+  margin-top: 152px;
+  max-height: 22vh;
+  overflow: hidden;
+  /* Fade the cut rather than slicing a row in half — a row chopped through the
+     middle of its text reads as a rendering bug, a fade reads as "more above". */
+  -webkit-mask-image: linear-gradient(#000 62%, transparent 100%);
+  mask-image: linear-gradient(#000 62%, transparent 100%);
+}
+
+/* --- touch first-person controls ---
+   The look surface is the right half of the screen, minus the very top so the
+   chat and quick-chat buttons stay tappable. It is invisible on purpose: a
+   visible pad implies a boundary, and the whole point is that you can swipe
+   anywhere over there. */
+.look-zone {
+  position: absolute;
+  right: 0;
+  top: 22%;
+  width: 55%;
+  bottom: 0;
+  pointer-events: auto;
+  touch-action: none;
+}
+
+.fire-btn {
+  position: absolute;
+  left: 82%;
+  top: 72%;
+  width: 92px;
+  height: 92px;
+  margin: -46px 0 0 -46px;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 45, 75, 0.75);
+  background: rgba(255, 45, 75, 0.22);
+  color: var(--ink);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 2px;
+  pointer-events: auto;
+  touch-action: none;
+  /* Above the look surface, so holding fire and swiping to look are two
+     separate touches that don't fight each other. */
+  z-index: 6;
+  transition: background .1s, transform .1s;
+}
+.fire-btn:active { background: rgba(255, 45, 75, 0.5); transform: scale(0.94); }
+/* Layout edit mode: the button is draggable rather than firing. */
+.fire-btn.editing {
+  border-style: dashed;
+  border-color: var(--gold);
+  background: rgba(255, 204, 61, 0.28);
+  animation: pulse 1s ease-in-out infinite;
+}
+
+/* Desktop has a mouse; none of this belongs on it. */
+@media (hover: hover) {
+  .look-zone, .fire-btn { display: none !important; }
+}
+
+/* ======================= ACTION PROMPT =======================
+   Sits just above the contract strip. Loud on purpose: it exists because
+   Plant & Defuse was reported as unlearnable, and a hint nobody reads is the
+   same as no hint. */
+
+.action-prompt {
+  position: absolute;
+  left: 50%;
+  bottom: calc(46px + var(--safe-b));
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  padding: 7px 16px;
+  border-radius: 10px;
+  background: rgba(6, 7, 14, 0.88);
+  border: 1px solid var(--edge);
+  pointer-events: none;
+  white-space: nowrap;
+}
+.prompt-text {
+  font-size: 13px;
+  font-weight: 800;
+  letter-spacing: 1.4px;
+  text-transform: uppercase;
+}
+.prompt-meter {
+  width: 150px;
+  height: 6px;
+  background: rgba(0, 0, 0, 0.6);
+  border: 1px solid var(--edge);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.prompt-meter i {
+  display: block;
+  height: 100%;
+  background: var(--good);
+  transform-origin: left center;
+  transition: transform .08s linear;
+}
+/* Holding still and making progress: green and calm. Something is wrong or
+   urgent: red and pulsing. The two states must never look alike. */
+.action-prompt.holding { border-color: var(--good); box-shadow: 0 0 18px #35e07f4d; }
+.action-prompt.urgent { border-color: var(--hot); box-shadow: 0 0 18px var(--hot-glow); }
+.action-prompt.urgent .prompt-text { color: var(--hot); animation: pulse .7s ease-in-out infinite; }
+.action-prompt.urgent .prompt-meter i { background: var(--hot); }
+
 .contract.flash { animation: contractIn .5s ease-out; }
 @keyframes contractIn {
   0% { opacity: 0; transform: translateX(-50%) translateY(10px) scale(.9); }
@@ -1068,6 +1270,17 @@ input[type="text"]:focus { border-color: var(--hot); box-shadow: 0 0 0 3px rgba(
   .contract-meter { width: 48px; height: 4px; }
   .contract-time { font-size: 9px; }
 
+  .action-prompt { bottom: calc(34px + var(--safe-b)); padding: 5px 11px; gap: 4px; }
+  .prompt-text { font-size: 10.5px; letter-spacing: 1px; }
+  .prompt-meter { width: 104px; height: 5px; }
+
+  /* Screen real estate is scarce on a phone, so the minimap shrinks and the
+     killfeed steps down by correspondingly less. */
+  .minimap { width: 92px; height: 92px; top: 6px; left: 6px; }
+  #hud .killfeed { margin-top: 92px; max-height: 20vh; }
+  .crosshair { width: 16px; height: 16px; }
+  .fire-btn { width: 74px; height: 74px; margin: -37px 0 0 -37px; font-size: 10px; }
+
   .icon-btn.hud-mute { width: 24px; height: 24px; font-size: 10px; margin-top: 2px; }
   .hud-buttons { gap: 4px; }
   .netstats { font-size: 8.5px; min-width: 88px; padding: 2px 6px; }
@@ -1087,6 +1300,8 @@ input[type="text"]:focus { border-color: var(--hot); box-shadow: 0 0 0 3px rgba(
   .respawn-count { font-size: 46px; }
   .respawn-label { font-size: 11px; letter-spacing: 2px; }
   .respawn-sub { font-size: 10px; }
+  .killed-by { font-size: 10px; padding: 5px 10px; gap: 5px; margin: 5px 0 2px; }
+  .kb-revenge { font-size: 8.5px; letter-spacing: 1.2px; }
   .touch-hint { font-size: 8.5px; }
 
   /* Sticks get shorter zones so they don't swallow the whole screen. */
@@ -1227,4 +1442,56 @@ input[type="text"]:focus { border-color: var(--hot); box-shadow: 0 0 0 3px rgba(
   .lobby-title { font-size: 17px; }
   .map-swatch { height: 30px; }
   .map-choices { margin: 8px 0; }
+}
+
+
+/* ========================== WORLD MARKERS ==========================
+   The bomber, and wherever the current objective is.
+
+   First person removed the overview, which broke two things at once: the
+   bomber could reach you from behind with no warning, and every "carry it
+   over there" instruction assumed you could see over there. A marker in front
+   of you sits on the thing; a marker behind you pins to the screen edge and
+   points, with the distance so you can decide whether to run or fight.
+
+   Deliberately sparse — a screen ringed with arrows is the same as no arrows. */
+
+.marker {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  pointer-events: none;
+  will-change: transform;
+  color: var(--mk, #fff);
+  text-shadow: 0 1px 3px #000, 0 0 8px #000;
+}
+.mk-icon { font-size: 17px; line-height: 1; }
+.mk-dist {
+  font-size: 9px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+/* Off-screen: pinned to the edge, and dimmed so it reads as a pointer rather
+   than as something you are looking at. */
+.marker.is-off { opacity: .78; }
+.marker.is-off .mk-icon { font-size: 14px; }
+.marker.is-off::after {
+  content: "";
+  width: 0;
+  height: 0;
+  border: 5px solid transparent;
+  border-top-color: var(--mk, #fff);
+  opacity: .9;
+}
+/* Armed bomber, your nest being blown up, the potato in your hands. */
+.marker.is-urgent { animation: pulse .55s ease-in-out infinite; }
+.marker.is-urgent .mk-icon { font-size: 21px; }
+
+@media (max-height: 480px) {
+  .mk-icon { font-size: 14px; }
+  .marker.is-urgent .mk-icon { font-size: 17px; }
+  .mk-dist { font-size: 8px; }
 }
