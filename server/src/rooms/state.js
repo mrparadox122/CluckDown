@@ -30,6 +30,17 @@ defineTypes(PlayerState, {
   rapid: 'boolean',
   ammo: 'string',    // '' | tracking | bouncy | fire
   burning: 'boolean',
+  // Grain. `crop` is your own ammo counter; `pecking` and `feeding` are synced
+  // for EVERYONE because they are the tell — a chicken with its head down is
+  // reloading, and reading that off another player is the point of making the
+  // reload a stance instead of a button.
+  crop: 'uint8',
+  pecking: 'boolean',
+  feeding: 'boolean',
+  // Ran dry and has not recovered yet. Its own field rather than derived from
+  // `crop`, because "below the recovery floor" and "cannot fire" are not the
+  // same thing: you may deliberately fire down to one grain and still shoot.
+  dry: 'boolean',
   kills: 'uint16',
   deaths: 'uint16',
   score: 'int32',

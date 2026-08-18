@@ -4,6 +4,7 @@ import { VertexBuffer } from '@babylonjs/core/Buffers/buffer';
 import { Color3 } from '@babylonjs/core/Maths/math';
 import { emissiveMat, litMat } from './scene.js';
 import { BOMBER, AMMO, POTATO, HEIST, BOMB } from '@cluckdown/shared';
+import { BEAK } from './view.js';
 
 /**
  * A chicken, assembled from boxes then baked down to a SINGLE mesh.
@@ -101,6 +102,11 @@ export class PlayerView {
     // would be overwritten by the jump height, and vice versa.
     this.bobY = 0;
     this.bob = Math.random() * Math.PI * 2;
+    // How far into the peck animation this chicken is, 0..1. Eased rather than
+    // switched: a body that snaps to head-down reads as a glitch, and this
+    // pose is the single most important piece of information one player can
+    // read off another.
+    this.peck = 0;
     this.hidden = false;
     this.flash = 0;
     this.visible = true;
@@ -201,6 +207,24 @@ export class PlayerView {
     }
     // Jump height plus waddle. `this.y` is the simulation's; the bob is ours.
     this.root.position.y = this.y + this.bobY;
+
+    // --- pecking, which is what a reload looks like from the outside.
+    //
+    // The whole design of the crop rests on this being obvious across the
+    // arena: a chicken with its head in the dirt cannot shoot back, and seeing
+    // that is what turns "they stopped moving" into a decision. So it is a
+    // big, unmistakable pose — nose down, tail up, bobbing — rather than a
+    // subtle animation that only reads at three metres.
+    const wantPeck = target.pecking || target.feeding ? 1 : 0;
+    this.peck += (wantPeck - this.peck) * Math.min(1, dt * 12);
+    if (this.peck > 0.01) {
+      const dip = Math.abs(Math.sin(this.bob * 2.2));
+      this.root.rotation.x = this.peck * (0.5 + dip * 0.35);
+      this.root.position.y += this.peck * -0.08;
+      this.bob += dt * 9;
+    } else if (this.root.rotation.x !== 0) {
+      this.root.rotation.x = 0;
+    }
 
     if (this.flash > 0) {
       this.flash = Math.max(0, this.flash - dt * 5);
@@ -549,5 +573,146 @@ export class BombView {
   dispose() {
     this.mesh.dispose();
     this.ring.dispose();
+  }
+}
+
+
+/**
+ * Your own beak, in first person.
+ *
+ * See BEAK in view.js for why this exists at all. Beyond fixing where tracers
+ * come from, a viewmodel is the cheapest feedback surface in a first-person
+ * game: it is always on screen, it is never in the way, and the player reads it
+ * without looking at it. So it does four jobs at once — it recoils when you
+ * fire, dips when you peck, sways when you walk, and shivers when you are dry.
+ * Three of those are states the HUD also reports, and that redundancy is the
+ * point: peripheral motion registers when a meter in the corner does not.
+ */
+export class BeakView {
+  constructor(scene, camera) {
+    const BEAK_C = '#ff9f1c';
+    const WATTLE = '#ff2d4b';
+
+    // Stepped taper, not a box.
+    //
+    // Seen from your own eye a beak is heavily foreshortened — you are looking
+    // down the length of it — so a single rectangle reads as an orange slab
+    // wedged in the corner rather than as part of a face. Three segments
+    // narrowing toward the tip give it a silhouette that survives the angle,
+    // and stacked cubes are what everything else in this game is made of.
+    const parts = [
+      ['base', { width: 0.105, height: 0.050, depth: 0.075 }, [0, 0.020, -0.020], BEAK_C],
+      ['mid', { width: 0.082, height: 0.040, depth: 0.070 }, [0, 0.014, 0.045], BEAK_C],
+      ['tip', { width: 0.055, height: 0.028, depth: 0.065 }, [0, 0.008, 0.105], BEAK_C],
+      ['mandible', { width: 0.072, height: 0.026, depth: 0.135 }, [0, -0.028, 0.030], BEAK_C],
+      ['wattle', { width: 0.042, height: 0.058, depth: 0.042 }, [0, -0.062, -0.052], WATTLE],
+    ];
+    const pieces = parts.map(([name, dims, pos, hex]) => {
+      const m = MeshBuilder.CreateBox(name, dims, scene);
+      m.position.set(pos[0], pos[1], pos[2]);
+      tint(m, hex);
+      return m;
+    });
+    this.root = Mesh.MergeMeshes(pieces, true, true, undefined, false, false);
+    this.root.name = 'beak';
+    this.root.isPickable = false;
+    this.root.material = litMat(scene, 'beakMat', '#ffffff', { emissive: 0.22, cache: false });
+
+    // Drawn in its own rendering group, which clears depth first. Without it the
+    // beak is a real object 40cm from the camera and clips through any wall you
+    // walk up to — the one artefact that makes a viewmodel look broken.
+    this.root.renderingGroupId = 1;
+    this.root.parent = camera;
+    this.root.position.set(BEAK.right, -BEAK.down, BEAK.forward);
+
+    // A tip node, so the tracer origin comes from the transform rather than
+    // from a second copy of the offsets that could drift out of step with it.
+    this.tip = new Mesh('beakTip', scene);
+    this.tip.parent = this.root;
+    this.tip.position.set(0, 0.006, 0.145);
+    this.tip.isVisible = false;
+
+    // The beak's own muzzle flash. A separate, much smaller thing from the
+    // world MuzzleFlash pool, and parented to the beak so it is sized in the
+    // space it is viewed from rather than in world units.
+    this.flash = MeshBuilder.CreateSphere('beakFlash', {
+      diameter: BEAK.flash, segments: 6,
+    }, scene);
+    this.flash.material = emissiveMat(scene, 'beakFlashMat', '#ffd98a', { intensity: 1.0 });
+    this.flash.parent = this.root;
+    this.flash.position.copyFrom(this.tip.position);
+    this.flash.renderingGroupId = 1;
+    this.flash.isPickable = false;
+    this.flash.setEnabled(false);
+    this.flashFor = 0;
+
+    this.sway = 0;
+    this.recoil = 0;
+    this.dip = 0;
+    this.shown = true;
+  }
+
+  setVisible(v) {
+    if (this.shown === v) return;
+    this.shown = v;
+    this.root.setEnabled(v);
+  }
+
+  /** A shot went off: kick it back and up, and light the tip. */
+  kick() {
+    this.recoil = Math.min(1, this.recoil + 0.75);
+    this.flashFor = 0.055;
+  }
+
+  /** World position of the beak tip, for spawning tracers and the flash. */
+  tipWorld() {
+    this.tip.computeWorldMatrix(true);
+    return this.tip.getAbsolutePosition();
+  }
+
+  update(dt, { moving = false, pecking = false, dry = false } = {}) {
+    if (!this.shown) return;
+
+    this.recoil = Math.max(0, this.recoil - dt * 6.5);
+
+    if (this.flashFor > 0) {
+      this.flashFor -= dt;
+      const on = this.flashFor > 0;
+      this.flash.setEnabled(on);
+      // Shrinks as it dies rather than fading: no transparency, no sorting.
+      // Clamped, so the size never depends on how the timer was set — an
+      // unclamped ratio makes a pinned or lengthened flash grow without bound.
+      if (on) this.flash.scaling.setAll(0.6 + Math.min(1, this.flashFor / 0.055) * 0.9);
+    } else if (this.flash.isEnabled()) {
+      this.flash.setEnabled(false);
+    }
+    // Pecking swings the whole beak down and away, which is the same gesture
+    // the third-person body makes. Somebody watching you and you yourself see
+    // the same animation, which is what keeps the reload honest.
+    this.dip += ((pecking ? 1 : 0) - this.dip) * Math.min(1, dt * 11);
+
+    this.sway += dt * (moving ? 9 : 1.7);
+    const bob = Math.sin(this.sway) * (moving ? 0.012 : 0.004);
+    const lag = Math.cos(this.sway * 0.5) * (moving ? 0.014 : 0.004);
+
+    // Out of grain: a small fast shiver. Deliberately motion rather than
+    // colour — peripheral vision is far better at movement than at hue, and
+    // this has to land while the player is looking at a target.
+    const shake = dry ? Math.sin(this.sway * 9) * 0.006 : 0;
+
+    this.root.position.set(
+      BEAK.right + lag + shake,
+      -BEAK.down + bob - this.recoil * 0.028 - this.dip * 0.20,
+      BEAK.forward - this.recoil * 0.07,
+    );
+    // Tilted nose-down at rest so it reads as a beak rather than a bar; up on
+    // recoil, and much further down while pecking.
+    this.root.rotation.set(BEAK.tilt - this.recoil * 0.30 + this.dip * 0.85, 0, 0);
+  }
+
+  dispose() {
+    this.flash.dispose();
+    this.tip.dispose();
+    this.root.dispose();
   }
 }

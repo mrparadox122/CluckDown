@@ -494,6 +494,10 @@ export class ArenaRoom extends Room {
     ps.rapid = p.rapidUntil > this.world.time;
     ps.ammo = p.ammoUntil > this.world.time ? p.ammo : '';
     ps.burning = p.burnUntil > this.world.time;
+    ps.crop = Math.max(0, Math.min(255, Math.floor(p.crop)));
+    ps.pecking = !!p.pecking;
+    ps.feeding = !!p.feeding;
+    ps.dry = !!p.dry;
     ps.kills = p.kills;
     ps.deaths = p.deaths;
     ps.score = p.score;

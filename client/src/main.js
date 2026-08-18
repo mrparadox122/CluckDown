@@ -9,6 +9,7 @@ import { Game } from './game/index.js';
 import { sfx } from './audio/sfx.js';
 import {
   loadGfx, saveGfx, RESOLUTIONS, SENSITIVITY_MIN, SENSITIVITY_MAX, clampSensitivity,
+  BRIGHTNESS_MIN, BRIGHTNESS_MAX, clampBrightness,
 } from './graphics.js';
 import {
   blockZoomGestures, fullscreenSupported, isFullscreen, toggleFullscreen,
@@ -579,6 +580,26 @@ function bindGraphics() {
     if (e.code !== 'KeyV' || e.target instanceof HTMLInputElement) return;
     if (!game) return; // only means anything in a match
     flipView();
+  });
+
+  // Brightness. Live for the same reason sensitivity is: you cannot judge a
+  // brightness from a menu, only from the scene it applies to.
+  const bright = $('gfx-brightness');
+  const brightOut = $('gfx-brightness-out');
+  const showBright = (v) => { brightOut.textContent = `${v.toFixed(2)}×`; };
+  bright.min = String(BRIGHTNESS_MIN * 100);
+  bright.max = String(BRIGHTNESS_MAX * 100);
+  bright.value = String(Math.round(clampBrightness(gfx.brightness) * 100));
+  showBright(clampBrightness(gfx.brightness));
+  bright.addEventListener('input', (e) => {
+    const v = clampBrightness(Number(e.target.value) / 100);
+    gfx = { ...gfx, brightness: v };
+    showBright(v);
+    game?.setBrightness(v);
+  });
+  bright.addEventListener('change', () => {
+    saveGfx(gfx);
+    sfx.play('uiClick');
   });
 
   // Look sensitivity. Live, and it has to be: the only way anyone can tell

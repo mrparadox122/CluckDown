@@ -75,7 +75,14 @@ check('debris particles actually render', high.debrisPeak.some((n) => n > 0),
 // material, every muzzle flash its own), not a pinned count. It grows when
 // genuinely new visuals land — four tracer colours, five pickup colours and the
 // burning flame all arrived with the ammo types.
-check('material count stays lean', high.materials <= 34, `${high.materials} materials`);
+// Raised from 34 as the arena gained cover, lamps, feeders and a first-person
+// beak — all of which are legitimately new things that need looking different
+// from each other. What this check is actually for is catching a material
+// created PER INSTANCE: pass `cache: false` inside a loop and the count grows
+// with the entity count, which is the failure that silently costs frames. A
+// fixed ceiling catches that while still allowing the scene to gain content,
+// as long as somebody moves the number deliberately and says why.
+check('material count stays lean', high.materials <= 40, `${high.materials} materials`);
 
 console.log('\n--- settings ---');
 check('glow disabled when turned off', high.hasGlow === true && low.hasGlow === false);

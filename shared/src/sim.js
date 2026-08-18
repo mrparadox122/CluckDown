@@ -11,9 +11,11 @@ import {
   TEAM_COLORS, teamForSeat, HILL, SHRINK, AMMO, rollPickup,
   MAPS, DEFAULT_MAP, pickMapCandidates, BOUNTY, POTATO,
   CONTRACT, CONTRACTS, CONTRACT_LIST, HEIST, BOMB, REVENGE, GRAVITY, WALL_HEIGHT,
+  coverFor, CROP, cropCapacity,
 } from './constants.js';
 import {
   clamp, clampUnit, norm, len, dist2, segHitsCapsule, mulberry32, angleDelta,
+  segBoxEntry, pushOutBox, insideAny,
 } from './math.js';
 
 let localIdCounter = 1;
@@ -37,6 +39,10 @@ export function createWorld({ mode = 'casual', seed = (Math.random() * 1e9) | 0,
     mode: cfg.id,
     cfg,
     arena: { size: cfg.arena, half },
+    // Cover, rebuilt whenever the map changes. Derived from the map id rather
+    // than synced: the client already knows the map and the arena size, so it
+    // can compute the identical set and nothing has to go over the wire.
+    obstacles: coverFor(DEFAULT_MAP, cfg.arena),
 
     // Map vote. The match sits in `lobby` until a map is chosen, then runs the
     // usual warmup -> live -> over. Nothing simulates during the lobby.
@@ -106,6 +112,7 @@ export function applyMap(world, mapId) {
   const size = Math.round(MAPS[map].size * (world.cfg.arenaScale ?? 1));
   world.arena = { size, half: size / 2 };
   world.safeHalf = size / 2;
+  world.obstacles = coverFor(map, size);
 
   // Move everyone onto the new corners, or they start outside the walls.
   const pts = spawnPoints(world);
@@ -188,9 +195,19 @@ export function addPlayer(world, { id, name, seat, isBot = false }) {
     respawnAt: 0,
     invulnUntil: PLAYER.spawnInvuln,
     nextShotAt: 0,
+    // Grain. See CROP: the crop is the magazine, pecking is the reload, and
+    // standing on your own feeder is the shortcut that costs you a walk.
+    crop: cropCapacity(world.modifier),
+    dry: false,     // hit zero, and not yet pecked back to CROP.recoverTo
+    peckAcc: 0,     // fractional grain, so the refill rate is not tick-quantised
+    stillFor: 0,    // seconds stopped, against CROP.peckDelay
+    pecking: false, // synced: it is the tell other players read
+    feeding: false,
+    healAcc: 0,
     rapidUntil: 0,
     ammo: 'none',
     ammoUntil: 0,
+    lastHurtAt: -99, // for the feeder's out-of-combat regen
     burnUntil: 0,
     burnBy: null,
     burnAcc: 0,
@@ -241,6 +258,73 @@ export function applyInput(world, id, input) {
 
 function emit(world, ev) {
   world.events.push(ev);
+}
+
+// ------------------------------------------------------------------- cover
+
+/**
+ * Pushes a body out of any cover it has ended up inside.
+ *
+ * Run after the move rather than before it: sliding along a wall falls out of
+ * resolving the overlap on the shallower axis, and testing-then-blocking would
+ * instead stop you dead the moment you brushed a corner.
+ *
+ * Two passes, because pushing out of one box can push you into its neighbour —
+ * the L-shaped join of two walls is exactly where that happens, and it is also
+ * exactly where a player will try to hide.
+ */
+function clearCover(world, body, r, lim) {
+  if (!world.obstacles.length) return;
+  for (let pass = 0; pass < 2; pass++) {
+    let moved = false;
+    for (const box of world.obstacles) {
+      // Above the top of it there is nothing to hit. This is the whole reason
+      // cover is never short enough to land on: "am I over it" stays a question
+      // about one number and never becomes a question about standing on things.
+      if ((body.y ?? 0) >= box.h) continue;
+      const out = pushOutBox(body.x, body.z, r, box);
+      if (!out) continue;
+      body.x = out.x;
+      body.z = out.z;
+      moved = true;
+    }
+    if (!moved) break;
+  }
+  // The boundary gets the last word, always. Resolving out of a box can shove a
+  // body past it, and in Last Chicken Standing that is the difference between
+  // standing in the ring and being cooked by it for something you did not do.
+  if (lim !== undefined) {
+    body.x = clamp(body.x, -lim, lim);
+    body.z = clamp(body.z, -lim, lim);
+  }
+}
+
+/** Is this spot clear enough to drop something on? */
+export function spotIsClear(world, x, z, pad = 0) {
+  return !insideAny(world.obstacles, x, z, pad);
+}
+
+/**
+ * Finds a clear spot near a wanted one, spiralling outward.
+ *
+ * Pickups, the bomber and the loose bomb are all placed at random or at fixed
+ * points that cover may now be standing on. Nudging is better than rejecting:
+ * a rejected spawn means no pickup that cycle, which is invisible and feels
+ * like the game forgot.
+ */
+function nearestClear(world, x, z, pad = 0.6) {
+  if (spotIsClear(world, x, z, pad)) return { x, z };
+  const lim = world.arena.half - 2;
+  for (let step = 1; step <= 6; step++) {
+    const r = step * 2.2;
+    for (let i = 0; i < 8; i++) {
+      const a = (i / 8) * Math.PI * 2;
+      const nx = clamp(x + Math.sin(a) * r, -lim, lim);
+      const nz = clamp(z + Math.cos(a) * r, -lim, lim);
+      if (spotIsClear(world, nx, nz, pad)) return { x: nx, z: nz };
+    }
+  }
+  return { x, z }; // give up rather than fail; the map would have to be absurd
 }
 
 function nextId(world) {
@@ -324,6 +408,7 @@ function stepPlayers(world, dt) {
 
     p.x = clamp(p.x + vx * dt, -half + r, half - r);
     p.z = clamp(p.z + vz * dt, -half + r, half - r);
+    clearCover(world, p, r, half - r);
 
     // --- vertical.
     //
@@ -363,14 +448,30 @@ function stepPlayers(world, dt) {
     if (p.nemesis && world.time >= p.nemesisUntil) p.nemesis = null;
 
     applyAim(p);
+    stepCrop(world, p, dt);
     stepBurn(world, p, dt);
     stepPotatoBurn(world, p, dt);
     if (p.ammoUntil && world.time >= p.ammoUntil) { p.ammo = 'none'; p.ammoUntil = 0; }
 
-    if (inp.shoot && world.phase === 'live' && world.time >= p.nextShotAt) fire(world, p);
+    if (inp.shoot && world.phase === 'live' && world.time >= p.nextShotAt) {
+      if (p.crop > 0 && !p.dry) fire(world, p);
+      else {
+        // Empty. Say so, once per trigger-pull's worth of time rather than
+        // sixty times a second — an unanswered trigger is the moment a player
+        // needs feedback most, and the moment a HUD is least likely to be read.
+        p.nextShotAt = world.time + PLAYER.fireCooldown * 2;
+        emit(world, { type: 'dryFire', target: p.id, x: p.x, y: p.y, z: p.z });
+      }
+    }
   }
 
   separatePlayers(world);
+  // Shoving two chickens apart can shove one into a wall, so cover gets the
+  // last word. Cover is static and players are not: the wall has to win, or a
+  // crowd at a corner slowly extrudes somebody through it.
+  for (const p of world.players.values()) {
+    if (p.alive) clearCover(world, p, PLAYER.radius, world.safeHalf - PLAYER.radius);
+  }
 }
 
 /**
@@ -446,6 +547,10 @@ function separatePlayers(world) {
 
 function fire(world, p) {
   const rapid = world.time < p.rapidUntil;
+  p.crop--;
+  // Empty. From here nothing fires until CROP.recoverTo grain are back — see
+  // the constant for why nursing a crop at zero cannot be allowed to work.
+  if (p.crop <= 0) p.dry = true;
   p.nextShotAt = world.time
     + (rapid ? PLAYER.rapidCooldown : PLAYER.fireCooldown)
       * modValue(world.modifier, 'fireCooldownMul');
@@ -482,8 +587,91 @@ function fire(world, p) {
   // ride along so every client draws the same climbing or falling line.
   emit(world, {
     type: 'shot', id, x: bx, y: by, z: bz,
-    aim: p.aim, pitch: p.pitch, owner: p.id, rapid, ammo,
+    aim: p.aim, pitch: p.pitch, owner: p.id, rapid, ammo, crop: p.crop,
   });
+}
+
+// -------------------------------------------------------------------- grain
+
+/**
+ * Pecking and feeding, run once per player per tick.
+ *
+ * The order matters: the feeder wins over pecking, because a player standing on
+ * their pad should not also be head-down in the dirt. Both are "stand still and
+ * recover", and the feeder is simply the better version you had to walk to.
+ */
+function stepCrop(world, p, dt) {
+  const inp = p.input;
+  const cap = cropCapacity(world.modifier);
+  // Airborne counts as moving. Pecking mid-jump would look absurd, and more
+  // importantly it would let a player refill while doing the one thing that
+  // makes them hardest to hit.
+  const moving = len(inp.mx, inp.mz) > 0.05 || p.y > 0;
+  p.stillFor = moving ? 0 : p.stillFor + dt;
+
+  const wasPecking = p.pecking;
+  p.pecking = false;
+  p.feeding = false;
+  if (world.phase !== 'live') return;
+
+  // --- the feeder: your own spawn pad.
+  const pad = spawnPoints(world)[p.seat % 4];
+  if (dist2(p.x, p.z, pad.x, pad.z) <= CROP.feeder.radius * CROP.feeder.radius) {
+    p.feeding = true;
+    // Grain always, health only out of combat — see CROP.feeder.combatDelay.
+    p.crop = Math.min(cap, p.crop + CROP.feeder.refill * dt);
+    const settled = world.time - (p.lastHurtAt ?? -99) >= CROP.feeder.combatDelay;
+    if (p.hp < PLAYER.maxHp && settled) {
+      // Chunked like the burn tick, and for the same reason: sixty heal events
+      // a second would bury everything else in the feed.
+      p.healAcc += CROP.feeder.heal * dt;
+      if (p.healAcc >= 4) {
+        const gain = Math.min(Math.floor(p.healAcc), PLAYER.maxHp - p.hp);
+        p.healAcc -= Math.floor(p.healAcc);
+        p.hp += gain;
+        if (gain > 0) emit(world, { type: 'fed', target: p.id, x: p.x, z: p.z, heal: gain });
+      }
+    } else {
+      p.healAcc = 0;
+    }
+    return;
+  }
+  p.healAcc = 0;
+
+  // --- pecking: anywhere, standing still.
+  //
+  // `p.crop <= 0` in the second half is the deadlock guard. Holding fire
+  // normally means "I am in a fight, do not put your head down" — but holding
+  // fire on an EMPTY crop has to peck anyway, or the most panicked player in
+  // the match is the one who can never recover.
+  // An empty crop is a dry one, however it got there. fire() sets the flag on
+  // the way down, but deriving it here as well keeps the two from ever
+  // disagreeing — a crop zeroed by anything else (a penalty, a refund that
+  // clamps, a future ammo type) would otherwise leave a player who can neither
+  // shoot nor peck, which is the worst state in the game and the hardest to
+  // notice in review.
+  if (p.crop <= 0) p.dry = true;
+
+  // Holding fire normally means "I am in a fight, keep your head up". Holding
+  // it while DRY has to peck anyway: that player has no other way out, and it
+  // is always the most panicked person in the match.
+  const wants = p.crop < cap && (!inp.shoot || p.dry);
+  if (!moving && wants && p.stillFor >= CROP.peckDelay) {
+    p.pecking = true;
+    p.peckAcc += CROP.peckRate * modValue(world.modifier, 'peckRateMul') * dt;
+    if (p.peckAcc >= 1) {
+      const grain = Math.min(Math.floor(p.peckAcc), cap - p.crop);
+      p.peckAcc -= Math.floor(p.peckAcc);
+      p.crop += grain;
+    }
+    if (!wasPecking) emit(world, { type: 'peck', target: p.id, x: p.x, z: p.z });
+  } else {
+    p.peckAcc = 0;
+  }
+
+  // Back in the fight. Checked after both refills, so arriving at a feeder
+  // clears it in the same tick rather than a frame later.
+  if (p.dry && p.crop >= Math.min(CROP.recoverTo, cap)) p.dry = false;
 }
 
 function stepBullets(world, dt) {
@@ -549,13 +737,31 @@ function stepBullets(world, dt) {
       continue;
     }
 
+    // Cover, before anything alive. A bullet cannot hit what is behind a wall,
+    // so the swept segment is CLIPPED to the wall first and the tests below
+    // then run against what is left of it. Doing it the other way round — test
+    // everyone, then check for a wall — lets a shot kill someone standing a
+    // foot behind solid cover.
+    let ex = b.x;
+    let ey = b.y;
+    let ez = b.z;
+    let hitCover = false;
+    for (const box of world.obstacles) {
+      const t = segBoxEntry(px, py, pz, ex, ey, ez, box, BULLET.radius);
+      if (t < 0) continue;
+      ex = px + (ex - px) * t;
+      ey = py + (ey - py) * t;
+      ez = pz + (ez - pz) * t;
+      hitCover = true;
+    }
+
     let consumed = false;
 
     // Swept test against the bomber first — it's the juicier target.
     const bomber = world.bomber;
     if (bomber && bomber.alive) {
       const rr = BOMBER.radius + BULLET.radius;
-      if (segHitsCapsule(px, py, pz, b.x, b.y, b.z, bomber.x, 0, bomber.z, BOMBER.hitHeight, rr)) {
+      if (segHitsCapsule(px, py, pz, ex, ey, ez, bomber.x, 0, bomber.z, BOMBER.hitHeight, rr)) {
         damageBomber(world, BULLET.damage, b.owner, b.vx, b.vz);
         emit(world, {
           type: 'bulletEnd', id: b.id, x: bomber.x, y: b.y, z: bomber.z, wall: false,
@@ -573,7 +779,7 @@ function stepBullets(world, dt) {
         // blocked by them.
         if (t.team !== null && owner && t.team === owner.team) continue;
         const rr = PLAYER.radius + BULLET.radius;
-        if (!segHitsCapsule(px, py, pz, b.x, b.y, b.z, t.x, t.y, t.z, PLAYER.hitHeight, rr)) continue;
+        if (!segHitsCapsule(px, py, pz, ex, ey, ez, t.x, t.y, t.z, PLAYER.hitHeight, rr)) continue;
 
         // Knockback stays flat on purpose. A hit may shove you across the floor
         // — that is what it is for — but it must never lift you, because being
@@ -600,6 +806,12 @@ function stepBullets(world, dt) {
         consumed = true;
         break;
       }
+    }
+
+    // Nothing alive was in the way, but the wall still is.
+    if (!consumed && hitCover) {
+      emit(world, { type: 'bulletEnd', id: b.id, x: ex, y: ey, z: ez, wall: true });
+      consumed = true;
     }
 
     if (!consumed) out.push(b);
@@ -655,6 +867,10 @@ export function damagePlayer(world, target, amount, byId, kind) {
   if (!target.alive || world.time < target.invulnUntil || world.phase === 'over') return;
   const dealt = Math.min(amount, target.hp);
   target.hp -= dealt;
+  // Starts the feeder's regen lockout. Anything that hurts counts, including
+  // the zone and your own cursed egg — "am I in combat" is really "is something
+  // currently going wrong", and all of those qualify.
+  target.lastHurtAt = world.time;
 
   const attacker = byId != null ? world.players.get(byId) : null;
   if (attacker && attacker !== target) {
@@ -689,6 +905,10 @@ function killPlayer(world, target, byId, kind) {
     killer.kills++;
     // Taking the crown down is the whole point of marking someone.
     killer.score += SCORE.kill * (wasBounty ? BOUNTY.multiplier : 1);
+    // Fresh meal. Winning a fight should not immediately cost you the next one,
+    // and arriving at the second chicken empty is how a good play turns into a
+    // bad minute.
+    killer.crop = Math.min(cropCapacity(world.modifier), killer.crop + CROP.killRefund);
     killer.streak = world.time - killer.lastKillAt <= MULTIKILL_WINDOW ? killer.streak + 1 : 1;
     killer.lastKillAt = world.time;
     multi = killer.streak;
@@ -760,8 +980,9 @@ function respawn(world, p) {
     if (nearest > bestScore) { bestScore = nearest; best = pt; }
   }
   // Corners can sit outside the safe area once it has closed in.
-  p.x = clamp(best.x, -lim, lim);
-  p.z = clamp(best.z, -lim, lim);
+  const spot = nearestClear(world, clamp(best.x, -lim, lim), clamp(best.z, -lim, lim), PLAYER.radius + 0.3);
+  p.x = spot.x;
+  p.z = spot.z;
   p.kx = p.kz = 0;
   // Back on the ground, looking level. Respawning mid-air with the pitch you
   // died at would hand you a corner of the sky and no idea why.
@@ -770,6 +991,11 @@ function respawn(world, p) {
   p.pitch = 0;
   p.input = { ...p.input, pitch: 0, jump: false };
   p.hp = PLAYER.maxHp;
+  p.crop = cropCapacity(world.modifier);
+  p.dry = false;
+  p.peckAcc = 0;
+  p.stillFor = 0;
+  p.pecking = false;
   p.alive = true;
   p.invulnUntil = world.time + PLAYER.spawnInvuln;
   p.aim = Math.atan2(-p.x, -p.z);
@@ -856,8 +1082,11 @@ function stepHill(world, dt) {
   if (hill.moveAt <= 0) {
     hill.moveAt = HILL.moveEvery;
     const reach = world.arena.half * HILL.spread;
-    hill.x = (world.rng() * 2 - 1) * reach;
-    hill.z = (world.rng() * 2 - 1) * reach;
+    // The zone is a place you have to stand, so it cannot land on cover.
+    const spot = nearestClear(world,
+      (world.rng() * 2 - 1) * reach, (world.rng() * 2 - 1) * reach, HILL.radius);
+    hill.x = spot.x;
+    hill.z = spot.z;
     emit(world, { type: 'hillMoved', x: hill.x, z: hill.z });
   } else if (hill.moveAt <= HILL.warnAt && !hill.warned) {
     hill.warned = true;
@@ -1396,13 +1625,19 @@ function stepBomber(world, dt) {
   const half = world.arena.half - BOMBER.radius;
   b.x = clamp(b.x + dirX * BOMBER.speed * speedMul * dt, -half, half);
   b.z = clamp(b.z + dirZ * BOMBER.speed * speedMul * dt, -half, half);
+  // It walks into cover like everything else, and slides along it. No pathing:
+  // the bomber is a threat you kite, and one that solved corners perfectly
+  // would stop being kiteable — sliding along a wall is exactly the pause that
+  // makes running away work.
+  clearCover(world, b, BOMBER.radius, half);
   if (dirX || dirZ) b.aim = Math.atan2(dirX, dirZ);
 }
 
 function pickWanderTarget(world, b) {
   const h = world.arena.half - 4;
-  b.wx = (world.rng() * 2 - 1) * h;
-  b.wz = (world.rng() * 2 - 1) * h;
+  const spot = nearestClear(world, (world.rng() * 2 - 1) * h, (world.rng() * 2 - 1) * h, BOMBER.radius);
+  b.wx = spot.x;
+  b.wz = spot.z;
   b.wanderAt = BOMBER.wanderInterval;
 }
 
@@ -1479,9 +1714,12 @@ function explodeBomber(world) {
 // ------------------------------------------------------------------ pickups
 
 function spawnPickup(world, type, x, z) {
-  const pk = { id: nextId(world), type, x, z };
+  // A pickup inside a wall is invisible and uncollectable, which reads as the
+  // spawn simply not happening. Nudge it out rather than skip the cycle.
+  const at = nearestClear(world, x, z, PICKUP.radius + 0.4);
+  const pk = { id: nextId(world), type, x: at.x, z: at.z };
   world.pickups.push(pk);
-  emit(world, { type: 'pickupSpawn', x, z, kind: type, id: pk.id });
+  emit(world, { type: 'pickupSpawn', x: pk.x, z: pk.z, kind: type, id: pk.id });
   return pk;
 }
 
@@ -1554,6 +1792,7 @@ export function snapshot(world) {
       x: p.x, y: p.y, z: p.z, aim: p.aim, pitch: p.pitch,
       hp: p.hp, alive: p.alive, kills: p.kills, deaths: p.deaths, score: p.score,
       invuln: p.invulnUntil > world.time, rapid: p.rapidUntil > world.time,
+      crop: Math.floor(p.crop), pecking: p.pecking, feeding: p.feeding, dry: p.dry,
       ammo: p.ammoUntil > world.time ? p.ammo : 'none',
       burning: p.burnUntil > world.time,
       respawnIn: p.alive ? 0 : Math.max(0, p.respawnAt - world.time),

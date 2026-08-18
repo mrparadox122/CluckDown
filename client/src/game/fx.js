@@ -2,6 +2,7 @@ import { MeshBuilder } from '@babylonjs/core/Meshes/meshBuilder';
 import { Vector3, Matrix, Quaternion } from '@babylonjs/core/Maths/math';
 import { emissiveMat } from './scene.js';
 import { BULLET, BOMBER, AMMO } from '@cluckdown/shared';
+import { BEAK } from './view.js';
 
 const GRAVITY = -26;
 
@@ -52,40 +53,68 @@ export class BulletPool {
   }
 
   /**
-    * @param ahead world units to push the VISUAL start forward.
-    *
-    * Nonzero only for your own shots in first person. The tracer is a 3.2-unit
-    * stretched box spawned at the shooter's own position — which in first
-    * person is exactly where the camera is, so every shot painted a white
-    * streak across the whole screen. The authoritative bullet is unaffected;
-    * this only moves where the streak is drawn from.
-    */
-  spawn(ev, ahead = 0) {
+   * @param from optional world point to draw the tracer FROM.
+   *
+   * Used for your own shots in first person, where it is the tip of your beak.
+   * The authoritative bullet leaves the chicken's eye — which in first person is
+   * exactly where the camera is, so drawing the streak there made every shot
+   * appear to come out of the player's own eyeballs, dead centre of the
+   * crosshair. Starting it at the beak instead is what every shooter does with
+   * a weapon muzzle, and it is the whole reason the beak is on screen.
+   *
+   * The line is then aimed at a point BEAK.converge units down the real bullet
+   * path, so the drawn streak and the authoritative round are one line by the
+   * time anything is close enough to be hit. Same parallax trick as the
+   * third-person boom, an order of magnitude smaller.
+   */
+  spawn(ev, from = null) {
     const kind = this.pools[ev.ammo] ? ev.ammo : 'none';
     const mesh = this.pools[kind].pop();
     if (!mesh) return; // pool exhausted — drop the visual rather than stutter
     mesh.setEnabled(true);
+
     // Same spherical direction the simulation built the bullet from. Drawing
     // this flat while the real round climbed would put the streak somewhere
     // the damage was not, which is the one thing a tracer must never do.
     const pitch = ev.pitch ?? 0;
     const cp = Math.cos(pitch);
-    const dx = Math.sin(ev.aim) * cp;
-    const dy = Math.sin(pitch);
-    const dz = Math.cos(ev.aim) * cp;
-    mesh.position.set(ev.x + dx * ahead, (ev.y ?? 0.85) + dy * ahead, ev.z + dz * ahead);
+    let dx = Math.sin(ev.aim) * cp;
+    let dy = Math.sin(pitch);
+    let dz = Math.cos(ev.aim) * cp;
+    let sx = ev.x;
+    let sy = ev.y ?? 0.85;
+    let sz = ev.z;
+
+    if (from) {
+      const tx = sx + dx * BEAK.converge;
+      const ty = sy + dy * BEAK.converge;
+      const tz = sz + dz * BEAK.converge;
+      const len = Math.hypot(tx - from.x, ty - from.y, tz - from.z) || 1;
+      dx = (tx - from.x) / len;
+      dy = (ty - from.y) / len;
+      dz = (tz - from.z) / len;
+      // Started a stride PAST the beak rather than on it — see BEAK.tracerGap.
+      // Drawn at the beak itself, a glowing 0.24-unit streak sits 0.8 units
+      // from the camera and blooms across a quarter of the screen, which is the
+      // full-screen flash this whole arrangement exists to avoid.
+      sx = from.x + dx * BEAK.tracerGap;
+      sy = from.y + dy * BEAK.tracerGap;
+      sz = from.z + dz * BEAK.tracerGap;
+    }
+
+    mesh.position.set(sx, sy, sz);
     // Babylon composes mesh.rotation as yaw-pitch-roll, so a mesh stretched
     // along local +Z points at (sin y·cos x, -sin x, cos y·cos x). Hence the
     // negated pitch: rotation.x is nose-DOWN positive.
-    mesh.rotation.y = ev.aim;
-    mesh.rotation.x = -pitch;
+    mesh.rotation.y = Math.atan2(dx, dz);
+    mesh.rotation.x = -Math.asin(Math.max(-1, Math.min(1, dy)));
     // Stretched along travel: an elongated sphere fakes motion blur far more
     // cheaply than a particle trail, and the glow layer turns it into a streak.
     // Length is in world units, so the shape does not change when the tracer is
     // made thinner or thicker.
     mesh.scaling.set(1, 1, BULLET.tracerLength / (BULLET.tracerRadius * 2));
     this.active.set(ev.id, {
-      mesh, kind, aim: ev.aim, pitch,
+      mesh, kind, aim: mesh.rotation.y, pitch: -mesh.rotation.x,
       vx: dx * BULLET.speed, vy: dy * BULLET.speed, vz: dz * BULLET.speed,
       life: BULLET.life,
     });

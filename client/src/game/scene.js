@@ -17,7 +17,9 @@ import '@babylonjs/core/Meshes/instancedMesh';
 import '@babylonjs/core/Meshes/thinInstanceMesh';
 
 import { hardwareScaling } from '../graphics.js';
-import { MAPS, DEFAULT_MAP, HILL, PLAYER, WALL_HEIGHT } from '@cluckdown/shared';
+import {
+  MAPS, DEFAULT_MAP, HILL, PLAYER, WALL_HEIGHT, coverFor, clamp,
+} from '@cluckdown/shared';
 import { asView, tppCamera } from './view.js';
 
 // Cluckdown has two cameras: one behind the chicken's eyes, and one on a boom
@@ -57,7 +59,10 @@ export function createStage(canvas, gfx = { resolution: 1, glow: true, antialias
   scene.ambientColor = new Color3(0.04, 0.04, 0.07);
   scene.fogMode = Scene.FOGMODE_EXP2;
   scene.fogColor = new Color3(0.02, 0.02, 0.04);
-  scene.fogDensity = 0.011;
+  // Halved. Tuned when the largest arena was 40 units across; at 64 it was
+  // eating the far side of the map entirely, which reads as darkness even
+  // though it is haze. Enough left to give depth, not enough to hide anyone.
+  scene.fogDensity = 0.0055;
   scene.blockMaterialDirtyMechanism = true;
 
   const camera = new UniversalCamera('cam', new Vector3(0, FPS_EYE, 0), scene);
@@ -74,14 +79,35 @@ export function createStage(canvas, gfx = { resolution: 1, glow: true, antialias
   // the armed bomber become the only things you can see by.
   const dark = modifier === 'darkness';
 
-  const hemi = new HemisphericLight('hemi', new Vector3(0.3, 1, 0.2), scene);
-  hemi.intensity = dark ? 0.045 : 0.30;
-  hemi.diffuse = new Color3(0.55, 0.6, 0.85);
-  hemi.groundColor = new Color3(0.05, 0.05, 0.1);
+  // Brightness is a player setting, not a constant. Phone screens vary by more
+  // than a factor of two in usable contrast, and this is a game played outdoors
+  // on buses — "too dark" is often a device statement, not a design one, and no
+  // single number is right for every panel.
+  const gain = clamp(Number(gfx.brightness) || 1, 0.5, 1.8);
 
-  const key = new PointLight('key', new Vector3(0, 22, 0), scene);
-  key.intensity = dark ? 0.12 : 0.62;
-  key.range = 70;
+  // Raised from 0.30. The complaint was "too dark", and the honest cause was
+  // partly this and partly that the maps got bigger: the key light below is a
+  // point light, so growing the arena from 40 to 64 units pushed the corners
+  // from ~36 units away to ~50 and they fell off a cliff.
+  //
+  // Note what is NOT done here: ambient is not cranked until everything is
+  // visible. That flattens the scene, washes out the glow layer the whole look
+  // is built on, and loses the night the players said they liked. Fill light
+  // exists to keep shapes readable; the lamps below do the actual lighting.
+  const hemi = new HemisphericLight('hemi', new Vector3(0.3, 1, 0.2), scene);
+  hemi.intensity = (dark ? 0.05 : 0.42) * gain;
+  hemi.diffuse = new Color3(0.55, 0.6, 0.85);
+  // A distinctly cool, lifted ground bounce. The floor was reading as a void
+  // rather than as a surface, and having no sense of the ground plane is most
+  // of what "too dark" actually feels like in a first-person game — you cannot
+  // judge distance without it.
+  hemi.groundColor = new Color3(0.14, 0.15, 0.24);
+
+  const key = new PointLight('key', new Vector3(0, 26, 0), scene);
+  key.intensity = (dark ? 0.12 : 0.75) * gain;
+  // Comfortably past the corner of the largest arena. Falloff over that
+  // distance is what left The Big Yard's corners unlit.
+  key.range = 130;
   key.diffuse = new Color3(0.7, 0.75, 1);
 
   // The glow layer is the single most expensive effect here: an extra render
@@ -90,7 +116,7 @@ export function createStage(canvas, gfx = { resolution: 1, glow: true, antialias
   const glow = gfx.glow ? new GlowLayer('glow', scene, { blurKernelSize: 48 }) : null;
   if (glow) glow.intensity = dark ? 1.5 : 1.15;
 
-  return { engine, scene, camera, glow, key };
+  return { engine, scene, camera, glow, key, hemi, gain };
 }
 
 // Materials are expensive to duplicate and duplicates prevent batching, so
@@ -151,8 +177,12 @@ export function litMat(scene, name, hex, { emissive = 0.06, spec = 0.05, cache =
  * The arena: a floor of individual cubes (thin-instanced, so all 1600 of them
  * cost one draw call) plus four walls with the grey top trim from the mockup.
  */
-export function buildArena(scene, size, mapId = DEFAULT_MAP) {
+export function buildArena(scene, size, mapId = DEFAULT_MAP, modifier = 'none') {
   const map = MAPS[mapId] ?? MAPS[DEFAULT_MAP];
+  // LIGHTS OUT means exactly that: the lamps below do not get built at all.
+  // Dimming them would leave a lit rig somebody could still navigate by, and
+  // the whole point of that modifier is that tracer fire is the only light.
+  const dark = modifier === 'darkness';
   const half = size / 2;
   const root = [];
 
@@ -216,17 +246,80 @@ export function buildArena(scene, size, mapId = DEFAULT_MAP) {
     root.push(cap);
   }
 
-  // Corner spawn pads, so you can see where people come back in.
-  const pad = MeshBuilder.CreateBox('spawnPad', { width: 3, height: 0.12, depth: 3 }, scene);
-  pad.material = emissiveMat(scene, 'padMat', '#5f7fff', { intensity: 0.5, alpha: 0.5 });
+  // --- cover.
+  //
+  // Built from the same coverFor() the simulation uses, so what you can hide
+  // behind and what actually stops a bullet are the same boxes by construction.
+  // Nothing is synced: the map id and the arena size are enough for both sides
+  // to arrive at an identical layout.
+  //
+  // Two materials, because the height IS the rule — low cover is something you
+  // hop to shoot over and high cover is not, and a player has to be able to
+  // tell which is which at a glance, in the dark, while being shot at. The lit
+  // cap on top does that job: gold means you can clear it.
+  // High cover borrows the wall's own cap material. That is not just to save a
+  // material — it makes the language consistent: grey trim means solid, gold
+  // means you can hop it, and the walls are the most solid thing there is.
+  const coverMat = litMat(scene, `coverMat_${map.id}`, map.trim, { emissive: 0.09 });
+  const lowCapMat = emissiveMat(scene, 'coverLowCap', '#ffcc3d', { intensity: 0.55 });
+  const highCapMat = capMat;
+
+  for (const [i, c] of coverFor(mapId, size).entries()) {
+    const box = MeshBuilder.CreateBox(`cover${i}`, { width: c.w, height: c.h, depth: c.d }, scene);
+    box.position.set(c.x, c.h / 2, c.z);
+    box.material = coverMat;
+    box.isPickable = false;
+    root.push(box);
+
+    const jumpable = c.h <= 1.8;
+    const cap = MeshBuilder.CreateBox(`coverCap${i}`, {
+      width: c.w + 0.1, height: 0.16, depth: c.d + 0.1,
+    }, scene);
+    cap.position.set(c.x, c.h + 0.02, c.z);
+    cap.material = jumpable ? lowCapMat : highCapMat;
+    cap.isPickable = false;
+    root.push(cap);
+  }
+
+  // Corner feeders. These are the spawn pads, doing a second job: stand on your
+  // own one to refill your crop instantly and heal out of combat.
+  //
+  // Recoloured from spawn-blue to grain-gold, with an actual heap of grain in
+  // the middle. A trigger zone you cannot see is a mechanic that does not
+  // exist — and this one has to be findable by a player who has never read a
+  // word about the game, from across the arena, in the dark.
+  const pad = MeshBuilder.CreateBox('spawnPad', { width: 3.2, height: 0.12, depth: 3.2 }, scene);
+  pad.material = emissiveMat(scene, 'padMat', '#ffcc3d', { intensity: 0.45, alpha: 0.4 });
   pad.isPickable = false;
   const d = half - 3.5;
+  const corners = [[-d, -d], [d, d], [d, -d], [-d, d]];
   const padM = new Float32Array(4 * 16);
-  [[-d, -d], [d, d], [d, -d], [-d, d]].forEach(([x, z], k) => {
+  corners.forEach(([x, z], k) => {
     Matrix.Translation(x, 0.06, z).copyToArray(padM, k * 16);
   });
   pad.thinInstanceSetBuffer('matrix', padM, 16, true);
   root.push(pad);
+
+  // The grain itself: a low heap of cubes. Reads as food at any distance, and
+  // it is the thing that makes the pad look like somewhere you GO rather than
+  // somewhere you appear.
+  const grain = MeshBuilder.CreateBox('grainPile', { size: 0.34 }, scene);
+  grain.material = emissiveMat(scene, 'grainMat', '#ffd166', { intensity: 0.85 });
+  grain.isPickable = false;
+  const heap = [
+    [0, 0.17, 0], [0.34, 0.17, 0.12], [-0.3, 0.17, -0.16],
+    [0.12, 0.17, -0.34], [-0.14, 0.17, 0.32], [0.02, 0.46, 0.02],
+  ];
+  const grainM = new Float32Array(corners.length * heap.length * 16);
+  let gi = 0;
+  for (const [x, z] of corners) {
+    for (const [ox, oy, oz] of heap) {
+      Matrix.Translation(x + ox, oy, z + oz).copyToArray(grainM, gi * 16);
+      gi++;
+    }
+  }
+  grain.thinInstanceSetBuffer('matrix', grainM, 16, true);
+  root.push(grain);
 
   // Centre marker: the bomber's nest.
   const nest = MeshBuilder.CreateBox('nest', { width: 3.4, height: 0.14, depth: 3.4 }, scene);
@@ -234,6 +327,70 @@ export function buildArena(scene, size, mapId = DEFAULT_MAP) {
   nest.material = emissiveMat(scene, 'nestMat', '#ff2d4b', { intensity: 0.45, alpha: 0.42 });
   nest.isPickable = false;
   root.push(nest);
+
+  // --- lamps ---------------------------------------------------------------
+  //
+  // The real lighting, and none of it is a light.
+  //
+  // Adding six more PointLights would have been the obvious fix and the wrong
+  // one: StandardMaterial handles four lights before the shader has to grow,
+  // and this game is aimed at phones. Emissive geometry costs nothing per
+  // pixel — so the lamps are glowing boxes and the pools beneath them are flat
+  // emissive discs. It is a painted lighting rig, and at night nobody can tell.
+  //
+  // What it buys is not brightness, it is STRUCTURE. Pools of light with dark
+  // lanes between them give the floor a scale to read distance against, give
+  // cover a background to be a silhouette against, and — the part that makes it
+  // a design change rather than a graphics one — make standing in the light a
+  // decision. Lit ground is where you are seen.
+  const lampHex = map.lamp ?? map.trim;
+  // Spaced by size so a small map does not become a runway and a large one does
+  // not go dark between posts.
+  const perSide = Math.max(2, Math.round(size / 17));
+  const inset = 2.4;
+  const spots = [];
+  for (let i = 0; i < perSide; i++) {
+    // Evenly along each wall, skipping the very corners — those already have a
+    // feeder glowing on them and two light sources in one corner reads as a mistake.
+    const t = (i + 1) / (perSide + 1);
+    const at = -half + t * size;
+    spots.push([at, -half + inset], [at, half - inset], [-half + inset, at], [half - inset, at]);
+  }
+
+  if (!dark) {
+    const POST_H = 3.4;
+    const post = MeshBuilder.CreateBox('lampPost', { width: 0.22, height: POST_H, depth: 0.22 }, scene);
+    // The posts are the same dark trim as the walls; nobody looks at a lamp post.
+    post.material = wallMat;
+    post.isPickable = false;
+    const head = MeshBuilder.CreateBox('lampHead', { width: 0.5, height: 0.34, depth: 0.5 }, scene);
+    head.material = emissiveMat(scene, `lampHeadMat_${map.id}`, lampHex, { intensity: 1.25 });
+    head.isPickable = false;
+
+    // The pool. Wide, faint and flat — it is doing the job of a light, so it has
+    // to be soft enough that the eye reads it as illumination rather than as a
+    // painted circle on the floor.
+    const pool = MeshBuilder.CreateCylinder('lampPool', {
+      diameter: 11, height: 0.04, tessellation: 26,
+    }, scene);
+    pool.material = emissiveMat(scene, `lampPoolMat_${map.id}`, lampHex, {
+      intensity: 0.34, alpha: 0.13, cache: false,
+    });
+    pool.isPickable = false;
+
+    const postM = new Float32Array(spots.length * 16);
+    const headM = new Float32Array(spots.length * 16);
+    const poolM = new Float32Array(spots.length * 16);
+    spots.forEach(([x, z], k) => {
+      Matrix.Translation(x, POST_H / 2, z).copyToArray(postM, k * 16);
+      Matrix.Translation(x, POST_H + 0.1, z).copyToArray(headM, k * 16);
+      Matrix.Translation(x, 0.03, z).copyToArray(poolM, k * 16);
+    });
+    post.thinInstanceSetBuffer('matrix', postM, 16, true);
+    head.thinInstanceSetBuffer('matrix', headM, 16, true);
+    pool.thinInstanceSetBuffer('matrix', poolM, 16, true);
+    root.push(post, head, pool);
+  }
 
   // --- everything below exists so the camera can centre on the player ---
   //
@@ -295,10 +452,14 @@ export function buildArena(scene, size, mapId = DEFAULT_MAP) {
  * jump and the crosshair sit still in the middle of the screen.
  */
 export class CameraRig {
-  constructor(camera, arenaSize, engine) {
+  constructor(camera, arenaSize, engine, obstacles = []) {
     this.camera = camera;
     this.engine = engine;
     this.half = arenaSize / 2;
+    // Cover, for retracting the third-person boom. A camera that clips through
+    // a box shows the inside of the world, which is far more jarring than the
+    // camera simply being closer for a moment.
+    this.obstacles = obstacles;
 
     this.camera.fov = FPS_FOV;
     this.camera.minZ = FPS_NEAR;
@@ -396,7 +557,7 @@ export class CameraRig {
       // The boom, solved by view.js — including retracting it off a wall. Shake
       // moves the camera but not what it looks at, exactly as in first person,
       // so a hit sways the view rather than sliding the whole world sideways.
-      const cam = tppCamera(targetX, targetY, targetZ, this.yaw, look, this.half);
+      const cam = tppCamera(targetX, targetY, targetZ, this.yaw, look, this.half, this.obstacles);
       this.camera.position.set(cam.x + sx, cam.y + sy, cam.z);
       this.camera.setTarget(new Vector3(
         cam.x + cam.basis.fx * 10,

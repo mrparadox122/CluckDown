@@ -78,6 +78,9 @@ export class Controls {
     // wall, and the aim has to be squeezed with it or the crosshair drifts off
     // the shot in exactly the places you are most likely to be fighting.
     this.arenaHalf = Infinity;
+    // Cover, so a crosshair resting on a box converges on the box rather than
+    // on whatever is 20 units past it.
+    this.cover = [];
 
     // Touch look, tracked by pointerId so that looking with one thumb while
     // holding fire with another works. That is the whole reason fire is its own
@@ -258,6 +261,8 @@ export class Controls {
     this.arenaHalf = Number.isFinite(half) && half > 0 ? half : Infinity;
   }
 
+  setCover(boxes) { this.cover = boxes ?? []; }
+
   /**
    * Look sensitivity multiplier. 1 is the tuned default; the slider spans
    * roughly a quarter to double that.
@@ -331,7 +336,9 @@ export class Controls {
     // pass through the crosshair. Either way the simulation receives one
     // ordinary aim angle and never learns which view produced it.
     const shot = this.view === 'tpp' && self
-      ? convergeAim(self.x, self.y ?? 0, self.z, look.yaw, look.pitch, foes, this.arenaHalf)
+      ? convergeAim(
+        self.x, self.y ?? 0, self.z, look.yaw, look.pitch, foes, this.arenaHalf, this.cover,
+      )
       : look;
 
     // Movement follows the CAMERA, not the shot. They differ by a fraction of a

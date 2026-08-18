@@ -72,6 +72,14 @@
             <span>Resolution</span>
             <select id="gfx-resolution"></select>
           </label>
+          <label class="setting">
+            <span>Brightness</span>
+            <span class="setting-slider">
+              <input id="gfx-brightness" type="range" min="60" max="160" step="5" class="volume" />
+              <output id="gfx-brightness-out" class="setting-value">1.00&#215;</output>
+            </span>
+          </label>
+          <p class="settings-hint">The arena is meant to be dark &mdash; the glow is most of the look. Nudge this if your screen is dimmer than mine, not to turn the night off.</p>
           <label class="setting toggle">
             <span>Glow effects</span>
             <input id="gfx-glow" type="checkbox" />
@@ -169,6 +177,20 @@
          positioned against it instead of the viewport, and .hud-top grows with
          the killfeed — so a busy match pushed both of these into the middle of
          the screen, right over the fight. -->
+    <!-- Vitals: your health and your crop.
+         Bottom-centre, above the contract strip, and NOT in a corner — on a
+         phone in landscape both bottom corners are under a thumb, and the
+         top-left belongs to the killfeed. Centre-bottom is the one region that
+         is always visible, never covered, and closest to where the eyes already
+         are without sitting on top of the crosshair. -->
+    <div id="vitals" class="vitals hidden">
+      <div class="vitals-hp">
+        <div class="hp-track"><div id="hp-fill" class="hp-fill"></div></div>
+        <div id="hp-num" class="hp-num">100</div>
+      </div>
+      <div id="crop" class="crop"></div>
+      <div id="crop-hint" class="crop-hint"></div>
+    </div>
     <div id="contract" class="contract hidden"></div>
     <div id="action-prompt" class="action-prompt hidden"></div>
 

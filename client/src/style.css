@@ -1545,3 +1545,116 @@ input[type="text"]:focus { border-color: var(--hot); box-shadow: 0 0 0 3px rgba(
   .marker.is-urgent .mk-icon { font-size: 17px; }
   .mk-dist { font-size: 8px; }
 }
+
+
+/* ======================= VITALS =======================
+   Health and grain. Two resources, one cluster, bottom-centre.
+
+   Placement is the whole design here. On a landscape phone the bottom corners
+   are under thumbs, the top-left is the killfeed and the top-centre is the
+   clock — the only region that is both always visible and never occluded is
+   bottom-centre, and it is also the shortest saccade from the crosshair. */
+
+.vitals {
+  position: absolute;
+  left: 50%;
+  bottom: calc(74px + var(--safe-b));
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  pointer-events: none;
+  user-select: none;
+}
+
+.vitals-hp { display: flex; align-items: center; gap: 8px; }
+
+.hp-track {
+  width: 132px;
+  height: 9px;
+  border-radius: 5px;
+  background: rgba(6, 7, 14, 0.8);
+  border: 1px solid var(--edge);
+  overflow: hidden;
+}
+/* Width, not transform: the bar is 132px and updates a few times a second, so
+   the layout cost is nothing and the code stays readable. */
+.hp-fill {
+  height: 100%;
+  width: 100%;
+  border-radius: 4px;
+  background: linear-gradient(90deg, #35e07f, #7ef0a8);
+  transition: width .12s linear, background .2s;
+}
+/* Colour IS the warning. A number tells you the value; a colour tells you how
+   to feel about it, and under pressure nobody reads numbers. */
+.hp-fill.warn { background: linear-gradient(90deg, #ffcc3d, #ffe08a); }
+.hp-fill.hurt { background: linear-gradient(90deg, #ff2d4b, #ff7a90); }
+
+.hp-num {
+  min-width: 26px;
+  font-size: 12px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+  text-shadow: 0 1px 3px #000;
+}
+
+/* Grain as pips rather than a number.
+   A count you can SEE is faster than a count you have to READ — the shape of
+   the row registers in peripheral vision, which is where this lives during a
+   fight. The pips stay a fixed size and the row simply gets shorter. */
+.crop {
+  display: flex;
+  gap: 2px;
+  align-items: flex-end;
+  height: 12px;
+}
+.crop-pip {
+  width: 4px;
+  height: 11px;
+  border-radius: 1.5px;
+  background: #ffcc3d;
+  box-shadow: 0 0 4px rgba(255, 204, 61, 0.55);
+}
+.crop-pip.spent { background: rgba(255, 255, 255, 0.14); box-shadow: none; }
+/* Under a quarter left, the whole row pulses. Deliberately loud: running dry
+   mid-duel is the failure this UI exists to prevent. */
+.crop.low .crop-pip:not(.spent) { background: #ff2d4b; box-shadow: 0 0 6px rgba(255, 45, 75, 0.7); }
+.crop.low { animation: pulse .7s ease-in-out infinite; }
+.crop.empty .crop-pip { background: rgba(255, 45, 75, 0.25); box-shadow: none; }
+
+/* One short line of state, and only when there is state worth naming. Silence
+   is the default: a label that is always on stops being read within a minute. */
+.crop-hint {
+  height: 12px;
+  font-size: 9.5px;
+  font-weight: 800;
+  letter-spacing: 1.6px;
+  color: var(--muted);
+  text-shadow: 0 1px 3px #000;
+  opacity: 0;
+  transition: opacity .12s;
+}
+.crop-hint.show { opacity: 1; }
+.crop-hint.pecking { color: var(--gold); }
+.crop-hint.feeding { color: #35e07f; }
+.crop-hint.empty { color: var(--hot); animation: pulse .6s ease-in-out infinite; }
+
+/* The crosshair answers "can I shoot right now" without any eye travel at all.
+   The vitals cluster is for planning; this is for the half-second before you
+   pull the trigger. */
+.crosshair.dry::before,
+.crosshair.dry::after { background: var(--hot); }
+.crosshair.busy::before,
+.crosshair.busy::after { background: var(--gold); }
+
+@media (max-height: 460px) {
+  .vitals { bottom: calc(58px + var(--safe-b)); gap: 3px; }
+  .hp-track { width: 104px; height: 7px; }
+  .hp-num { font-size: 10.5px; min-width: 22px; }
+  .crop { height: 10px; }
+  .crop-pip { width: 3px; height: 9px; }
+  .crop-hint { font-size: 8.5px; height: 10px; }
+}

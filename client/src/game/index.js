@@ -3,7 +3,7 @@ import {
   createStage, buildArena, buildHillZone, buildSafeZone, CameraRig,
 } from './scene.js';
 import {
-  PlayerView, BomberView, PickupView, PotatoView, NestView, LooseEggView, BombView,
+  PlayerView, BomberView, PickupView, PotatoView, NestView, LooseEggView, BombView, BeakView,
 } from './entities.js';
 import { BulletPool, DebrisPool, BlastRings, MuzzleFlash } from './fx.js';
 import { Controls } from './controls.js';
@@ -11,7 +11,7 @@ import { asView } from './view.js';
 import { sfx } from '../audio/sfx.js';
 import {
   PLAYER, BULLET, BOMBER, MODIFIERS, MODES, HILL, BOMB, HEIST, SEAT_COLORS,
-  GRAVITY, modValue, clampUnit, clamp,
+  GRAVITY, coverFor, cropCapacity, modValue, clampUnit, clamp,
 } from '@cluckdown/shared';
 
 // Matches the server's simulation rate: sending slower would leave most ticks
@@ -47,11 +47,19 @@ export class Game {
     this.scene = stage.scene;
     this.camera = stage.camera;
     this.glow = stage.glow;
+    // Kept so the brightness setting can be dragged mid-match. Judging a
+    // brightness without seeing the actual scene is guesswork, and this is a
+    // setting that exists precisely because devices differ.
+    this.lights = { key: stage.key, hemi: stage.hemi, gain: stage.gain };
 
     // Arena geometry and palette both come from the voted map.
     this.map = session.map ?? 'coop';
-    this.arena = buildArena(this.scene, session.arenaSize, this.map);
-    this.rig = new CameraRig(this.camera, session.arenaSize, this.engine);
+    this.arena = buildArena(this.scene, session.arenaSize, this.map, this.modifier);
+    // The same boxes the simulation collides against, derived rather than
+    // synced — the camera has to retract off them and the crosshair has to
+    // converge on them, and both must agree with what stops a bullet.
+    this.cover = coverFor(this.map, session.arenaSize);
+    this.rig = new CameraRig(this.camera, session.arenaSize, this.engine, this.cover);
 
     // Objective markers, built only for the modes that have them.
     const rules = MODES[session.mode] ?? {};
@@ -69,6 +77,9 @@ export class Game {
     this.debris = new DebrisPool(this.scene, this.glow, 90, modValue(this.modifier, 'debrisGravityMul'));
     this.blasts = new BlastRings(this.scene, this.glow);
     this.muzzle = new MuzzleFlash(this.scene, this.glow);
+
+    // Your own beak, in first person. See BEAK in view.js.
+    this.beak = new BeakView(this.scene, this.camera);
 
     this.views = new Map();
     this.pickups = new Map();
@@ -91,6 +102,7 @@ export class Game {
     // The arena never changes size within a match — the map vote resolves
     // before the Game is built — so this is set once.
     this.controls.setArenaHalf(session.arenaSize / 2);
+    this.controls.setCover(this.cover);
     this.setView(gfx?.view);
 
     // Who to watch while dead — set from the kill event, cleared on respawn.
@@ -133,6 +145,14 @@ export class Game {
   setAssist(on) { this.controls.setAssist(on); }
 
   setSensitivity(mul) { this.controls.setSensitivity(mul); }
+
+  /** Live brightness, as a multiplier over whatever the scene was built with. */
+  setBrightness(mul) {
+    const g = clamp(Number(mul) || 1, 0.5, 1.8) / (this.lights.gain || 1);
+    if (this.lights.hemi) this.lights.hemi.intensity *= g;
+    if (this.lights.key) this.lights.key.intensity *= g;
+    this.lights.gain = clamp(Number(mul) || 1, 0.5, 1.8);
+  }
 
   /**
    * Switch between the eye and the shoulder.
@@ -205,17 +225,28 @@ export class Game {
           // result was a full-screen white flash on every shot. 3.2 units of
           // push is camera clearance, not tracer length — it has to stay clear
           // of the near plane whatever BULLET.tracerLength is set to.
-          // Only first person has to hide your own muzzle effects: that is
-          // where the camera is standing. From the shoulder they are 4 units
-          // away and are exactly what you want to see, so third person gets the
-          // flash back and its tracer un-nudged.
-          const inside = self && e.owner === self.id && this.view === 'fps';
+          // Your own shots in first person leave the tip of your beak, not the
+          // camera. Everyone else's — and all of your own in third person —
+          // leave the chicken, which is where the simulation put them.
           const ownShot = self && e.owner === self.id;
-          this.bullets.spawn(e, inside ? 3.2 : 0);
-          if (!inside) this.muzzle.fire(e.x, e.y, e.z);
+          const fromBeak = ownShot && this.view === 'fps' && this.beak.shown;
+          const tip = fromBeak ? this.beak.tipWorld() : null;
+          this.bullets.spawn(e, tip);
+          // The flash comes back for your own shots now that it has somewhere
+          // to be that is not inside your head. It was suppressed because a
+          // 0.9-unit glowing sphere at point blank was a full-screen white
+          // flash; on the end of a beak it is what firing looks like.
+          // The world flash is a 0.9-unit glowing sphere on the glow layer:
+          // right at five metres, a full-screen white blowout at the 0.8 units
+          // your own beak sits from the camera. Your own first-person flash is
+          // the beak's, sized for the distance it is actually seen from.
+          if (!tip) this.muzzle.fire(e.x, e.y, e.z);
           // ...replaced by a recoil kick, which reads as "I fired" far better
           // than a flash does anyway.
-          if (ownShot) this.rig.addRecoil();
+          if (ownShot) {
+            this.rig.addRecoil();
+            this.beak.kick();
+          }
           sfx.play(e.rapid ? 'rapidShot' : 'shot');
           break;
         }
@@ -459,6 +490,37 @@ export class Game {
           if (self && e.by === self.id && !isHeal) this.hud.announce('RAPID FIRE');
           break;
         }
+        case 'peck': {
+          if (self && e.target === self.id) sfx.play('peck');
+          // A small puff of grain dust at the beak. Quiet on purpose: this
+          // happens constantly, and an effect loud enough to notice the first
+          // time is exhausting by the twentieth.
+          this.debris.emit('gold', e.x, 0.25, e.z, 3, {
+            speed: 1.8, up: 0.4, size: 0.12, life: 0.3, drag: 4,
+          });
+          break;
+        }
+        case 'fed': {
+          this.debris.emit('green', e.x, 1.0, e.z, 4, {
+            speed: 3.2, up: 1.1, size: 0.18, life: 0.45, drag: 3,
+          });
+          if (self && e.target === self.id) {
+            this.hud.popDamage(this.projectFn(e.x, (self.y ?? 0) + 1.9, e.z), e.heal, 'heal');
+            sfx.play('fed');
+          }
+          break;
+        }
+        case 'dryFire': {
+          // The one moment a player MUST get feedback: they asked for a shot
+          // and did not get one. Silence here reads as the game being broken
+          // rather than as the magazine being empty.
+          // Sound only. The crosshair is already red and the crop hint already
+          // says what to do — putting it through the announcer as well would be
+          // a fourth channel for one event, and the announcer is where match
+          // results live.
+          if (self && e.target === self.id) sfx.play('dryFire');
+          break;
+        }
         case 'jump': {
           // A puff of floor dust. Small on purpose — jumping happens a lot, and
           // an effect that reads as an event would be exhausting within a
@@ -528,6 +590,14 @@ export class Game {
     this.debris.update(dt);
     this.blasts.update(dt);
     this.muzzle.update(dt);
+    // First person only: in third person you can already see the whole chicken,
+    // and a beak floating in front of the camera would be a second one.
+    this.beak.setVisible(this.view === 'fps' && (!self || self.alive));
+    this.beak.update(dt, {
+      moving: Math.hypot(this.controls.input.mx, this.controls.input.mz) > 0.1,
+      pecking: !!(self?.pecking || self?.feeding),
+      dry: !!self?.dry,
+    });
 
     // Camera follows the predicted position — following the server position
     // would make the whole view stutter at the network tick rate.
@@ -572,6 +642,7 @@ export class Game {
       self,
       players,
     });
+    this.hud.setVitals(self, cropCapacity(this.modifier));
     this.hud.setContract(self?.contract ?? null);
     this.hud.setActionPrompt(this.actionPrompt(self));
     this.hud.setMarkers(
@@ -589,7 +660,14 @@ export class Game {
       // another. Aim carries pitch now and fire() builds the bullet from the
       // same yaw/pitch pair the camera looks down, so the centre of the screen
       // IS the aim point and the projection has nothing left to correct for.
-      this.hud.setCrosshair(alive);
+      // Three states, because "can I shoot" is three questions: yes, no, and
+      // not yet. Reloading and empty look different on purpose — one is a wait
+      // you started, the other is a wait you have to start.
+      // `dry` rather than `crop === 0`: after running out you stay locked until
+      // the crop is back above CROP.recoverTo, and the reticle has to say so for
+      // the whole of that window rather than clearing on the first grain.
+      const busy = !!(self?.pecking || self?.feeding);
+      this.hud.setCrosshair(alive, self?.dry ? 'dry' : (busy ? 'busy' : ''));
     }
     const dead = self && !self.alive;
     this.hud.setRespawn(dead ? self.respawnIn : 0);
@@ -761,6 +839,9 @@ export class Game {
           // camera did.
           aim: this.controls.yaw,
           invuln: p.invuln, rapid: p.rapid, burning: p.burning, bounty: crowned,
+          // Your own peck pose matters in third person, where you are watching
+          // your own chicken do it.
+          pecking: p.pecking, feeding: p.feeding,
           nemesis: false,
         }
         : { ...p, bounty: crowned, nemesis };
@@ -1056,6 +1137,7 @@ export class Game {
     if (this.disposed) return;
     this.disposed = true;
     window.removeEventListener('resize', this.onResize);
+    this.beak.dispose();
     this.controls.dispose();
     for (const v of this.nests.values()) v.dispose();
     for (const v of this.looseEggs.values()) v.dispose();

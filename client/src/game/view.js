@@ -14,9 +14,85 @@
 //
 // No Babylon in here on purpose: it is geometry, and geometry is testable.
 
-import { PLAYER, BULLET, WALL_HEIGHT, clamp } from '@cluckdown/shared';
+import { PLAYER, BULLET, WALL_HEIGHT, clamp, segBoxEntry } from '@cluckdown/shared';
 
 export const VIEWS = ['fps', 'tpp'];
+
+/**
+ * The first-person beak: a viewmodel, and the fix for "shots come out of the
+ * middle of the crosshair".
+ *
+ * They did, and they were right to feel wrong. In first person the camera sits
+ * at the chicken's eye, so the tracer spawned at the exact centre of the screen
+ * and appeared to leave the player's own eyeballs. Every shooter solves this
+ * the same way — a weapon model held off to one side, with rounds leaving its
+ * muzzle rather than the camera — and the absence of one is also why a
+ * first-person view without a viewmodel feels disembodied: there is nothing on
+ * screen that belongs to your body.
+ *
+ * Chickens do not hold guns. They have beaks. So the viewmodel is your own
+ * beak, low and slightly to the right, and grain leaves the end of it.
+ *
+ * Offsets are in CAMERA space: +x right, +y up, +z forward.
+ */
+export const BEAK = {
+  /**
+   * Apparent size is what matters, and it is set by the ratio of these numbers
+   * rather than by any of them alone: at `forward` units from a 1.15rad camera
+   * the visible frame is about 1.27 × forward units tall, so a beak 0.11 tall
+   * at 0.72 out fills roughly a tenth of the screen.
+   *
+   * The first pass sat at 0.40 with the same dimensions and covered a quarter
+   * of the frame — an enormous orange slab wedged in the corner. A viewmodel
+   * has to be present enough to ground you and small enough to forget, and the
+   * only way to judge that is to look at it.
+   *
+   * Low and to the RIGHT, rather than dead centre where a real beak would be.
+   * Two reasons, and neither is anatomy: centred it sits directly under the
+   * crosshair, and centred-bottom is where the health and grain meters live.
+   * A viewmodel that overlaps the HUD makes both harder to read.
+   */
+  right: 0.195,
+  down: 0.215,
+  forward: 0.82,
+
+  /** Nose-down tilt, so you see the top of it and it points away from you. */
+  tilt: 0.16,
+
+  /**
+   * How far past the beak the tracer actually starts, in units.
+   *
+   * Anything drawn AT the beak is 0.8 units from the camera, and screen size
+   * goes as the inverse of that: the tracer is 0.24 across, which at 0.8 units
+   * covers about a quarter of the frame height — and it is on the glow layer,
+   * so it blooms. Starting it a stride further out drops that to under a tenth
+   * while still reading as coming from the beak, because at 30 units a second
+   * the round covers this gap in about one frame.
+   */
+  tracerGap: 1.3,
+
+  /**
+   * Diameter of the beak's own muzzle flash, in units.
+   *
+   * The world muzzle flash is a 0.9-unit sphere — correct at five metres,
+   * a full-screen white blowout at arm's length. This one is sized for the
+   * distance it is actually seen from, and stays off the glow layer: the bloom
+   * radius is set for world-space effects and does not scale down with the
+   * thing it is blooming.
+   */
+  flash: 0.05,
+
+  /**
+   * Where the tracer is aimed, in units.
+   *
+   * Same parallax problem as the third-person boom, one order of magnitude
+   * smaller: the beak is a hand's width from the camera, not four metres, so a
+   * single convergence distance is plenty. The tracer leaves the beak and meets
+   * the real shot far enough out that the two are one line by the time anything
+   * is close enough to hit.
+   */
+  converge: 26,
+};
 
 /** Normalises anything into a view the renderer actually has. */
 export function asView(v) {
@@ -150,7 +226,7 @@ export function rayOrigin(px, py, pz, basis, half = Infinity) {
  * arena is a box with nothing inside it, so four planes and the floor are the
  * entire collision problem.
  */
-export function boomLength(origin, basis, half, want = TPP.dist) {
+export function boomLength(origin, basis, half, want = TPP.dist, obstacles = []) {
   // Position along the boom is o - d*t, so t is capped by whichever wall the
   // camera is reversing toward on that axis.
   const capAxis = (o, d, lo, hi) => {
@@ -160,13 +236,29 @@ export function boomLength(origin, basis, half, want = TPP.dist) {
   };
 
   const lim = Math.max(1, half - TPP.wallGap);
-  const t = Math.min(
+  let t = Math.min(
     want,
     capAxis(origin.x, basis.fx, -lim, lim),
     capAxis(origin.z, basis.fz, -lim, lim),
     // Only the floor matters vertically; there is no ceiling to hit.
     basis.fy > 1e-6 ? Math.max(0, (origin.y - TPP.floorGap) / basis.fy) : Infinity,
   );
+
+  // ...and cover, which is the case that actually happens. Backing into an
+  // arena wall takes deliberate effort; backing into a box happens constantly,
+  // because fighting from behind one is the entire point of it being there.
+  // The box is padded so the camera stops short of the surface rather than
+  // resting on it, where the near plane would slice it open.
+  if (obstacles.length && t > TPP.minBoom) {
+    for (const box of obstacles) {
+      const hit = segBoxEntry(
+        origin.x, origin.y, origin.z,
+        origin.x - basis.fx * t, origin.y - basis.fy * t, origin.z - basis.fz * t,
+        box, TPP.wallGap,
+      );
+      if (hit >= 0) t *= hit;
+    }
+  }
   return Math.max(TPP.minBoom, t);
 }
 
@@ -175,10 +267,10 @@ export function boomLength(origin, basis, half, want = TPP.dist) {
  *
  * @param half arena half-extent, for retracting the boom off a wall
  */
-export function tppCamera(px, py, pz, yaw, pitch, half) {
+export function tppCamera(px, py, pz, yaw, pitch, half, obstacles = []) {
   const basis = lookBasis(yaw, pitch);
   const origin = rayOrigin(px, py, pz, basis, half);
-  const boom = boomLength(origin, basis, half);
+  const boom = boomLength(origin, basis, half, TPP.dist, obstacles);
   return {
     basis,
     origin,
@@ -204,7 +296,7 @@ export function tppCamera(px, py, pz, yaw, pitch, half) {
  * actually aimed at, which is aim assist wearing a disguise, and assist already
  * exists and is a setting people can turn off.
  */
-export function convergeDistance(origin, basis, targets = [], half = Infinity) {
+export function convergeDistance(origin, basis, targets = [], half = Infinity, obstacles = []) {
   // Starts at "nothing found" rather than at the fallback. Seeding it with
   // TPP.converge looks equivalent and is not: it silently rejects every target
   // standing further away than the fallback, so a duel across a large map
@@ -225,6 +317,17 @@ export function convergeDistance(origin, basis, targets = [], half = Infinity) {
       const t = ((d > 0 ? lim : -lim) - o) / d;
       if (t > 0 && t < best && origin.y + basis.fy * t <= WALL_HEIGHT) best = t;
     }
+  }
+
+  // Cover. Same reason as the walls: sparks have to land under the reticle, and
+  // shooting at a box is something players do constantly now.
+  for (const box of obstacles) {
+    const t = segBoxEntry(
+      origin.x, origin.y, origin.z,
+      origin.x + basis.fx * best, origin.y + basis.fy * best, origin.z + basis.fz * best,
+      box, 0,
+    );
+    if (t >= 0) best *= t;
   }
 
   // ...and chickens, which beat any surface behind them.
@@ -267,10 +370,10 @@ export function convergeDistance(origin, basis, targets = [], half = Infinity) {
  * @param targets everyone worth converging on, as {x, y, z, alive}
  * @param half    arena half-extent, matching what the camera was given
  */
-export function convergeAim(px, py, pz, yaw, pitch, targets = [], half = Infinity) {
+export function convergeAim(px, py, pz, yaw, pitch, targets = [], half = Infinity, obstacles = []) {
   const basis = lookBasis(yaw, pitch);
   const o = rayOrigin(px, py, pz, basis, half);
-  const range = convergeDistance(o, basis, targets, half);
+  const range = convergeDistance(o, basis, targets, half, obstacles);
 
   const tx = o.x + basis.fx * range;
   const ty = o.y + basis.fy * range;

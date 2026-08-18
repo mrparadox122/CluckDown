@@ -51,7 +51,21 @@ const DEFAULTS = {
    * there for the times they want the other one for thirty seconds.
    */
   view: 'fps',
+
+  /**
+   * Scene brightness, as a multiplier over the tuned lighting.
+   *
+   * A setting rather than a constant because the variable is the SCREEN. This
+   * is a deliberately dark game played on phones, and usable contrast varies by
+   * more than a factor of two between panels and by far more than that between
+   * a dim room and a bus window. "Too dark" is frequently a device statement,
+   * and no single number answers it.
+   */
+  brightness: 1,
 };
+
+export const BRIGHTNESS_MIN = 0.6;
+export const BRIGHTNESS_MAX = 1.6;
 
 export const SENSITIVITY_MIN = 0.25;
 export const SENSITIVITY_MAX = 2;
@@ -68,6 +82,7 @@ export function loadGfx() {
     merged.assist = merged.assist !== false;
     merged.sensitivity = clampSensitivity(merged.sensitivity);
     merged.view = asView(merged.view);
+    merged.brightness = clampBrightness(merged.brightness);
     return merged;
   } catch {
     return { ...DEFAULTS };
@@ -84,10 +99,18 @@ export function saveGfx(gfx) {
       fireEdit: !!gfx.fireEdit,
       sensitivity: clampSensitivity(gfx.sensitivity),
       view: asView(gfx.view),
+      brightness: clampBrightness(gfx.brightness),
     }));
   } catch {
     // Private mode — settings just won't persist.
   }
+}
+
+/** Keeps a hand-edited or stale value from blacking the screen out. */
+export function clampBrightness(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return DEFAULTS.brightness;
+  return Math.min(BRIGHTNESS_MAX, Math.max(BRIGHTNESS_MIN, n));
 }
 
 /** Keeps a hand-edited or stale value from making the game unplayable. */

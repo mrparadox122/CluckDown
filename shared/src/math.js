@@ -120,3 +120,92 @@ export function mulberry32(seed) {
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
 }
+
+// ------------------------------------------------------------------- boxes
+//
+// Cover is axis-aligned boxes, which is the cheapest useful shape and the one
+// that matches a game made of cubes. Both tests below are shared by the
+// simulation (bullets, bodies) and the renderer (the third-person camera boom),
+// so cover cannot be solid to a bullet and transparent to a camera.
+
+/** Half-extents and vertical span of a cover box, expanded by `pad`. */
+function bounds(box, pad) {
+  return {
+    x0: box.x - box.w / 2 - pad, x1: box.x + box.w / 2 + pad,
+    y0: -pad, y1: box.h + pad,
+    z0: box.z - box.d / 2 - pad, z1: box.z + box.d / 2 + pad,
+  };
+}
+
+/**
+ * Where along segment AB it first enters a box, as a fraction 0..1, or -1.
+ *
+ * The standard slab test: clip the segment against each pair of parallel faces
+ * in turn and see whether an interval survives. `pad` inflates the box, which
+ * is how a bullet gets its radius without needing a swept-volume test.
+ *
+ * Returns the ENTRY point rather than a yes/no, because a bullet that passes
+ * through the space a chicken is standing in needs to know which it reached
+ * first — hitting cover half a unit behind someone should not save them.
+ */
+export function segBoxEntry(ax, ay, az, bx, by, bz, box, pad = 0) {
+  const b = bounds(box, pad);
+  const d = [bx - ax, by - ay, bz - az];
+  const o = [ax, ay, az];
+  const lo = [b.x0, b.y0, b.z0];
+  const hi = [b.x1, b.y1, b.z1];
+
+  let tMin = 0;
+  let tMax = 1;
+  for (let i = 0; i < 3; i++) {
+    if (Math.abs(d[i]) < 1e-9) {
+      // Parallel to this pair of faces: either we start between them or we
+      // never cross them at all.
+      if (o[i] < lo[i] || o[i] > hi[i]) return -1;
+      continue;
+    }
+    let t0 = (lo[i] - o[i]) / d[i];
+    let t1 = (hi[i] - o[i]) / d[i];
+    if (t0 > t1) { const t = t0; t0 = t1; t1 = t; }
+    if (t0 > tMin) tMin = t0;
+    if (t1 < tMax) tMax = t1;
+    if (tMin > tMax) return -1;
+  }
+  return tMin;
+}
+
+/**
+ * Pushes a circle of radius `r` out of a box, on the ground plane only.
+ *
+ * Cover is always taller than anything a chicken can jump onto (see COVER), so
+ * "is it in the way" is a purely 2D question at any height below the top — and
+ * above the top there is nothing to collide with, which is what lets a jumping
+ * player shoot over low cover without ever standing on it.
+ *
+ * Resolves along the shallower axis, so a body pressed into a face slides along
+ * it instead of being ejected around a corner. Returns null when clear, which
+ * lets callers skip the write in the overwhelmingly common case.
+ */
+export function pushOutBox(x, z, r, box) {
+  const hw = box.w / 2 + r;
+  const hd = box.d / 2 + r;
+  const dx = x - box.x;
+  const dz = z - box.z;
+  const overX = hw - Math.abs(dx);
+  const overZ = hd - Math.abs(dz);
+  if (overX <= 0 || overZ <= 0) return null;
+
+  // Exactly on the centre line: pick an axis rather than dividing by zero.
+  if (overX < overZ) {
+    return { x: box.x + (dx < 0 ? -hw : hw), z };
+  }
+  return { x, z: box.z + (dz < 0 ? -hd : hd) };
+}
+
+/** Is this spot inside (or within `pad` of) any of these boxes? */
+export function insideAny(boxes, x, z, pad = 0) {
+  for (const b of boxes) {
+    if (Math.abs(x - b.x) <= b.w / 2 + pad && Math.abs(z - b.z) <= b.d / 2 + pad) return true;
+  }
+  return false;
+}

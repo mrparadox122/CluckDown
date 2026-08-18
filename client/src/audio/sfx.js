@@ -20,6 +20,12 @@ const THROTTLE = {
   hit: 0.045,
   hurt: 0.09,
   feather: 0.08,
+  // The crop refills nine grain a second and the feeder heals in chunks, so
+  // both would otherwise fire several times per second forever. Throttled to
+  // roughly a heartbeat: enough to read as ongoing, not enough to nag.
+  peck: 0.16,
+  fed: 0.3,
+  dryFire: 0.25,
 };
 
 const noteToFreq = (n) => 440 * 2 ** ((n - 69) / 12);
@@ -178,6 +184,27 @@ export class Sfx {
 
       case 'rapidShot':
         this.tone({ freq: r(1050, 1200), to: 420, type: 'square', dur: 0.06, gain: 0.06 });
+        break;
+
+      // Empty crop. A dry click with no tail — deliberately the least musical
+      // sound in the game, because it has to read as "that did not happen"
+      // rather than as a quieter version of a shot.
+      case 'dryFire':
+        this.noise({ freq: 2400, to: 1400, dur: 0.035, gain: 0.09, type: 'bandpass', q: 3 });
+        this.tone({ freq: 190, to: 120, type: 'square', dur: 0.035, gain: 0.045 });
+        break;
+
+      // Pecking grain. Short, soft, woody, and pitch-jittered so a full refill
+      // is a handful of pecks rather than one buzzing note.
+      case 'peck':
+        this.tone({ freq: r(620, 760), to: 300, type: 'triangle', dur: 0.045, gain: 0.05 });
+        break;
+
+      // Standing on the feeder: warm and rising, the same shape as the health
+      // pickup so it reads as the same KIND of good thing.
+      case 'fed':
+        this.tone({ freq: 440, to: 660, type: 'sine', dur: 0.14, gain: 0.07 });
+        this.tone({ freq: 660, to: 880, type: 'sine', dur: 0.12, gain: 0.05, delay: 0.07 });
         break;
 
       // Landing a hit on someone else: crisp, high, informative.

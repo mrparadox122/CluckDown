@@ -319,8 +319,83 @@ export class Hud {
    *
    * Hidden while dead, where there is nothing to aim.
    */
-  setCrosshair(visible) {
-    $('crosshair').style.opacity = visible ? '1' : '0';
+  setCrosshair(visible, state = '') {
+    const el = $('crosshair');
+    el.style.opacity = visible ? '1' : '0';
+    // 'dry' = nothing to fire, 'busy' = refilling. Both are answers to the one
+    // question a player asks in the instant before pulling the trigger, put
+    // where they are already looking.
+    el.classList.toggle('dry', visible && state === 'dry');
+    el.classList.toggle('busy', visible && state === 'busy');
+  }
+
+  /**
+   * Your own health and grain.
+   *
+   * Health was simply not shown at all, which meant the only way to learn you
+   * were nearly dead was to die. The hurt flash told you that something had
+   * happened, never how much was left — and "how much is left" is the input to
+   * every decision worth making: push, hide, or go and eat.
+   *
+   * Both meters are rebuilt only when the value changes. This runs every frame,
+   * and a HUD that rewrites its own DOM sixty times a second costs frames on
+   * exactly the phones that can least afford them.
+   */
+  setVitals(self, capacity) {
+    const box = $('vitals');
+    if (!self || !self.alive) {
+      box.classList.add('hidden');
+      this.shownHp = null;
+      this.shownCrop = null;
+      return;
+    }
+    box.classList.remove('hidden');
+
+    const hp = Math.max(0, Math.round(self.hp));
+    if (hp !== this.shownHp) {
+      this.shownHp = hp;
+      const fill = $('hp-fill');
+      const frac = hp / PLAYER.maxHp;
+      fill.style.width = `${frac * 100}%`;
+      fill.classList.toggle('warn', frac <= 0.55 && frac > 0.28);
+      fill.classList.toggle('hurt', frac <= 0.28);
+      $('hp-num').textContent = String(hp);
+    }
+
+    const crop = Math.max(0, Math.min(capacity, Math.round(self.crop ?? 0)));
+    if (crop !== this.shownCrop || capacity !== this.shownCap) {
+      this.shownCrop = crop;
+      this.shownCap = capacity;
+      const row = $('crop');
+      // Rebuild only when the pip COUNT changes, which is once per shot at
+      // most. TRIGGER HAPPY moves the capacity, hence the second condition.
+      if (row.childElementCount !== capacity) {
+        row.replaceChildren(...Array.from({ length: capacity }, () => el('div', 'crop-pip')));
+      }
+      const pips = row.children;
+      for (let i = 0; i < pips.length; i++) {
+        pips[i].classList.toggle('spent', i >= crop);
+      }
+      row.classList.toggle('low', crop > 0 && crop <= Math.max(2, Math.ceil(capacity * 0.25)));
+      row.classList.toggle('empty', crop === 0);
+    }
+
+    // One line, and only when it earns its place.
+    const hint = $('crop-hint');
+    const state = self.dry ? 'empty'
+      : (self.feeding ? 'feeding' : (self.pecking ? 'pecking' : ''));
+    if (state !== this.shownCropState) {
+      this.shownCropState = state;
+      // The empty line is an instruction, not a status. It is the one moment a
+      // player does not know what to do, and "EMPTY" alone would not tell them.
+      hint.textContent = state === 'feeding' ? 'FEEDING'
+        : state === 'pecking' ? 'PECKING'
+          : state === 'empty' ? 'EMPTY — HOLD STILL TO PECK' : '';
+      hint.classList.toggle('show', state !== '');
+      hint.classList.toggle('pecking', state === 'pecking');
+      hint.classList.toggle('feeding', state === 'feeding');
+      hint.classList.toggle('empty', state === 'empty');
+    }
   }
 
   /**

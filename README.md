@@ -239,6 +239,92 @@ reproduces the same match.
 > change: `PLAYER.maxJumpHeight` clamps position outright, so low gravity buys
 > hang time rather than altitude and nobody floats over the walls.
 
+## Grain, and why fire is finite
+
+Fire used to be unlimited, gated only by a cooldown. That is not a balance
+problem, it is a design one: with no resource the player never makes a decision
+about shooting, so every second of a match is identical to every other second
+and nobody is ever vulnerable for a reason they caused.
+
+**The crop is the magazine.** 14 shots against a 10-shot kill — enough to kill
+one chicken with four misses, never enough for two. Two ways to refill:
+
+| | Where | Cost | Gives |
+|---|---|---|---|
+| **Peck** | anywhere | stand still ~1.5s, head down, visible to everyone | grain |
+| **Feeder** | your own spawn pad | the walk, and being somewhere predictable | grain instantly, plus health |
+
+**The reload is a stance, not a button.** You stop, your chicken puts its head
+in the dirt, and *everyone can see you doing it*. That readability is the whole
+point — a reload only the reloading player knows about creates tension for one
+person; a reload the room can read turns "they stopped moving" into information
+worth acting on. It is also just what a chicken does, which is the strongest
+kind of game feel: the fiction and the mechanic are the same gesture.
+
+**The feeder is an option, not a punishment.** The original pitch was "walk to
+spawn when you run out". That fails in a specific way: it is a hard interrupt
+that hits whoever just *lost* a fight, and across a 48–64 unit arena it is six
+to nine seconds of walking — the least engaging state a shooter has. Offering a
+walk that refills *and heals* is the same map traffic with the opposite
+feeling. You go because it is worth going, not because you have been sent.
+
+Four rules exist purely to stop the resource becoming a grievance, and every one
+of them is a mistake this genre has already made:
+
+- **Pecking refills progressively.** An interrupted reload is never wasted. A
+  wasted reload is the single most resented moment in the genre.
+- **It starts by itself.** No key to find, nothing to learn.
+- **Firing on empty still pecks.** The most panicked player in the match must
+  never be the one who cannot recover.
+- **A kill refunds 3 grain.** Winning a fight should not immediately cost you
+  the next one.
+
+### Bots and the crop
+
+Bots enter a **refilling** state on going dry and leave it at 60% — two
+different thresholds, deliberately. While refilling they back away from a nearby
+foe for up to ~1.1s (bounded, so it always ends in a peck) and then stand and
+eat. They never shoot while refilling, however much grain they have.
+
+Every part of that sentence is a bug that shipped:
+
+- **Entering on `crop <= 0` instead of `dry`.** Firing is gated on `dry`, which
+  stays true until `CROP.recoverTo` grain are back. A bot pecked exactly one
+  grain, saw a player nearby, resumed strafing — and was then stuck forever,
+  unable to shoot because it was still dry and unable to peck because it was
+  moving. Reported as *"they just move back and forth in front of me"*, which is
+  what being unable to act looks like from outside. One word.
+- **Leaving the refill state as soon as firing was legal.** No gap between the
+  thresholds means the bot instantly spends the four grain it just earned, goes
+  dry, and starts over — a permanent four-round stutter that reads as panic.
+  Hysteresis is the fix, and it is why entering and leaving use different
+  numbers.
+- **Letting a partly-filled bot defend itself.** Sounds humane, undoes the
+  mechanism entirely: it fires each grain as it pecks it, and holding the
+  trigger stops pecking, so the crop never climbs. Refilling is a commitment or
+  it is nothing.
+
+Fixing the first of these roughly doubled bot shot output and took the average
+match from 7 kills to 13, because a bot that can reload is a bot that can fight.
+`test:crop` asserts the invariant rather than the outcome: a bot is never
+stranded — dry, moving, not pecking — for longer than the retreat allows.
+
+### Two things this got wrong first, and what they taught
+
+**Nursing a crop at zero.** Holding the trigger on empty pecked one grain and
+instantly fired it, forever — the anti-deadlock rule worked, and the player
+spent the recovery before it could add up. `CROP.recoverTo` fixes it: once you
+hit zero, nothing fires until 4 grain are back. Running dry is now a
+commitment of about half a second rather than a stutter, and that window *is*
+the mechanic. A resource you can nurse at zero is not a resource.
+
+**Healing through a fight.** The feeder sits on your spawn corner — which in Egg
+Heist and Plant & Defuse is also your **nest**. Defending the objective meant
+standing in permanent regeneration, and a bomb detonating under a player left
+them at full health. `CROP.feeder.combatDelay` gates *health* (never grain)
+behind three seconds without damage. The general rule is worth more than the bug:
+you recover from a fight, never through one.
+
 ## Aim assist
 
 Aiming with a thumb on a 375px-tall screen is genuinely hard, and that was the
@@ -594,6 +680,12 @@ the renderer is built at match start:
   routinely 30–50% of frame time on budget GPUs.
 - **Antialiasing** — MSAA, meaningful cost on mobile.
 
+- **Brightness** — 0.6× to 1.6× over the tuned lighting, and live. The variable
+  this exists for is the *screen*: usable contrast varies by more than a factor
+  of two between phone panels, and by far more between a dark room and a bus
+  window. "Too dark" is often a device statement that no single constant can
+  answer.
+
 Feel, all of which apply **immediately** — the only way to judge any of them is
 to play with them running:
 
@@ -616,6 +708,81 @@ mesh** with part colours baked into vertex colours (four players plus the bomber
 went from ~50 draw calls to 5), debris uses **thin instances** rather than scene
 nodes, arena world matrices and materials are **frozen**, and materials are
 shared through a per-scene cache.
+
+## Lighting, and the first-person beak
+
+### "Too dark" is a contrast problem, not a brightness one
+
+Players liked the night and could not read it, which is a specific complaint:
+the mood was right, the *structure* was missing. Two causes, one of them mine —
+the arenas grew from 40 to 64 units and the single key light is a point light,
+so the corners went from ~36 units away to ~50 and fell off a cliff.
+
+The fix deliberately is **not** "raise ambient until everything is visible".
+That flattens the scene, washes out the glow layer the whole look is built on,
+and throws away the night people said they liked. Instead:
+
+- **The fill light was raised and the ground bounce lifted hard** (0.05 → 0.14).
+  Not being able to read the floor plane is most of what "too dark" feels like
+  in first person — without it you cannot judge distance at all.
+- **Fog density halved.** It was tuned against a 40-unit arena and was eating
+  the far half of a 64-unit one. Haze reads as darkness.
+- **Lamps, and none of them are lights.** Six more `PointLight`s would have been
+  the obvious fix and the wrong one — `StandardMaterial` handles four before the
+  shader has to grow, and this game targets phones. The lamp posts are emissive
+  boxes and the pools beneath them are flat emissive discs: a painted lighting
+  rig, thin-instanced into three draw calls, costing nothing per pixel.
+
+What that buys is not brightness, it is **structure**. Pools of light with dark
+lanes between them give the floor a scale to judge distance against, give cover
+a background to be a silhouette against — and make standing in the light a
+decision, because lit ground is where you are seen. Each map gets its own lamp
+colour, so the lighting carries map identity rather than being one wash on all
+five. LIGHTS OUT builds no lamps at all; dimming them would leave a rig you
+could still navigate by.
+
+### The beak
+
+Shots appeared to come out of the middle of the crosshair, and that reading was
+correct: in first person the camera sits at the chicken's eye, so the tracer
+spawned dead centre and looked like it was leaving the player's own eyeballs.
+Every shooter solves this the same way — a weapon model held to one side, with
+rounds leaving its muzzle rather than the camera. The absence of one is also why
+a first-person view feels disembodied: nothing on screen belongs to your body.
+
+Chickens do not hold guns, so the viewmodel is **your own beak**, low and to the
+right, and grain leaves the end of it. The tracer is then aimed at a point
+`BEAK.converge` units down the real bullet path, so the drawn streak and the
+authoritative round are one line long before anything is close enough to hit —
+the same parallax trick as the third-person boom, an order of magnitude smaller.
+The muzzle flash comes back with it — and this is where the third mistake was.
+The world flash is a 0.9-unit glowing sphere on the glow layer, which is correct
+at five metres and, at the 0.8 units your own beak sits from the camera, is
+**87% of the frame height**. Reusing it at the beak reproduced exactly the
+full-screen white blowout the original code had suppressed it to avoid.
+
+Anything drawn near the camera has to be sized for the distance it is seen from,
+because apparent size goes as the inverse of it. So the beak has its own flash —
+`BEAK.flash`, 0.05 units, about 5% of the frame, and deliberately **not** on the
+glow layer, whose blur radius is tuned for world-space effects and does not
+scale down with the thing it is blooming. The tracer needed the same treatment
+for the same reason: drawn at the beak it is a glowing streak covering a quarter
+of the screen, so it starts `BEAK.tracerGap` past it — about one frame of
+travel, invisible as a gap, and the difference between a muzzle flash and a
+white-out.
+
+It earns its screen space four more times over, because a viewmodel is the
+cheapest feedback surface a first-person game has — always visible, never in the
+way, read without being looked at. It recoils when you fire, dips when you peck,
+sways when you walk, and shivers when you are dry. Three of those are states the
+HUD also reports, and the redundancy is the point: peripheral motion registers
+when a meter in the corner does not.
+
+Two things a picture caught that reasoning did not: the first beak was **four
+times too big**, filling a quarter of the frame, and the second sat on top of the
+health readout. `client/test/_look.mjs` exists for exactly that — it is a
+screenshot tool rather than a test, because "is it too dark" and "is that the
+right size" have no assertion.
 
 ## Netcode
 
@@ -695,6 +862,8 @@ npm install -D playwright && npx playwright install chromium
 | `test:perf` | Draw-call and material counts, thin instances, graphics settings |
 | `test:stats` | Server status panel and the in-game network readout |
 | `test:tasks` | Both new modes end-to-end in a browser: nests and eggs render, the bomb is pickable, the contract strip names and counts its task, the zone marker follows a relocation |
+| `test:cover` | Map cover: every layout is mirror-symmetric with clear cardinal lanes and nothing landable, bodies and bullets are stopped by it, nothing spawns inside it, and bots steer around it rather than grinding into it |
+| `test:crop` | Grain: the crop empties, pecking refills progressively, the feeder heals only out of combat, and none of the anti-frustration rules can be regressed |
 | `test:view` | Third-person framing, headless and instant: the shot line meets the camera ray, a target under the crosshair is hit dead centre, the boom retracts off walls, and the camera never escapes the arena |
 | `test:control` | **Knockback can never take the wheel** — see below — plus movement symmetry on every map and in every mode, and the vertical axis: jump arcs, the height ceiling, air control, and that nothing but your own jump can lift you |
 | `test:combat` | Aim assist in both axes, all three ammo types, and shooting in 3D — over a target, onto a jumping one, down out of a jump, into the floor, over a wall |
@@ -1008,8 +1177,12 @@ bugs. Don't "clean them up" without checking:
   fast-forwarding the match — and online play is unaffected; the server owns the clock.
 - Bots are good at killing the bomber. In a 4-bot match it usually gets shot down
   before it detonates; `BOMBER.maxHp` is the knob if you want it scarier.
-- Bots don't path around anything, because there is nothing to path around. Adding
-  cover to the arena means giving them obstacle avoidance in the same change.
+- Bot navigation is one whisker cast down the heading, not pathfinding. It is
+  enough for a handful of convex boxes in an open square and would not survive a
+  concave map. Tuned by measurement rather than feel: four bots average ~13
+  kills over a 240-second match at 14–18% accuracy, dry about a quarter of the
+  time. The first pass at "make them dumber" landed at 1–4 kills, which is not
+  dumb, it is absent — dumb has to mean *bad decisions*, not *cannot shoot*.
 - Last Chicken rounds are short with four players — one life each resolves fast.
   Best-of-N rounds would be the proper fix.
 - Performance work is verified by draw-call and material counts, not by profiling

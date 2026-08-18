@@ -128,17 +128,22 @@ export const PLAYER = {
 // Tune `strength` first — it is the whole feel of the feature:
 //   0    off entirely
 //   0.35 a gentle nudge, you still do the aiming
-//   0.6  comfortable on a phone (default)
+//   0.6  comfortable on a phone
+//   0.8  firm — it closes most of the gap for you (default)
 //   1    hard lock, feels like the game is playing for you
+//
+// Raised from 0.6 on player feedback. Cover made it necessary as well as
+// wanted: with boxes in the arena a target is visible for a shorter window, so
+// the time you have to close the last few degrees by hand went down.
 //
 // Applied to HUMAN players only. Bots already aim with deliberate error, and
 // handing them assist on top would just make them snipers.
 export const AIM_ASSIST = {
   enabled: true,
 
-  strength: 0.6,      // 0..1 share of the angle closed per second-ish (see sim)
-  cone: 0.42,         // radians (~24 deg) around your aim that can acquire a target
-  stickyCone: 0.72,   // wider angle before an ALREADY-locked target is dropped
+  strength: 0.8,      // 0..1 share of the angle closed per second-ish (see sim)
+  cone: 0.5,          // radians (~29 deg) around your aim that can acquire a target
+  stickyCone: 0.85,   // wider angle before an ALREADY-locked target is dropped
   range: 26,          // units; beyond this nothing is acquired
   stickyRange: 32,    // a locked target is kept until it passes this
   lead: 0.55,         // 0..1 how much to aim ahead of a moving target
@@ -154,6 +159,113 @@ export const AIM_ASSIST = {
    * aiming at the bird.
    */
   aimHeight: 0.55,
+};
+
+// ------------------------------------------------------------------- GRAIN
+//
+// Chickens shoot grain, and grain runs out.
+//
+// THE PROBLEM. Fire was unlimited, gated only by a cooldown, which means the
+// player never makes a decision about it: every second of a match is the same
+// second. No resource means no risk, no pacing, and no window in which anyone
+// is vulnerable for a reason they caused. Every shooter that holds attention
+// has some version of this beat, and it is always the same beat: commit, run
+// dry, become briefly helpless, recover.
+//
+// THE SHAPE. Two ways to refill, deliberately different in cost:
+//
+//   PECK — anywhere, but you must stand still. It is not a button, it is a
+//   stance: you stop, your chicken puts its head down, and everyone can see you
+//   doing it. That readability is the whole point. A reload that only the
+//   reloading player knows about creates tension for one person; a reload that
+//   the room can see creates it for everyone, and turns "they stopped moving"
+//   into information worth acting on.
+//
+//   FEEDER — your own spawn pad, which fills you instantly and heals you while
+//   you stand there. This is the "go home and eat" idea, and it is deliberately
+//   an OPTION rather than the rule. Forcing a walk on an empty player punishes
+//   whoever just lost a fight and turns the worst moment of a match into its
+//   longest; offering a walk that refills AND heals makes the same trip a
+//   choice you make when it is worth it. Same map traffic, opposite feeling.
+//
+// ANTI-FRUSTRATION, all of it load-bearing:
+//   * Pecking refills PROGRESSIVELY. An interrupted peck is never wasted — a
+//     wasted reload is the single most resented moment in the genre.
+//   * It starts by itself. Nothing to learn, no key to find.
+//   * Firing on empty still pecks, so a player mashing the trigger is never
+//     stuck. Not doing this deadlocks the most panicked person in the match.
+//   * A kill refunds some grain, so winning a fight does not immediately cost
+//     you the next one.
+export const CROP = {
+  /**
+   * Shots in a full crop.
+   *
+   * 14 against a 10-shot kill is the number that matters: you can kill one
+   * chicken and miss four times. Tight enough that spraying loses fights,
+   * loose enough that losing a fight is never blamed on the magazine.
+   */
+  capacity: 14,
+
+  /** Grain per second while pecking — a full crop from empty in ~1.5s. */
+  peckRate: 9,
+
+  /**
+   * Stillness required before pecking starts, in seconds.
+   *
+   * Short, but not zero. Without it every incidental pause tops you up and the
+   * resource stops existing; much longer and stopping deliberately feels
+   * unresponsive. This is the window where standing still is a commitment.
+   */
+  peckDelay: 0.3,
+
+  /**
+   * Once you hit zero, how much grain you must peck back before you may fire.
+   *
+   * Without this the empty state does not really exist. A player holding the
+   * trigger pecks one grain, instantly fires it, and drops to zero again —
+   * dribbling single shots forever and never recovering, which is the exact
+   * trap the "firing on empty still pecks" rule was meant to prevent. It half
+   * worked: they pecked, and then spent it before it could add up.
+   *
+   * A recovery floor makes running dry a real commitment instead of a stutter:
+   * roughly half a second where you are out of the fight and everyone can see
+   * it. That window IS the mechanic. Overheating weapons in other games use the
+   * same shape for the same reason — a resource you can nurse at zero is not a
+   * resource.
+   */
+  recoverTo: 4,
+
+  /** Grain handed back for a kill. Keeps a winning streak flowing. */
+  killRefund: 3,
+
+  feeder: {
+    /** Matches the spawn pad you can already see on the floor. */
+    radius: 2.0,
+    /** Health per second while you stand on it. */
+    heal: 16,
+    /**
+     * Grain per second. High enough to be instant in practice — the feeder's
+     * cost is the walk and the exposure, not the wait once you arrive.
+     */
+    refill: 60,
+
+    /**
+     * Seconds after taking damage before the feeder will heal you, in seconds.
+     *
+     * Grain is unaffected; only health waits. Without this the feeder is a
+     * fortress: it sits on your spawn corner, which in Egg Heist and Plant &
+     * Defuse is also your NEST, so defending the objective would mean standing
+     * in permanent regeneration and a planted bomb could not kill you. It was
+     * exactly that — a bomb detonating under a player at full health — that
+     * found this.
+     *
+     * The general rule it encodes is worth more than the bug it fixes: you can
+     * recover from a fight, never through one. Healing under fire is what makes
+     * a defensive position unbreakable, and unbreakable positions are how a
+     * four-minute match becomes a stalemate.
+     */
+    combatDelay: 3,
+  },
 };
 
 export const BULLET = {
@@ -284,7 +396,7 @@ export const MODES = {
     blurb: '4-player free-for-all. No rank, just vibes.',
     maxPlayers: 4,
     minPlayers: 2,
-    arena: 40,
+    arena: 48,
     matchTime: 240,
     killLimit: 0,
     ranked: false,
@@ -299,7 +411,7 @@ export const MODES = {
     blurb: 'Two roosts enter. Friendly fire is off.',
     maxPlayers: 4,
     minPlayers: 2,
-    arena: 40,
+    arena: 48,
     matchTime: 240,
     killLimit: 0,
     teamKillLimit: 20,
@@ -316,7 +428,7 @@ export const MODES = {
     blurb: 'Hold the middle. Everyone wants it.',
     maxPlayers: 4,
     minPlayers: 2,
-    arena: 40,
+    arena: 48,
     matchTime: 240,
     killLimit: 0,
     hill: true,
@@ -332,7 +444,7 @@ export const MODES = {
     blurb: 'One life. The arena closes in.',
     maxPlayers: 4,
     minPlayers: 2,
-    arena: 40,
+    arena: 48,
     matchTime: 180,
     killLimit: 0,
     respawn: false,
@@ -349,7 +461,7 @@ export const MODES = {
     blurb: 'Four eggs each. Steal theirs, defend yours.',
     maxPlayers: 4,
     minPlayers: 2,
-    arena: 40,
+    arena: 48,
     matchTime: 240,
     killLimit: 0,
     heist: true,
@@ -365,7 +477,7 @@ export const MODES = {
     blurb: 'Carry the bomb to a rival nest. Then survive the clock.',
     maxPlayers: 4,
     minPlayers: 2,
-    arena: 40,
+    arena: 48,
     matchTime: 300,
     killLimit: 0,
     bomb: true,
@@ -381,7 +493,7 @@ export const MODES = {
     blurb: '4-player FFA. Your rating is on the line.',
     maxPlayers: 4,
     minPlayers: 2,
-    arena: 40,
+    arena: 48,
     matchTime: 240,
     killLimit: 0,
     ranked: true,
@@ -395,7 +507,7 @@ export const MODES = {
     blurb: 'Endless respawns. First to 15 kills.',
     maxPlayers: 4,
     minPlayers: 2,
-    arena: 40,
+    arena: 48,
     matchTime: 300,
     killLimit: 15,
     ranked: false,
@@ -411,7 +523,7 @@ export const MODES = {
     arenaScale: 0.68, // a duel on The Big Yard would be two chickens jogging
     maxPlayers: 2,
     minPlayers: 2,
-    arena: 26,
+    arena: 32,
     matchTime: 180,
     killLimit: 10,
     ranked: true,
@@ -553,6 +665,11 @@ export const MODIFIERS = {
     label: 'TRIGGER HAPPY',
     blurb: 'Everyone fires like they found the gold egg.',
     fireCooldownMul: 0.34,
+    // The crop has to grow with the fire rate, or this stops being TRIGGER
+    // HAPPY and becomes TRIGGER HAPPY FOR TWO SECONDS THEN PECK. A modifier
+    // that inverts its own promise is worse than not having it.
+    cropMul: 2.5,
+    peckRateMul: 2,
   },
   potato: {
     id: 'potato',
@@ -575,6 +692,16 @@ export const MODIFIER_POOL = [
   'darkness', 'lowGravity', 'doubleDamage', 'suddenDeath', 'trigger', 'frenzy', 'potato',
 ];
 
+/**
+ * How much grain a full crop holds under a given modifier.
+ *
+ * Shared so the HUD draws exactly as many pips as the simulation will let you
+ * fire. A meter that disagrees with the gun is worse than no meter.
+ */
+export function cropCapacity(modifier) {
+  return Math.round(CROP.capacity * modValue(modifier, 'cropMul'));
+}
+
 /** Multiplier lookup that tolerates an unknown or missing modifier. */
 export function modValue(modifier, key, fallback = 1) {
   const m = MODIFIERS[modifier];
@@ -587,48 +714,163 @@ export function modValue(modifier, key, fallback = 1) {
 // cover to fight around, and cover needs bot obstacle avoidance — so that is a
 // separate job. These exist so the vote has something meaningful to choose
 // between, and arena size alone genuinely changes how a match plays.
+// ------------------------------------------------------------------ COVER
+//
+// Every map is a box with cubes in it. The cubes are the difference between a
+// firefight and two chickens shooting each other across an empty square, which
+// is what players meant by "it feels a bit odd" — with nothing to break line of
+// sight, whoever aimed first won and there was nothing to do about it.
+//
+// Two rules, and both are load-bearing:
+//
+// 1. **Nothing is short enough to land on.** Every piece of cover is taller
+//    than PLAYER.maxJumpHeight, so a jump can never leave you standing on top
+//    of one. That keeps cover a purely horizontal problem — no ground-height
+//    tracking, no hovering at box edges, no getting sealed inside one on the
+//    way down. `test:cover` enforces it.
+//
+// 2. **Low cover is eye-height cover.** At 1.6 the top is above a standing eye
+//    (1.15) and below a jumping one (2.4), so you cannot shoot over it on foot
+//    but you can hop to peek. That is the one place jumping became tactical
+//    rather than decorative, and it is why the heights are mixed rather than
+//    uniform.
+export const COVER = {
+  /** Nothing may be shorter than this, or you could jump on top of it. */
+  minHeight: 1.55,
+  /** Cover you can hop to shoot over. */
+  low: 1.6,
+  /** Cover that blocks outright, even mid-jump. */
+  high: 2.6,
+  /**
+   * Clear lane along the arena's own axes, in units either side.
+   *
+   * Cover is kept off the lines x=0 and z=0 on purpose. It leaves four open
+   * sightlines through the middle, which is what stops a map full of boxes
+   * reading as a maze — and it keeps the arena mirror-symmetric on both axes,
+   * so `test:control` can still prove there is no directional bias in the
+   * movement code by walking from the centre in each cardinal direction.
+   */
+  axisLane: 0.9,
+};
+
+/**
+ * Mirrors one quadrant's worth of cover into all four.
+ *
+ * Authoring a quarter and reflecting it is the cheapest way to guarantee a fair
+ * map: whatever advantage a box gives, every seat gets the same one. Maps that
+ * are asymmetric by accident are the oldest bug in arena shooters.
+ */
+function quad(boxes) {
+  const out = [];
+  for (const b of boxes) {
+    for (const sx of [1, -1]) {
+      for (const sz of [1, -1]) out.push({ ...b, x: b.x * sx, z: b.z * sz });
+    }
+  }
+  return out;
+}
+
 export const MAPS = {
   coop: {
     id: 'coop',
     label: 'The Coop',
-    blurb: 'The original yard. Balanced.',
-    size: 40,
+    blurb: 'The original yard. Balanced, with cover to fight around.',
+    size: 48,
     floor: '#3f6fd8',
     trim: '#9aa6c4',
+    lamp: '#8fb4ff',
+    // An inner diamond of hard cover, wrapped by low walls you can hop to
+    // shoot over. The flagship map, so it gets the most legible layout.
+    cover: quad([
+      { x: 7, z: 7, w: 5, d: 5, h: COVER.high },
+      { x: 15, z: 6.8, w: 2.4, d: 9, h: COVER.low },
+      { x: 6.8, z: 15, w: 9, d: 2.4, h: COVER.low },
+    ]),
   },
   squeeze: {
     id: 'squeeze',
     label: 'Tight Squeeze',
-    blurb: 'Small and vicious. Nowhere to hide.',
-    size: 28,
+    blurb: 'Small and vicious. Four pillars and bad intentions.',
+    size: 34,
     floor: '#8f3fd8',
     trim: '#b49ac4',
+    lamp: '#d79aff',
+    // Deliberately sparse. The whole character of this map is that there is
+    // almost nowhere to go, so it gets exactly enough cover to break a sightline
+    // and no more.
+    cover: quad([
+      { x: 6.5, z: 6.5, w: 4, d: 4, h: COVER.high },
+    ]),
   },
   yard: {
     id: 'yard',
     label: 'The Big Yard',
-    blurb: 'Room to run. Bring your legs.',
-    size: 54,
+    blurb: 'Room to run, and things to run behind.',
+    size: 64,
     floor: '#2f9e6f',
     trim: '#9ac4b4',
+    lamp: '#9affd0',
+    // The biggest map needs the most, or crossing it is a long walk in the
+    // open — which on a map this size is most of a life.
+    cover: quad([
+      { x: 8, z: 8, w: 4, d: 4, h: COVER.high },
+      { x: 19, z: 8, w: 2.6, d: 12, h: COVER.low },
+      { x: 8, z: 19, w: 12, d: 2.6, h: COVER.low },
+      { x: 23, z: 23, w: 4.5, d: 4.5, h: 2.4 },
+    ]),
   },
   dusk: {
     id: 'dusk',
     label: 'Dusk Pen',
-    blurb: 'Dim and rusty. Follow the tracers.',
-    size: 40,
+    blurb: 'Dim and rusty. Follow the tracers, watch the corners.',
+    size: 48,
     floor: '#a8452f',
     trim: '#c49a8a',
+    lamp: '#ffb066',
+    // Same size as The Coop, deliberately different shape: scattered pillars
+    // rather than walls, so it plays as angles instead of lanes.
+    cover: quad([
+      { x: 6, z: 6, w: 3, d: 3, h: 2.8 },
+      { x: 13, z: 13, w: 3.5, d: 3.5, h: COVER.low },
+      { x: 18, z: 6, w: 3, d: 3, h: 2.2 },
+      { x: 6, z: 18, w: 3, d: 3, h: 2.2 },
+    ]),
   },
   frost: {
     id: 'frost',
     label: 'Frost Roost',
-    blurb: 'Cold, pale and open.',
-    size: 46,
+    blurb: 'Cold and pale. Long walls, longer sightlines.',
+    size: 56,
     floor: '#4a7fa8',
     trim: '#c9d8e4',
+    lamp: '#bfe4ff',
+    // Long low walls: this map is about crossing open ground under fire, and a
+    // wall you can hop over is a decision rather than a detour.
+    cover: quad([
+      { x: 9, z: 9, w: 12, d: 2.4, h: COVER.low },
+      { x: 9, z: 20, w: 2.4, d: 8, h: COVER.high },
+    ]),
   },
 };
+
+/**
+ * The cover for a map, scaled to the arena it is actually being played on.
+ *
+ * Modes can shrink the arena (1v1 plays The Big Yard at 0.68), so the layout
+ * has to shrink with it or a duel map ends up as four boxes in a corner. Only
+ * the footprint scales — heights are absolute, because COVER's two rules are
+ * about PLAYER.maxJumpHeight and eye level, and neither of those scales.
+ *
+ * Derived from the arena size rather than stored, so the client can rebuild the
+ * identical layout from the map id and size it already syncs.
+ */
+export function coverFor(mapId, size) {
+  const map = MAPS[mapId] ?? MAPS[DEFAULT_MAP];
+  const k = size / map.size;
+  return (map.cover ?? []).map((c) => ({
+    x: c.x * k, z: c.z * k, w: c.w * k, d: c.d * k, h: c.h,
+  }));
+}
 
 export const MAP_LIST = Object.keys(MAPS);
 export const DEFAULT_MAP = 'coop';
