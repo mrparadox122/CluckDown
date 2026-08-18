@@ -324,99 +324,6 @@ export class Hud {
   }
 
   /**
-   * The first-person minimap.
-   *
-   * Losing the overview is the real cost of first person in a 4-player arena —
-   * you can no longer see who is behind you, where the objective is, or which
-   * corner the bomber came from. A 2D canvas costs almost nothing and hands
-   * all of that back.
-   *
-   * Drawn rotated so "up" is always where you're facing, which is what makes a
-   * minimap readable at a glance rather than a puzzle to translate.
-   */
-  drawMinimap({ half, players, self, selfX, selfZ, aim, bomber, pickups, nests, hill, bomb }) {
-    const cv = $('minimap');
-    const ctx = cv.getContext('2d');
-    const R = cv.width / 2;
-    const scale = (R - 6) / (half || 20);
-
-    ctx.clearRect(0, 0, cv.width, cv.height);
-
-    // World -> minimap, rotated so the player's facing points up the screen.
-    const sin = Math.sin(-aim);
-    const cos = Math.cos(-aim);
-    const to = (wx, wz) => {
-      const dx = (wx - selfX) * scale;
-      const dz = (wz - selfZ) * scale;
-      return [R + (dx * cos - dz * sin), R + (dx * sin + dz * cos) * -1];
-    };
-
-    ctx.save();
-    ctx.beginPath();
-    ctx.arc(R, R, R - 2, 0, Math.PI * 2);
-    ctx.clip();
-
-    ctx.fillStyle = 'rgba(6,7,14,0.72)';
-    ctx.fillRect(0, 0, cv.width, cv.height);
-
-    // Arena bounds, so you can tell how close to a wall you are.
-    ctx.strokeStyle = 'rgba(255,255,255,0.28)';
-    ctx.lineWidth = 1.5;
-    ctx.beginPath();
-    const corners = [[-half, -half], [half, -half], [half, half], [-half, half]];
-    corners.forEach(([wx, wz], i) => {
-      const [x, y] = to(wx, wz);
-      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-    });
-    ctx.closePath();
-    ctx.stroke();
-
-    const dot = (wx, wz, color, size, ring = false) => {
-      const [x, y] = to(wx, wz);
-      ctx.fillStyle = color;
-      ctx.beginPath();
-      ctx.arc(x, y, size, 0, Math.PI * 2);
-      ctx.fill();
-      if (!ring) return;
-      ctx.strokeStyle = color;
-      ctx.lineWidth = 1.5;
-      ctx.beginPath();
-      ctx.arc(x, y, size + 3, 0, Math.PI * 2);
-      ctx.stroke();
-    };
-
-    if (hill) dot(hill.x, hill.z, 'rgba(255,204,61,0.5)', 7);
-    for (const n of nests ?? []) dot(n.x, n.z, 'rgba(255,255,255,0.35)', 4);
-    if (bomb) dot(bomb.x, bomb.z, '#ff3b30', 3.5, true);
-    for (const pk of pickups ?? []) dot(pk.x, pk.z, 'rgba(53,224,127,0.8)', 2);
-    if (bomber) dot(bomber.x, bomber.z, '#ff2d4b', 4, true);
-
-    for (const p of players ?? []) {
-      if (!p.alive || p.isSelf) continue;
-      // Your nemesis gets the same colour it wears in the world.
-      dot(p.x, p.z, self?.nemesis === p.id ? '#ff4df0' : p.color, 3.5);
-    }
-
-    ctx.restore();
-
-    // You: always dead centre, always pointing up. A triangle rather than a dot
-    // so facing is unmistakable.
-    ctx.fillStyle = '#ffffff';
-    ctx.beginPath();
-    ctx.moveTo(R, R - 6);
-    ctx.lineTo(R - 4.5, R + 4);
-    ctx.lineTo(R + 4.5, R + 4);
-    ctx.closePath();
-    ctx.fill();
-
-    ctx.strokeStyle = 'rgba(255,255,255,0.22)';
-    ctx.lineWidth = 1.5;
-    ctx.beginPath();
-    ctx.arc(R, R, R - 2, 0, Math.PI * 2);
-    ctx.stroke();
-  }
-
-  /**
    * "What do I do right now."
    *
    * Plant & Defuse was reported as simply unlearnable, and the reason is that
@@ -657,6 +564,11 @@ export class Hud {
     const seen = new Set();
 
     for (const p of players) {
+      // Never plate yourself. In first person the projection lands on top of
+      // the camera and the result is nonsense; in third person it works
+      // perfectly and hangs your own name over the middle of your own screen,
+      // which is worse. You know who you are.
+      if (p.id === selfId) continue;
       seen.add(p.id);
       let plate = this.plates.get(p.id);
       if (!plate) {

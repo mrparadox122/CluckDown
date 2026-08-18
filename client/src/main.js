@@ -554,6 +554,33 @@ function bindGraphics() {
   $('gfx-glow').addEventListener('change', (e) => apply({ glow: e.target.checked }));
   $('gfx-antialias').addEventListener('change', (e) => apply({ antialias: e.target.checked }));
 
+  // First / third person. A HUD button rather than a menu control, because the
+  // reason to switch is usually "right now" — peeking round something, or
+  // wanting to see your own chicken land a jump. The choice is still persisted,
+  // so whichever one you prefer is the one you start in.
+  const viewBtn = $('hud-view');
+  const showView = (v) => {
+    viewBtn.textContent = v === 'tpp' ? '3P' : '1P';
+    viewBtn.title = v === 'tpp' ? 'Third person — V for first' : 'First person — V for third';
+  };
+  showView(gfx.view);
+  const flipView = () => {
+    // The renderer owns the live value; the menu just remembers it. Asking the
+    // game rather than toggling a local copy means the button cannot get out of
+    // step with what is actually on screen.
+    const v = game ? game.toggleView() : (gfx.view === 'tpp' ? 'fps' : 'tpp');
+    gfx = { ...gfx, view: v };
+    saveGfx(gfx);
+    showView(v);
+    sfx.play('uiClick');
+  };
+  viewBtn.addEventListener('click', flipView);
+  window.addEventListener('keydown', (e) => {
+    if (e.code !== 'KeyV' || e.target instanceof HTMLInputElement) return;
+    if (!game) return; // only means anything in a match
+    flipView();
+  });
+
   // Look sensitivity. Live, and it has to be: the only way anyone can tell
   // whether a sensitivity is right is by turning with it, so a setting that
   // waited for the next match would be tuned blind.

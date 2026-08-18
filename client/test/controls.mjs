@@ -94,9 +94,15 @@ const cam = await until(page, () => {
         r.top + r.height / 2 - window.innerHeight / 2,
       ));
     })(),
-    minimap: !document.getElementById('minimap').classList.contains('hidden'),
-    // The things that used to exist and must not any more.
+    // Removed, and it must stay removed — it was a permanent 150px canvas
+    // redrawn every frame in the corner of a phone screen.
+    noMinimap: !document.getElementById('minimap'),
+    // First / third person. The button came BACK — but for a different job
+    // than the one it used to do, which is the whole point of the checks below.
     hasViewBtn: !!document.getElementById('hud-view'),
+    hasToggle: typeof g.toggleView,
+    view: g.view,
+    // The things that used to exist and must not any more.
     hasViewSelect: !!document.getElementById('gfx-view'),
     hasAimStick: !!document.getElementById('stick-right'),
     hasCycle: typeof g.cycleView,
@@ -114,13 +120,18 @@ check('your own body is hidden', cam.bodyHidden === true);
 check('crosshair is up', cam.crosshair);
 check('the crosshair sits at screen centre, because that is where the shot goes',
   cam.crosshairOff <= 2, `${cam.crosshairOff}px off centre`);
-check('minimap is up', cam.minimap);
+check('the minimap is gone', cam.noMinimap);
 
-console.log('\n--- top-down is gone ---');
-check('no camera toggle button', !cam.hasViewBtn);
-check('no camera setting', !cam.hasViewSelect);
+console.log('\n--- top-down is gone, but the view toggle is not ---');
+// There is a camera button again. It flips between first and third person,
+// which both aim identically — not between playstyles, which is what the old
+// four-way cycle did.
+check('there is a view toggle button', cam.hasViewBtn);
+check('the game exposes a two-way toggle', cam.hasToggle === 'function', cam.hasToggle);
+check('matches start in the remembered view', cam.view === 'fps' || cam.view === 'tpp', cam.view);
+check('no camera setting in the menu', !cam.hasViewSelect);
 check('no aim stick', !cam.hasAimStick);
-check('no view cycling on the game object', cam.hasCycle === 'undefined', cam.hasCycle);
+check('no four-way view cycling', cam.hasCycle === 'undefined', cam.hasCycle);
 
 // --- movement is relative to facing ---------------------------------------
 console.log('\n--- movement ---');
@@ -168,6 +179,85 @@ console.log('  ', JSON.stringify(look));
 check('moving the mouse right turns right', look.yaw > 0.1, String(look.yaw));
 check('pushing it down looks down', look.down < -0.05, String(look.down));
 check('pulling it up looks up', look.up > 0.05, String(look.up));
+
+// --- third person ---------------------------------------------------------
+//
+// The geometry is proven headlessly in client/test/view.mjs, which is where the
+// "does the bullet go where the crosshair is" maths lives. What can only be
+// checked in a browser is that the three things which have to move together
+// actually do: the camera framing, the aim, and whether your own chicken is
+// drawn at all.
+console.log('\n--- third person ---');
+const tpp = await until(page, () => {
+  const S = window.__cluckdown;
+  const g = S.game;
+  const me = S.session.players.find((p) => p.isSelf);
+  if (!me) return null;
+  if (g.view !== 'tpp') { g.setView('tpp'); return null; } // wait for a rendered frame
+
+  const c = g.camera.position;
+  const back = Math.hypot(c.x - me.x, c.z - me.z);
+  if (back < 1) return null; // the boom has not been applied yet
+  return {
+    view: g.view,
+    back: +back.toFixed(2),
+    camY: +c.y.toFixed(2),
+    bodyHidden: g.views.get(S.session.selfId)?.hidden,
+    crosshairShown: document.getElementById('crosshair').style.opacity !== '0',
+    // Where the chicken lands on screen, which is the thing the player asked
+    // for: down and left, so it is not sitting on the reticle.
+    onScreen: g.projectFn(me.x, me.y + 1.2, me.z),
+    w: window.innerWidth,
+    h: window.innerHeight,
+  };
+}, 20000);
+console.log('  ', JSON.stringify(tpp));
+check('switching puts the camera behind the chicken', (tpp?.back ?? 0) > 2, `${tpp?.back}u back`);
+check('...and above it', (tpp?.camY ?? 0) > 1.2, `y=${tpp?.camY}`);
+check('your own body is drawn in third person', tpp?.bodyHidden === false, String(tpp?.bodyHidden));
+check('the crosshair stays up', tpp?.crosshairShown === true);
+check('your chicken sits LEFT of the crosshair, clear of it',
+  !!tpp?.onScreen && tpp.onScreen.x < tpp.w / 2 - 20,
+  `x=${tpp?.onScreen?.x?.toFixed(0)} of ${tpp?.w}`);
+check('...and below it', !!tpp?.onScreen && tpp.onScreen.y > tpp.h / 2,
+  `y=${tpp?.onScreen?.y?.toFixed(0)} of ${tpp?.h}`);
+
+// Back to first person, and everything undoes.
+const backToFps = await until(page, () => {
+  const S = window.__cluckdown;
+  const g = S.game;
+  if (g.view !== 'fps') { g.toggleView(); return null; }
+  const me = S.session.players.find((p) => p.isSelf);
+  const c = g.camera.position;
+  if (!me || Math.hypot(c.x - me.x, c.z - me.z) > 0.8) return null;
+  return {
+    view: g.view,
+    bodyHidden: g.views.get(S.session.selfId)?.hidden,
+    camY: +c.y.toFixed(2),
+  };
+}, 20000);
+console.log('  ', JSON.stringify(backToFps));
+check('toggling back returns to the eye', backToFps?.view === 'fps' && backToFps.camY < 2.6,
+  JSON.stringify(backToFps));
+check('...and hides your own body again', backToFps?.bodyHidden === true);
+
+// The HUD button is the control players actually use, so drive that rather
+// than the API behind it.
+const viaButton = await page.evaluate(() => {
+  const btn = document.getElementById('hud-view');
+  const before = window.__cluckdown.game.view;
+  btn.click();
+  const after = window.__cluckdown.game.view;
+  const label = btn.textContent;
+  btn.click(); // put it back
+  return { before, after, label, restored: window.__cluckdown.game.view };
+});
+console.log('  ', JSON.stringify(viaButton));
+check('the HUD button switches the view', viaButton.before !== viaButton.after,
+  `${viaButton.before} -> ${viaButton.after}`);
+check('it says which view you are in', /^[13]P$/.test(viaButton.label), viaButton.label);
+check('clicking again switches back', viaButton.restored === viaButton.before,
+  viaButton.restored);
 
 // --- look sensitivity, wired all the way from the menu --------------------
 //

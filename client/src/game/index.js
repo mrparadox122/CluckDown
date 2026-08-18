@@ -7,6 +7,7 @@ import {
 } from './entities.js';
 import { BulletPool, DebrisPool, BlastRings, MuzzleFlash } from './fx.js';
 import { Controls } from './controls.js';
+import { asView } from './view.js';
 import { sfx } from '../audio/sfx.js';
 import {
   PLAYER, BULLET, BOMBER, MODIFIERS, MODES, HILL, BOMB, HEIST, SEAT_COLORS,
@@ -87,6 +88,10 @@ export class Game {
     this.controls.setButtonEdit(!!gfx?.fireEdit);
     this.controls.setAssist(gfx?.assist !== false);
     this.controls.setSensitivity(gfx?.sensitivity ?? 1);
+    // The arena never changes size within a match — the map vote resolves
+    // before the Game is built — so this is set once.
+    this.controls.setArenaHalf(session.arenaSize / 2);
+    this.setView(gfx?.view);
 
     // Who to watch while dead — set from the kill event, cleared on respawn.
     this.killedBy = null;
@@ -128,6 +133,25 @@ export class Game {
   setAssist(on) { this.controls.setAssist(on); }
 
   setSensitivity(mul) { this.controls.setSensitivity(mul); }
+
+  /**
+   * Switch between the eye and the shoulder.
+   *
+   * Three things move together, and all three have to: the camera framing, the
+   * angle the shot is bent to (view.js), and whether your own chicken is drawn.
+   * Set only two of them and the game either aims at nothing or renders the
+   * inside of your own beak.
+   */
+  setView(v) {
+    this.view = asView(v);
+    this.rig.setView(this.view);
+    this.controls.setView(this.view);
+    return this.view;
+  }
+
+  toggleView() {
+    return this.setView(this.view === 'tpp' ? 'fps' : 'tpp');
+  }
 
   // ------------------------------------------------------------------ setup
 
@@ -181,9 +205,14 @@ export class Game {
           // result was a full-screen white flash on every shot. 3.2 units of
           // push is camera clearance, not tracer length — it has to stay clear
           // of the near plane whatever BULLET.tracerLength is set to.
+          // Only first person has to hide your own muzzle effects: that is
+          // where the camera is standing. From the shoulder they are 4 units
+          // away and are exactly what you want to see, so third person gets the
+          // flash back and its tracer un-nudged.
+          const inside = self && e.owner === self.id && this.view === 'fps';
           const ownShot = self && e.owner === self.id;
-          this.bullets.spawn(e, ownShot ? 3.2 : 0);
-          if (!ownShot) this.muzzle.fire(e.x, e.y, e.z);
+          this.bullets.spawn(e, inside ? 3.2 : 0);
+          if (!inside) this.muzzle.fire(e.x, e.y, e.z);
           // ...replaced by a recoil kick, which reads as "I fired" far better
           // than a flash does anyway.
           if (ownShot) this.rig.addRecoil();
@@ -561,19 +590,6 @@ export class Game {
       // same yaw/pitch pair the camera looks down, so the centre of the screen
       // IS the aim point and the projection has nothing left to correct for.
       this.hud.setCrosshair(alive);
-      this.hud.drawMinimap({
-        half: this.session.safeHalf,
-        players,
-        self,
-        selfX: focusX,
-        selfZ: focusZ,
-        aim: this.controls.yaw,
-        bomber: this.session.bomber,
-        pickups: this.session.pickups,
-        nests: this.session.nests,
-        hill: this.session.hill,
-        bomb: this.session.bomb,
-      });
     }
     const dead = self && !self.alive;
     this.hud.setRespawn(dead ? self.respawnIn : 0);
@@ -723,11 +739,10 @@ export class Game {
       }
 
       view.setVisible(p.alive);
-      // First person: you are looking out of your own head, so your own body
-      // fills the screen. Hide it rather than clipping through it.
-      // You are looking out of your own head, so your own body would fill
-      // the screen from the inside.
-      view.setHidden(p.isSelf);
+      // First person only: the camera is inside your own head, so your body
+      // would fill the screen from the inside. In third person it is the thing
+      // you are looking at.
+      view.setHidden(p.isSelf && this.view === 'fps');
       if (!p.alive) continue;
 
       const isSelf = p.isSelf;
@@ -738,7 +753,13 @@ export class Game {
       const nemesis = !!self && !p.isSelf && self.nemesis === p.id;
       const target = isSelf && this.pred.has
         ? {
-          x: this.pred.x, y: this.pred.y, z: this.pred.z, aim: p.aim,
+          x: this.pred.x, y: this.pred.y, z: this.pred.z,
+          // Your own body turns with the LOCAL look angle, never the server's
+          // echo of it. Invisible in first person, glaring in third: `p.aim` is
+          // where you were pointing a round trip ago, so the chicken you are
+          // watching would swing into place a tenth of a second after the
+          // camera did.
+          aim: this.controls.yaw,
           invuln: p.invuln, rapid: p.rapid, burning: p.burning, bounty: crowned,
           nemesis: false,
         }

@@ -157,7 +157,7 @@ export const AIM_ASSIST = {
 };
 
 export const BULLET = {
-  radius: 0.22,
+  radius: 0.16,
   speed: 30,
   damage: 11,
   life: 1.3, // seconds -> ~39 unit range
@@ -176,7 +176,7 @@ export const BULLET = {
    * to change how hard the game is.
    */
   tracerRadius: 0.12,
-  tracerLength: 1.5, // world units, nose to tail — the streak, not the round
+  tracerLength: 1.0, // world units, nose to tail — the streak, not the round
 };
 
 export const BOMBER = {

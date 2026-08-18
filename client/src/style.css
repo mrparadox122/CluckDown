@@ -1095,20 +1095,11 @@ input[type="text"]:focus { border-color: var(--hot); box-shadow: 0 0 0 3px rgba(
 .crosshair::before { left: 50%; top: 0; width: 1.5px; height: 100%; margin-left: -0.75px; }
 .crosshair::after { top: 50%; left: 0; height: 1.5px; width: 100%; margin-top: -0.75px; }
 
-.minimap {
-  position: absolute;
-  top: 10px;
-  left: 10px;
-  width: 150px;
-  height: 150px;
-  border-radius: 50%;
-  pointer-events: none;
-}
-/* The killfeed shares the top-left corner with the minimap, so it steps down
-   out of the way — and gets a hard ceiling, because pushed down by the minimap
-   it was running into the scoreboard on a busy round. */
+/* The killfeed owns the top-left corner outright now that the minimap is gone,
+   so it no longer steps down past it. It keeps its hard ceiling regardless: a
+   busy round used to run it into the scoreboard, and that was never really
+   about what sat above it. */
 #hud .killfeed {
-  margin-top: 152px;
   max-height: 22vh;
   overflow: hidden;
   /* Fade the cut rather than slicing a row in half — a row chopped through the
@@ -1334,10 +1325,8 @@ input[type="text"]:focus { border-color: var(--hot); box-shadow: 0 0 0 3px rgba(
   .prompt-text { font-size: 10.5px; letter-spacing: 1px; }
   .prompt-meter { width: 104px; height: 5px; }
 
-  /* Screen real estate is scarce on a phone, so the minimap shrinks and the
-     killfeed steps down by correspondingly less. */
-  .minimap { width: 92px; height: 92px; top: 6px; left: 6px; }
-  #hud .killfeed { margin-top: 92px; max-height: 20vh; }
+  /* Screen real estate is scarce on a phone. */
+  #hud .killfeed { max-height: 20vh; }
   .crosshair { width: 16px; height: 16px; }
   .fire-btn { width: 74px; height: 74px; margin: -37px 0 0 -37px; font-size: 10px; }
   .jump-btn { width: 58px; height: 58px; margin: -29px 0 0 -29px; font-size: 9px; }

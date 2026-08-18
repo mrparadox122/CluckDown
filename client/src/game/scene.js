@@ -18,9 +18,12 @@ import '@babylonjs/core/Meshes/thinInstanceMesh';
 
 import { hardwareScaling } from '../graphics.js';
 import { MAPS, DEFAULT_MAP, HILL, PLAYER, WALL_HEIGHT } from '@cluckdown/shared';
+import { asView, tppCamera } from './view.js';
 
-// Cluckdown is a first-person game. Everything here is the camera that sits
-// behind the chicken's eyes.
+// Cluckdown has two cameras: one behind the chicken's eyes, and one on a boom
+// behind its shoulder. They share every other control — the same look angles,
+// the same crosshair, the same shot — and view.js owns the geometry that keeps
+// the third-person one honest.
 //
 // Eye height and the pitch limits come from PLAYER now, not from this file.
 // They stopped being rendering choices the moment pitch became part of the
@@ -279,10 +282,12 @@ export function buildArena(scene, size, mapId = DEFAULT_MAP) {
 /**
  * The camera.
  *
- * Cluckdown is first person, so this is simply "where the chicken's eyes are".
- * There used to be three top-down framings alongside it and a good deal of zoom
- * machinery to move between them; all of that is gone, and the file is roughly
- * a third the size for it.
+ * Two framings — the eye, and a boom over the shoulder — and one set of angles
+ * driving both. There used to be three top-down framings alongside first person
+ * and a good deal of zoom machinery to move between them; all of that is gone.
+ * What came back is a single toggle between two views that aim identically,
+ * which is a different thing: top-down changed how you played, this changes
+ * only what you can see of yourself.
  *
  * Pitch used to live only here: the simulation was flat, so tilting the view
  * moved the horizon and nothing else. It reaches the sim now, along with the
@@ -310,6 +315,13 @@ export class CameraRig {
     // Spectator orbit, used while dead.
     this.spectateAngle = 0;
     this.alive = true;
+
+    this.view = 'fps';
+  }
+
+  /** 'fps' | 'tpp'. Anything else falls back to first person. */
+  setView(v) {
+    this.view = asView(v);
   }
 
   /** Kept for the resize handler; there are no follow limits to recompute now. */
@@ -379,6 +391,21 @@ export class CameraRig {
     }
 
     const look = pitch + this.recoil;
+
+    if (this.view === 'tpp') {
+      // The boom, solved by view.js — including retracting it off a wall. Shake
+      // moves the camera but not what it looks at, exactly as in first person,
+      // so a hit sways the view rather than sliding the whole world sideways.
+      const cam = tppCamera(targetX, targetY, targetZ, this.yaw, look, this.half);
+      this.camera.position.set(cam.x + sx, cam.y + sy, cam.z);
+      this.camera.setTarget(new Vector3(
+        cam.x + cam.basis.fx * 10,
+        cam.y + cam.basis.fy * 10,
+        cam.z + cam.basis.fz * 10,
+      ));
+      return;
+    }
+
     // Spherical, so looking down doesn't shorten the horizontal component and
     // change the apparent turn rate. Same construction the simulation uses in
     // fire(), which is the whole reason a centre reticle is honest.

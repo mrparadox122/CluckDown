@@ -15,6 +15,8 @@
 // match starts, so changing it in the menu applies to the next match — which
 // is the only place these controls live anyway.
 
+import { asView } from './game/view.js';
+
 const STORAGE_KEY = 'cluckdown.gfx.v1';
 
 export const RESOLUTIONS = [
@@ -42,6 +44,13 @@ const DEFAULTS = {
    * and the player who tracks.
    */
   sensitivity: 1,
+
+  /**
+   * 'fps' or 'tpp'. Remembered rather than reset each match: a player who
+   * prefers third person prefers it every time, and the in-match button is
+   * there for the times they want the other one for thirty seconds.
+   */
+  view: 'fps',
 };
 
 export const SENSITIVITY_MIN = 0.25;
@@ -58,6 +67,7 @@ export function loadGfx() {
     merged.fireEdit = !!merged.fireEdit;
     merged.assist = merged.assist !== false;
     merged.sensitivity = clampSensitivity(merged.sensitivity);
+    merged.view = asView(merged.view);
     return merged;
   } catch {
     return { ...DEFAULTS };
@@ -73,6 +83,7 @@ export function saveGfx(gfx) {
       assist: gfx.assist !== false,
       fireEdit: !!gfx.fireEdit,
       sensitivity: clampSensitivity(gfx.sensitivity),
+      view: asView(gfx.view),
     }));
   } catch {
     // Private mode — settings just won't persist.

@@ -144,8 +144,7 @@
          along exactly the line the camera looks down. It used to be projected
          16 units along the firing line specifically BECAUSE that was not true —
          shots went flat whatever the view did, and a centre reticle would have
-         been lying. The minimap gives back the spatial awareness a first-person
-         view cannot. Both are unconditional — there is no other camera. -->
+         been lying. -->
     <div id="crosshair" class="crosshair"></div>
     <!-- Touch first-person controls.
          `#look-zone` is a bare swipe surface, NOT a stick. Every successful
@@ -165,8 +164,6 @@
     <button id="jump-btn" class="jump-btn" type="button" aria-label="Jump">
       <span>JUMP</span>
     </button>
-    <canvas id="minimap" class="minimap" width="150" height="150"></canvas>
-
     <!-- Bottom-centre strips.
          These MUST be direct children of #hud. Nested inside .hud-top they
          positioned against it instead of the viewport, and .hud-top grows with
@@ -187,6 +184,10 @@
         <div id="match-clock" class="match-clock">4:00</div>
         <div class="hud-buttons">
           <button id="hud-mute" class="icon-btn hud-mute" type="button" aria-label="Mute">&#128266;</button>
+          <!-- First / third person. A toggle rather than a setting because it
+               is a thing you flip mid-match to see round a corner or admire
+               your own hat, not a preference you configure once. -->
+          <button id="hud-view" class="icon-btn hud-mute" type="button" aria-label="Camera view" title="First / third person (V)">1P</button>
           <button id="hud-fullscreen" class="icon-btn hud-mute" type="button" aria-label="Fullscreen" title="Fullscreen">&#9974;</button>
         </div>
         <button id="netstats" class="netstats" type="button" title="Network stats (N)"></button>

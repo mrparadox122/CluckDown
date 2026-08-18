@@ -1,5 +1,6 @@
 import nipplejs from 'nipplejs';
 import { AIM_ASSIST, PLAYER, pickAimTarget, pullAim, pullPitch } from '@cluckdown/shared';
+import { asView, convergeAim } from './view.js';
 
 /**
  * First-person input.
@@ -69,6 +70,14 @@ export class Controls {
 
     // Player-set multiplier over the two base sensitivities above.
     this.sensitivity = 1;
+
+    // Which camera is rendering. It changes nothing about how you look around
+    // and everything about where the shot has to be pointed — see view.js.
+    this.view = 'fps';
+    // Third person needs the arena: the shoulder offset is squeezed against a
+    // wall, and the aim has to be squeezed with it or the crosshair drifts off
+    // the shot in exactly the places you are most likely to be fighting.
+    this.arenaHalf = Infinity;
 
     // Touch look, tracked by pointerId so that looking with one thumb while
     // holding fire with another works. That is the whole reason fire is its own
@@ -236,6 +245,20 @@ export class Controls {
   setAssist(on) { this.assistOn = on; }
 
   /**
+   * 'fps' | 'tpp'.
+   *
+   * The controls are identical in both — same stick, same swipe, same buttons,
+   * same crosshair. All this decides is whether the angle that goes out is the
+   * one you are looking down, or the one that makes a shot from the chicken's
+   * shoulder pass through the middle of the screen.
+   */
+  setView(v) { this.view = asView(v); }
+
+  setArenaHalf(half) {
+    this.arenaHalf = Number.isFinite(half) && half > 0 ? half : Infinity;
+  }
+
+  /**
    * Look sensitivity multiplier. 1 is the tuned default; the slider spans
    * roughly a quarter to double that.
    *
@@ -301,6 +324,19 @@ export class Controls {
     }
 
     const look = this.assistedLook(self, foes, dt);
+
+    // In first person the shot IS the look direction — the camera is at the
+    // muzzle, so there is nothing to reconcile. In third person the camera has
+    // moved onto a boom and the two are different lines, so the shot is bent to
+    // pass through the crosshair. Either way the simulation receives one
+    // ordinary aim angle and never learns which view produced it.
+    const shot = this.view === 'tpp' && self
+      ? convergeAim(self.x, self.y ?? 0, self.z, look.yaw, look.pitch, foes, this.arenaHalf)
+      : look;
+
+    // Movement follows the CAMERA, not the shot. They differ by a fraction of a
+    // degree in third person, but "forward" means "the way I am looking" and
+    // borrowing the aim line for it would be the wrong idea at any size.
     const sin = Math.sin(look.yaw);
     const cos = Math.cos(look.yaw);
 
@@ -310,11 +346,9 @@ export class Controls {
     this.input.mx = sz * sin + sx * cos;
     this.input.mz = sz * cos - sx * sin;
 
-    // Aim IS the look direction, in both axes. No screen-to-ground
-    // unprojection, and no server-side correction fighting the camera.
-    this.input.ax = sin;
-    this.input.az = cos;
-    this.input.pitch = look.pitch;
+    this.input.ax = Math.sin(shot.yaw);
+    this.input.az = Math.cos(shot.yaw);
+    this.input.pitch = shot.pitch;
 
     // Space is jump, so the desktop trigger is the mouse — with F as a
     // keyboard fallback for anyone who would rather not hold a button down.

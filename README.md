@@ -1,6 +1,6 @@
 # 🐔 Cluckdown
 
-A first-person multiplayer chicken arena shooter that runs in the browser.
+A multiplayer chicken arena shooter that runs in the browser.
 Everything is cubes, the lighting is dark, the bullets glow red, and a black
 chicken with a five-second fuse is always waddling toward somebody.
 
@@ -26,8 +26,8 @@ working on game feel.
 
 ### Controls
 
-Cluckdown is first person, and only first person. There is no view to toggle and
-no aim stick.
+First or third person, on one toggle. Both aim identically — same crosshair,
+same shot — so switching is a matter of what you would rather look at.
 
 | | Touch | Desktop |
 |---|---|---|
@@ -35,6 +35,7 @@ no aim stick.
 | Look | Swipe the right half of the screen | Mouse (click to capture, `Esc` to release) |
 | Shoot | The FIRE button — hold, and drag to aim | Hold left mouse, or `F` |
 | Jump | The JUMP button | `Space` |
+| View | The **1P / 3P** button, beside fullscreen | `V` |
 | Chat | Quick-chat buttons | `T`, or the quick-chat buttons |
 
 On touch, **hold FIRE and slide the same thumb to aim.** The press sticks to the
@@ -147,8 +148,8 @@ It lives in `localStorage` and is sent to the server on join.
 
 ## Revenge
 
-Whoever killed you last is marked for 45 seconds: a magenta ring in the world,
-a callout on the minimap, and a bonus for taking them back down. It is the
+Whoever killed you last is marked for 45 seconds: a magenta ring in the world
+and a bonus for taking them back down. It is the
 cheapest social mechanic in the genre and the most reliable — it manufactures a
 personal story inside a four-minute match between strangers whose names you will
 never remember, which is exactly what a session game with no accounts otherwise
@@ -367,7 +368,7 @@ dropdown that switched between them are gone.
 
 | | Now |
 |---|---|
-| Camera | the chicken's eyes, at `PLAYER.eyeHeight` (1.15) plus whatever it is jumping |
+| Camera | the chicken's eyes, or a boom over its shoulder — one toggle, same aim |
 | Field of view | 1.15 rad |
 | Look | yaw **and pitch**, clamped to `PLAYER.pitchMin`..`pitchMax` |
 | Movement | facing-relative: W forward, A/D strafe |
@@ -376,7 +377,67 @@ dropdown that switched between them are gone.
 | Fire (touch) | a dedicated, **repositionable** button |
 | Jump (touch) | a second one, next to it |
 | Aim assist | on, applied client-side to your own look angles |
-| Extras | centre crosshair, minimap, world markers, recoil kick |
+| Extras | centre crosshair, world markers, recoil kick |
+
+### Third person
+
+The camera moves onto a boom behind and to the right; everything else is
+untouched. Same stick, same swipe, same buttons, same crosshair, same shot —
+which is the whole design goal. Switching views must not be switching games.
+
+**Your chicken sits down and to the LEFT of centre.** That is what `TPP.side`
+and `TPP.rise` buy: dead centre would park a whole bird on top of the reticle
+and you would be aiming through your own tail.
+
+Think in ratios, not raw units. The boom is a triangle, so lengthening it moves
+your chicken back toward the middle of the frame at the same time as it shrinks
+it — growing `dist` without growing the offsets quietly undoes the whole point.
+At `side/dist ≈ 0.26` and `rise/dist ≈ 0.15` the head sits about 23% of a
+half-width left of centre and 24% of a half-height below it, and the bird fills
+roughly 22% of the frame height. The first pass used a 4.2 boom with a 0.75
+shoulder, which put it 15% off centre at nearly 40% of frame height — crowding
+the reticle it exists to keep clear.
+
+**The crosshair problem, and why `view.js` exists.** In first person the camera
+sits at the muzzle, so "along the camera" and "out of the gun" are the same line
+and a centre reticle is true by construction. A boom breaks that: the crosshair
+is now the middle of a camera standing somewhere else, and a shot fired along
+the camera's own angles drifts off it — by *more* the closer the target is.
+
+So the shot is bent to pass through the crosshair. `convergeAim` asks the camera
+ray what it is pointing at — a chicken the reticle covers, a wall, the floor —
+and aims the chicken's gun at that exact point. Nothing reaches the simulation:
+it receives the same ordinary `{yaw, pitch}` a first-person player sends, and the
+server neither knows nor cares which view produced it. `client/test/view.mjs`
+proves the line of fire meets the camera ray to within 1e-12 across 3,780
+headings, and that a chicken under the crosshair is hit dead centre at any
+range.
+
+Three details that are load-bearing:
+
+- **The ray hangs off the shoulder, not the camera.** Retracting the boom slides
+  the camera *along* that ray, so backing into a wall changes what you can see
+  and not where you shoot. Aim that shifted when you touched a wall would be the
+  worst kind of bug: intermittent, positional, and invisible to any test
+  standing in open ground.
+- **The shoulder offset is clamped into the arena.** A player is only stopped
+  `PLAYER.radius` from a wall, so turning while against one swings a 1.6-unit
+  offset clean through it and the camera ends up inside the wall mesh, looking
+  at culled back faces — a hole in the world. Squeezing the offset slides the
+  camera to directly behind you instead. Camera and aim are squeezed by the same
+  amount, which is the only reason the crosshair survives it.
+- **Convergence is not a second aim assist.** It only fires when the crosshair
+  genuinely covers someone, using the same radius the simulation's hit test
+  uses. A generous version would bend shots onto targets the player never aimed
+  at, and assist already exists and can be turned off.
+
+The one thing it cannot fix is parallax at a range with nothing in it. With the
+shoulder this far out, no single fallback distance keeps a shot inside a
+chicken's width across the bullet's whole range — the near and far requirements
+contradict each other. That is fine precisely because the fallback is
+unreachable while a shot is still in play: inside the arena the ray always meets
+a chicken, a wall or the floor. `test:view` proves that rather than assuming it,
+by checking that every ray which falls back genuinely exits over the parapet.
 
 ### The simulation has a Y axis
 
@@ -506,11 +567,6 @@ was to make every shot in the game harder to land. Restyle the streak with
 `tracerRadius` and `tracerLength`; change how forgiving the game is with
 `radius`.
 
-**The minimap is not decoration.** Losing the overview is the real cost of first
-person in a four-player arena — you can no longer see who is behind you, or
-which corner the bomber came from — so it draws players, the bomber, pickups,
-nests, the hill zone and the bomb, rotated so your facing is always up.
-
 **Dying** lifts the camera into a slow orbit above where you fell, framing your
 killer if they are still up. With no top-down view left in the game, this is the
 only overhead anyone gets, so it does real work rather than just parking the
@@ -541,6 +597,9 @@ the renderer is built at match start:
 Feel, all of which apply **immediately** — the only way to judge any of them is
 to play with them running:
 
+- **View** — first or third person, on the HUD button rather than in here,
+  because the reason to switch is usually "right now". The choice is still
+  remembered between matches.
 - **Look sensitivity** — 0.25× to 2×, over the tuned base rates in
   `controls.js`. One multiplier for both mouse and touch: they already sit at
   different base rates for good reasons, and what a player is adjusting is
@@ -636,9 +695,10 @@ npm install -D playwright && npx playwright install chromium
 | `test:perf` | Draw-call and material counts, thin instances, graphics settings |
 | `test:stats` | Server status panel and the in-game network readout |
 | `test:tasks` | Both new modes end-to-end in a browser: nests and eggs render, the bomb is pickable, the contract strip names and counts its task, the zone marker follows a relocation |
+| `test:view` | Third-person framing, headless and instant: the shot line meets the camera ray, a target under the crosshair is hit dead centre, the boom retracts off walls, and the camera never escapes the arena |
 | `test:control` | **Knockback can never take the wheel** — see below — plus movement symmetry on every map and in every mode, and the vertical axis: jump arcs, the height ceiling, air control, and that nothing but your own jump can lift you |
 | `test:combat` | Aim assist in both axes, all three ammo types, and shooting in 3D — over a target, onto a jumping one, down out of a jump, into the floor, over a wall |
-| `test:controls` | First person on desktop: camera at eye level and on the player, own body hidden, facing-relative movement, mouse look in both axes, `Space` jumps and `F` fires, the centre crosshair, world markers and the spectator orbit |
+| `test:controls` | Desktop: camera at eye level and on the player, own body hidden, facing-relative movement, mouse look in both axes, `Space` jumps and `F` fires, the centre crosshair, the 1P/3P toggle, the sensitivity slider, world markers and the spectator orbit |
 | `test:fps-touch` | First person on an emulated phone: swipe-to-look **proportionality**, pitch and its clamp, FIRE and JUMP, jumping and firing and looking with three thumbs at once, and dragging both buttons to new homes |
 | `test:retention` | Killed-by panel, the nemesis ring, the auto-requeue countdown and its cancellation |
 
@@ -935,8 +995,11 @@ bugs. Don't "clean them up" without checking:
   (buffer two states, render ~100ms behind) is the fix and costs nothing on the GPU.
 - First person gives up a lot of what the old top-down view did for free: you
   cannot see the bomber creeping up behind you, and reading a four-way fight is
-  much harder. The minimap and the off-screen world markers cover some of that,
-  not all of it. There is no top-down view to fall back to any more.
+  much harder. The off-screen world markers cover some of that, not all of it,
+  and there is no top-down view to fall back to any more. A rotating minimap
+  covered more of it still and was removed anyway — a permanent 150px canvas
+  redrawn every frame is a real cost on the phones this game targets, and it was
+  bought with the corner of a screen that is already short of room.
 - Jumping is movement, not tactics. There is nothing to jump *onto* — the arenas
   are flat — so it dodges, it looks alive, and that is all. Cover would change
   that, and cover needs bot obstacle avoidance in the same change.

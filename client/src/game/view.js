@@ -1,0 +1,292 @@
+// Where the camera sits, and where a shot has to go for the crosshair to be
+// telling the truth.
+//
+// Cluckdown has two views. First person puts the camera at the chicken's eye,
+// so "along the camera" and "from the gun" are the same line and there is
+// nothing to reconcile. Third person moves the camera onto a boom behind and to
+// the side, and that breaks the identity: the shot still leaves the chicken,
+// but the crosshair is now the middle of a camera standing somewhere else.
+//
+// This module owns both halves of that problem so they cannot disagree. The
+// camera placement in scene.js and the aim convergence in controls.js call the
+// same functions with the same numbers — which is the only way "the bullet goes
+// where the crosshair is" survives contact with tuning.
+//
+// No Babylon in here on purpose: it is geometry, and geometry is testable.
+
+import { PLAYER, BULLET, WALL_HEIGHT, clamp } from '@cluckdown/shared';
+
+export const VIEWS = ['fps', 'tpp'];
+
+/** Normalises anything into a view the renderer actually has. */
+export function asView(v) {
+  return VIEWS.includes(v) ? v : 'fps';
+}
+
+/**
+ * Third-person framing.
+ *
+ * `side` and `rise` are the whole reason this view is usable: they push the
+ * camera right and up, which puts your chicken down and to the LEFT of screen
+ * centre. Dead centre would park a whole bird on top of the crosshair — you
+ * would be aiming through your own tail.
+ *
+ * What matters on screen is each offset as a FRACTION of `dist`, not its raw
+ * value: the boom is a triangle, so pushing the camera back moves your chicken
+ * toward the middle of the frame at the same time as it shrinks it. Lengthening
+ * the boom without growing the offsets quietly undoes the whole point. The two
+ * ratios below are the numbers to think in.
+ *
+ *   side / dist ≈ 0.26  ->  the head sits ~23% of a half-width left of centre
+ *   rise / dist ≈ 0.15  ->  ...and ~24% of a half-height below it
+ *
+ * The first pass had the camera at 4.2 with a 0.75 shoulder, which put the
+ * chicken 15% off centre and filling nearly 40% of the screen height — close
+ * enough to crowd the reticle it is supposed to be clear of, and big enough to
+ * read as a chase cam rather than a view of the arena.
+ */
+export const TPP = {
+  dist: 6.2,          // boom length, in units behind the shoulder
+  side: 1.6,          // camera right -> chicken appears left of centre
+  rise: 0.9,          // camera up    -> chicken appears below centre
+  pivot: PLAYER.eyeHeight, // the boom hangs off the head, not the feet
+
+  /**
+   * How far down the crosshair ray to aim when there is nothing to aim AT, in
+   * units.
+   *
+   * A fixed convergence can only ever be exactly honest at one distance,
+   * because the camera and the gun are not in the same place — that is
+   * parallax. It is why `convergeDistance` below goes looking for a real thing
+   * under the crosshair instead, and why this number matters less than it
+   * looks: inside the arena the ray always meets a chicken, a wall or the
+   * floor, so the only shots that reach this fallback are the ones already
+   * leaving the building over the parapet. `test:view` proves that rather than
+   * assuming it.
+   *
+   * (With the offsets above, no single fixed distance could keep a shot inside
+   * a chicken's width across the bullet's whole 39-unit range. That is not a
+   * tuning failure, it is what parallax is — and it is the reason the fallback
+   * had to stop being the main path.)
+   */
+  converge: 20,
+
+  /**
+   * Never converge nearer than this, in units.
+   *
+   * Something a metre from your face is a near-vertical firing angle, and the
+   * shot would visibly leave the gun sideways for no gain — at that range you
+   * hit it whatever you do.
+   */
+  minConverge: 2.5,
+
+  /**
+   * Retracting can go almost to zero, and that is fine: the boom hangs off the
+   * SHOULDER, so even fully collapsed the camera sits `side` units away from
+   * the middle of the chicken — beside the head rather than inside it. Letting
+   * it collapse is what keeps the camera out of a wall when you back into one.
+   */
+  minBoom: 0.2,
+  wallGap: 0.5,       // how far inside the arena wall the camera aims to stay
+  floorGap: 0.45,     // ...and above the floor
+};
+
+/**
+ * Unit forward and horizontal-right vectors for a look direction.
+ *
+ * Same spherical construction the simulation uses in `fire()`, so the camera
+ * and the bullet agree about what "forward" means. `right` is deliberately flat
+ * — rolling the boom with pitch would swing your chicken across the screen
+ * every time you looked up.
+ */
+export function lookBasis(yaw, pitch) {
+  const cp = Math.cos(pitch);
+  return {
+    fx: Math.sin(yaw) * cp,
+    fy: Math.sin(pitch),
+    fz: Math.cos(yaw) * cp,
+    rx: Math.cos(yaw),
+    rz: -Math.sin(yaw),
+  };
+}
+
+/**
+ * The origin of the crosshair ray, in world space.
+ *
+ * This is where the camera would be with the boom fully retracted, and it is
+ * the anchor for everything else here. Defining the ray from this point rather
+ * than from the camera is what lets the boom shorten against a wall without
+ * moving your aim: retracting slides the camera ALONG this ray, so the line it
+ * looks down is unchanged.
+ *
+ * The shoulder offset is clamped into the arena, and it has to be. A player is
+ * only stopped `PLAYER.radius` from the wall, so standing against one and
+ * turning swings a 1.6-unit offset clean through it — the camera ends up inside
+ * the wall mesh looking at its culled back faces, which renders as a hole in
+ * the world. Squeezing the offset instead slides the camera to directly behind
+ * you as you scrape along a wall, which is both correct and what every other
+ * game does. The clamp is linear, so it is a squeeze rather than a snap.
+ *
+ * Clamping here rather than at the camera is deliberate: the aim converges on a
+ * point down THIS ray, so as long as the camera and the convergence share an
+ * origin the crosshair keeps telling the truth. Clamping the camera alone would
+ * have moved the picture without moving the aim.
+ */
+export function rayOrigin(px, py, pz, basis, half = Infinity) {
+  const lim = Math.max(1, half - TPP.wallGap);
+  return {
+    x: clamp(px + basis.rx * TPP.side, -lim, lim),
+    y: py + TPP.pivot + TPP.rise,
+    z: clamp(pz + basis.rz * TPP.side, -lim, lim),
+  };
+}
+
+/**
+ * How long the boom can be before the camera leaves the arena.
+ *
+ * The camera travels backwards along the ray, so each bound becomes a limit on
+ * how far back it may go, and the tightest one wins. Retracting the boom is the
+ * standard third-person answer to a wall, and here it is also the free one: the
+ * arena is a box with nothing inside it, so four planes and the floor are the
+ * entire collision problem.
+ */
+export function boomLength(origin, basis, half, want = TPP.dist) {
+  // Position along the boom is o - d*t, so t is capped by whichever wall the
+  // camera is reversing toward on that axis.
+  const capAxis = (o, d, lo, hi) => {
+    if (Math.abs(d) < 1e-6) return Infinity;
+    const limit = d > 0 ? (o - lo) / d : (o - hi) / d;
+    return Math.max(0, limit);
+  };
+
+  const lim = Math.max(1, half - TPP.wallGap);
+  const t = Math.min(
+    want,
+    capAxis(origin.x, basis.fx, -lim, lim),
+    capAxis(origin.z, basis.fz, -lim, lim),
+    // Only the floor matters vertically; there is no ceiling to hit.
+    basis.fy > 1e-6 ? Math.max(0, (origin.y - TPP.floorGap) / basis.fy) : Infinity,
+  );
+  return Math.max(TPP.minBoom, t);
+}
+
+/**
+ * Full third-person camera solve: where it sits, and what it looks at.
+ *
+ * @param half arena half-extent, for retracting the boom off a wall
+ */
+export function tppCamera(px, py, pz, yaw, pitch, half) {
+  const basis = lookBasis(yaw, pitch);
+  const origin = rayOrigin(px, py, pz, basis, half);
+  const boom = boomLength(origin, basis, half);
+  return {
+    basis,
+    origin,
+    boom,
+    x: origin.x - basis.fx * boom,
+    y: origin.y - basis.fy * boom,
+    z: origin.z - basis.fz * boom,
+  };
+}
+
+/**
+ * How far along the crosshair ray the thing you are actually aiming at is.
+ *
+ * This is what makes "the bullet goes where the crosshair is" true rather than
+ * true-ish. A fixed convergence distance is exact at that one range and drifts
+ * either side of it, so instead the ray is asked what it hits: a chicken the
+ * reticle is covering, or the ground, or — failing both — the fallback range,
+ * where there was nothing to miss anyway.
+ *
+ * The chicken test is deliberately tight. It converges only when the crosshair
+ * genuinely covers someone, using the same radius the simulation's hit test
+ * uses; a generous version would bend shots onto targets the player had not
+ * actually aimed at, which is aim assist wearing a disguise, and assist already
+ * exists and is a setting people can turn off.
+ */
+export function convergeDistance(origin, basis, targets = [], half = Infinity) {
+  // Starts at "nothing found" rather than at the fallback. Seeding it with
+  // TPP.converge looks equivalent and is not: it silently rejects every target
+  // standing further away than the fallback, so a duel across a large map
+  // converged on empty air 20 units out instead of on the chicken at 34.
+  let best = Infinity;
+
+  // The floor. Very visible, because you can see where the sparks land.
+  if (basis.fy < -1e-6) {
+    const t = origin.y / -basis.fy;
+    if (t > 0) best = Math.min(best, t);
+  }
+
+  // The walls, but only where they are solid — a shot angled over the parapet
+  // leaves the arena, and there is nothing out there to converge on.
+  if (Number.isFinite(half)) {
+    for (const [o, d, lim] of [[origin.x, basis.fx, half], [origin.z, basis.fz, half]]) {
+      if (Math.abs(d) < 1e-6) continue;
+      const t = ((d > 0 ? lim : -lim) - o) / d;
+      if (t > 0 && t < best && origin.y + basis.fy * t <= WALL_HEIGHT) best = t;
+    }
+  }
+
+  // ...and chickens, which beat any surface behind them.
+  const rr = PLAYER.radius + BULLET.radius;
+  for (const t of targets) {
+    if (!t || t.alive === false) continue;
+    // Closest approach of the ray to the middle of their body.
+    const wx = t.x - origin.x;
+    const wy = (t.y ?? 0) + PLAYER.hitHeight * 0.5 - origin.y;
+    const wz = t.z - origin.z;
+    const along = wx * basis.fx + wy * basis.fy + wz * basis.fz;
+    if (along <= 0 || along >= best) continue; // behind us, or behind something solid
+    const px = wx - basis.fx * along;
+    const py = wy - basis.fy * along;
+    const pz = wz - basis.fz * along;
+    if (Math.hypot(px, py, pz) > rr) continue; // the crosshair is not on them
+    best = along;
+  }
+
+  // Nothing under the crosshair at all — open sky over the parapet.
+  if (!Number.isFinite(best)) best = TPP.converge;
+  return Math.max(TPP.minConverge, best);
+}
+
+/**
+ * The angles the chicken must actually fire along for the shot to pass through
+ * the crosshair.
+ *
+ * The crosshair is the middle of the screen, which is the camera ray; the
+ * bullet leaves the chicken's eye, which is somewhere else. So the shot is
+ * aimed at the point where the ray meets whatever you are pointing at, and the
+ * two coincide exactly there. Nothing about this reaches the simulation — it
+ * produces the same `{yaw, pitch}` a first-person player would have sent, and
+ * the server neither knows nor cares which view produced it.
+ *
+ * Independent of the boom, so retracting off a wall cannot move your aim — see
+ * rayOrigin. It does need the arena, because the shoulder offset is squeezed
+ * near a wall and the camera and the aim have to be squeezed identically.
+ *
+ * @param targets everyone worth converging on, as {x, y, z, alive}
+ * @param half    arena half-extent, matching what the camera was given
+ */
+export function convergeAim(px, py, pz, yaw, pitch, targets = [], half = Infinity) {
+  const basis = lookBasis(yaw, pitch);
+  const o = rayOrigin(px, py, pz, basis, half);
+  const range = convergeDistance(o, basis, targets, half);
+
+  const tx = o.x + basis.fx * range;
+  const ty = o.y + basis.fy * range;
+  const tz = o.z + basis.fz * range;
+
+  // From the muzzle, which is eye height — the same place fire() starts it.
+  const dx = tx - px;
+  const dy = ty - (py + PLAYER.eyeHeight);
+  const dz = tz - pz;
+  const flat = Math.hypot(dx, dz);
+
+  return {
+    yaw: Math.atan2(dx, dz),
+    // Clamped because it is going into the input struct, and the server clamps
+    // it too — better to send an angle we can also render than to have the two
+    // quietly disagree at the extremes.
+    pitch: clamp(Math.atan2(dy, flat), PLAYER.pitchMin, PLAYER.pitchMax),
+  };
+}
