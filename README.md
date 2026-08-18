@@ -1,8 +1,8 @@
 # 🐔 Cluckdown
 
-A top-down multiplayer chicken arena shooter that runs in the browser. Everything
-is cubes, the lighting is dark, the bullets glow red, and a black chicken with a
-five-second fuse is always waddling toward somebody.
+A first-person multiplayer chicken arena shooter that runs in the browser.
+Everything is cubes, the lighting is dark, the bullets glow red, and a black
+chicken with a five-second fuse is always waddling toward somebody.
 
 No login, no accounts. Type a name, pick a mode, play.
 
@@ -26,26 +26,29 @@ working on game feel.
 
 ### Controls
 
-First person is the default view. Settings has a Camera dropdown if you'd
-rather play top-down, and the in-game camera button cycles all four.
-
-**First person**
+Cluckdown is first person, and only first person. There is no view to toggle and
+no aim stick.
 
 | | Touch | Desktop |
 |---|---|---|
 | Move | Left joystick | `WASD` / arrows |
 | Look | Swipe the right half of the screen | Mouse (click to capture, `Esc` to release) |
-| Shoot | The FIRE button — draggable, see Settings | Hold left mouse / `Space` |
+| Shoot | The FIRE button — hold, and drag to aim | Hold left mouse, or `F` |
+| Jump | The JUMP button | `Space` |
 | Chat | Quick-chat buttons | `T`, or the quick-chat buttons |
 
-**Top-down**
+On touch, **hold FIRE and slide the same thumb to aim.** The press sticks to the
+finger rather than to the circle, so the gun keeps firing wherever that thumb
+goes and the drag turns the view exactly as a swipe on the look surface does.
+Press, track, keep shooting — one gesture, no lifting off. A quick tap fires a
+single shot. Both buttons can be dragged to wherever your hands are (Settings →
+*Move the touch buttons*), and **Look sensitivity** in the same panel scales
+turning for both touch and mouse.
 
-| | Touch | Desktop |
-|---|---|---|
-| Move | Left joystick | `WASD` / arrows |
-| Aim | Right joystick | Mouse |
-| Shoot | Hold right joystick | Hold left mouse / `Space` |
-| Chat | Quick-chat buttons | `T`, or the quick-chat buttons |
+`Space` is jump rather than fire. It used to be the desktop fire key, and one of
+the two had to move when jumping arrived: `Space` is the jump key in every
+shooter anyone has played, and fire already had a better home on the mouse. `F`
+is there for anyone who would rather not hold a mouse button down.
 
 ---
 
@@ -229,8 +232,11 @@ Each modifier is a set of multipliers over existing tuning constants
 else knows they exist. The roll comes from the seeded RNG, so a given seed always
 reproduces the same match.
 
-> "Low gravity" is a slight lie — there's no jumping in a top-down game, so it's
-> implemented as momentum: knockback that barely decays. It reads as floaty in play.
+> "Low gravity" used to be a slight lie — there was no jumping, so it was
+> implemented purely as momentum: knockback that barely decays. It halves real
+> gravity now as well, so you hang at the top of a jump. The apex does *not*
+> change: `PLAYER.maxJumpHeight` clamps position outright, so low gravity buys
+> hang time rather than altitude and nobody floats over the walls.
 
 ## Aim assist
 
@@ -255,10 +261,20 @@ Two details that are load-bearing:
 - Cone checks are measured against the **raw stick angle**, never the assisted
   one. Testing the assisted angle would compare the lock against itself — the
   offset would always be ~0 and a target could never be shaken off.
-- The assist is applied to a persistent `p.aim` while the stick writes to
-  `p.aimRaw`. An earlier version wrote both to the same field, so every tick
-  reset the aim to the raw stick angle and the pull never accumulated — it
-  closed 0.028 of a 0.25 radian gap and stayed there.
+- The assist accumulates in its own angle (`assistYaw` / `assistPitch` on the
+  client) while the raw look angle stays untouched. An earlier version wrote
+  both to the same field, so every tick reset the aim to the raw stick angle and
+  the pull never accumulated — it closed 0.028 of a 0.25 radian gap and stayed
+  there.
+- **It runs on the client, not the server.** In first person the camera renders
+  your local yaw, so a server quietly steering the aim somewhere else would
+  leave the crosshair pointing at one thing and the bullet going to another.
+  Shaping the input before it is sent keeps camera, crosshair and simulation in
+  exact agreement. `shared/src/aim.js` is the whole of it, and it lives in
+  `shared/` because it is game tuning rather than rendering.
+- **Both axes.** `pullAim` turns you toward a target; `pullPitch` tilts you onto
+  it. The vertical half arrived with 3D shots — leaving it out would have
+  recreated the original complaint one axis over.
 
 Humans only. Bots already aim with deliberate error, and handing them assist on
 top would just make them snipers.
@@ -346,25 +362,63 @@ dimension. `npm run test:mobile` runs the whole suite at 667×375 for this reaso
 
 ## First person
 
-**First person is the default view.** The camera button cycles
-**First person → Close → Mid → Full map**, and Settings has a Camera dropdown,
-so the top-down game is still one tap away for anyone who prefers it.
+**There is one camera.** The top-down view, the camera cycle and the Settings
+dropdown that switched between them are gone.
 
-This is cheaper than it sounds, because the simulation is already 2D: a position
-and a single aim angle, which is exactly what a first-person camera needs. The
-sim never learns that first person exists. Everything below is client-side.
+| | Now |
+|---|---|
+| Camera | the chicken's eyes, at `PLAYER.eyeHeight` (1.15) plus whatever it is jumping |
+| Field of view | 1.15 rad |
+| Look | yaw **and pitch**, clamped to `PLAYER.pitchMin`..`pitchMax` |
+| Movement | facing-relative: W forward, A/D strafe |
+| Aim (desktop) | mouse look under pointer lock |
+| Aim (touch) | swipe anywhere on the right half of the screen |
+| Fire (touch) | a dedicated, **repositionable** button |
+| Jump (touch) | a second one, next to it |
+| Aim assist | on, applied client-side to your own look angles |
+| Extras | centre crosshair, minimap, world markers, recoil kick |
 
-| | Top-down | First person |
-|---|---|---|
-| Camera | 22 units up, fixed dimetric tilt | at the chicken's eye height, 1.15 |
-| Field of view | 0.8 rad | 1.15 rad |
-| Look | — | yaw **and pitch**, clamped to -0.95..+0.42 rad |
-| Movement | world-space, W is north | facing-relative, W forward and A/D strafe |
-| Aim (desktop) | mouse position on the ground | mouse look under pointer lock |
-| Aim (touch) | right stick, absolute | **swipe anywhere on the right half** |
-| Fire (touch) | holding the right stick | a dedicated, **repositionable** button |
-| Aim assist | on | **off** |
-| Extras | none | crosshair, minimap, recoil kick |
+### The simulation has a Y axis
+
+It did not, for a long time. Players were 2D circles, bullets travelled flat at
+chest height, and `p.aim` was one yaw angle. Pitch existed only as a camera
+effect, which is exactly why two separate player reports — *"the crosshair only
+moves left and right, I want to shoot anywhere"* and *"ability to jump"* — were
+the same underlying change.
+
+What the simulation gained:
+
+| | |
+|---|---|
+| `p.y`, `p.vy` | height and vertical velocity, on every player |
+| `p.pitch` | vertical look, sanitised in `applyInput` like every other field |
+| `input.jump` | level-triggered: holding it hops again on landing, never mid-air |
+| Bullets | `y` and `vy`; they stop at the floor, and clear the walls if fired steeply enough |
+| Hit detection | `segHitsCapsule` — the swept segment against a capsule the size of the chicken |
+
+The two numbers that hold it together, both in `shared/src/constants.js`:
+
+- **`PLAYER.maxJumpHeight` (1.25)** is a hard clamp on position, not a tuned
+  impulse. The walls are 2.6 tall and eye height is 1.15, so anything much above
+  1.4 lets you see over the top into the void the arena floats above. Clamping
+  the position means LOW GRAVITY, a blast, or some future launcher pad cannot
+  quietly reintroduce that. A normal jump apexes at 1.11 and never touches it.
+- **`PLAYER.hitHeight` (1.8)** makes the hitbox the chicken you can see instead
+  of a pillar reaching to the ceiling. `radius` still does all the horizontal
+  work, so a duel on flat ground plays exactly as it did — but a shot that
+  visibly sails over someone now misses, and one aimed down at a target below
+  you lands.
+
+**Knockback stays flat.** A hit may shove you across the floor — that is what it
+is for — but nothing except your own jump lifts you, because being airborne is
+the one state you cannot steer your way out of. It is the same principle as
+`PLAYER.maxKnockback` below: a hit can move you, it must never take the wheel.
+`test:control` checks it for every modifier.
+
+**Objective proximity stays 2D on purpose.** Nests, loose eggs, the hill zone,
+the potato pass radius and bomb planting all still use `dist2` on the ground
+plane. Failing to bank an egg because you happened to be mid-jump would be
+maddening, and it is not what anybody asked for.
 
 ### Why the touch scheme changed
 
@@ -382,62 +436,101 @@ that proportionality, because it is the whole point of the change.
 
 Three consequences follow from it:
 
-- **Fire moved to its own button.** The look surface is a drag target now, so it
-  cannot double as a fire trigger. The button sits above the look surface in
-  z-order and both are tracked by `pointerId`, so holding fire with one thumb
-  while swiping to look with the other works — which is how the game is
-  actually played.
-- **The fire button can be dragged.** Thumb reach varies enormously by hand and
-  phone size. Settings, *Move the fire button* enables drag mode; the position is
-  stored as viewport fractions so it survives rotation and a change of device.
+- **Fire moved to its own button — sitting on top of the look surface.** Both
+  are tracked by `pointerId`, so holding fire with one thumb while swiping to
+  look with the other works. More importantly, a press belongs to the *finger*,
+  not to the circle: once you are down on FIRE you keep firing wherever that
+  thumb travels, and dragging it calls the same `applyLook` the look surface
+  does. Press, keep shooting, track a moving target, never lift.
+
+  This was a player report in its own right. The first version released the
+  trigger the moment the thumb crossed the button's visual edge, so following
+  someone meant lift, swipe, press again — three actions against a target that
+  had already moved, and it read as the gun jamming rather than as a UI
+  boundary. `test:fps-touch` drags 150px off a 70px button and asserts both that
+  it never stops firing and that it turns at *exactly* the look surface's rate
+  per pixel, because "almost the same" is a different control wearing a
+  disguise.
+
+  Move and release are listened for on `window`, filtered by `pointerId`, rather
+  than relying on `setPointerCapture` — capture throws on a pointer the browser
+  has already cancelled, and whether you keep firing must not depend on whether
+  a best-effort optimisation happened to work.
+- **Both buttons can be dragged.** Thumb reach varies enormously by hand and
+  phone size. Settings, *Move the touch buttons* enables drag mode; positions are
+  stored as viewport fractions so they survive rotation and a change of device.
   Editing sits behind an explicit toggle rather than a long-press, because a
-  long-press on a fire button is just... firing.
-- **Vertical look exists.** Previously the view only turned left and right,
-  which is what "we only move left and right" meant. Pitch is damped relative to
-  yaw (`FP_PITCH_RATIO`), because everything worth shooting stands on the ground
-  — pitch is for looking, not aiming, and a twitchy vertical axis only makes the
-  horizon seasick.
+  long-press on a fire button is just... firing. FIRE and JUMP share one
+  `HoldButton` class — two near-identical buttons is how two buttons quietly
+  stop behaving the same.
+- **Vertical look is a real axis.** It was damped to 0.65 of the horizontal on
+  the grounds that pitch was for looking rather than aiming. That stopped being
+  true when pitch reached the simulation: damping it now is damping your aim, so
+  `FP_PITCH_RATIO` is 0.9. Not 1.0 — a screen is wider than it is tall, so a
+  thumb has less vertical travel to spend.
 
 ### The crosshair tells the truth
 
-Shots travel along the yaw at chest height; pitch does not tilt them, because
-the simulation is flat. A reticle nailed to the centre of the screen would
-therefore start lying the moment the view tilted.
+It is a dot in the middle of the screen, and that got *simpler* rather than
+harder when aim went 3D.
 
-Instead the crosshair is drawn at the **projected world position** of the aim
-point, 16 units down the firing line. Level, it sits near the centre; tilted, it
-moves to wherever the shot will actually be. With aim assist deliberately off in
-first person, that honesty is the entire contract with the player.
+It used to be projected to the world position 16 units down the firing line,
+specifically because shots travelled flat at chest height whatever the view was
+doing — a reticle at screen centre would have been pointing at one thing while
+the bullet went to another. `fire()` now builds the bullet from the same yaw and
+pitch the camera looks down, so screen centre **is** the aim point by
+construction, and the projection had nothing left to correct for. Deleted rather
+than extended.
 
 ### Other first-person notes
 
-**Aim assist is off.** The camera renders your *local* yaw so looking around is
-instant rather than a network round-trip, while assist would be quietly steering
-the server's aim somewhere else. `p.input.fp` carries this to the simulation.
+**Aim assist runs on this side of the wire.** The camera renders your *local*
+yaw so looking around is instant rather than a network round-trip; a server
+applying assist to the angle it received would steer the shot somewhere the
+crosshair is not. The client shapes its own input before sending, and the server
+adds nothing of its own — `test:combat` asserts that the angle fired is exactly
+the angle sent.
 
 **Your own effects are suppressed.** Your gun goes off roughly where your
-eyeballs are, so the muzzle flash (a 0.9-unit glowing sphere) and the tracer (a
-3.2-unit stretched box) both rendered *inside* the camera — a full-screen white
-flash on every shot. The flash is now skipped for your own shots, your tracer
-starts 3.2 units ahead, and a small recoil kick replaces them. It reads as
-"I fired" better than the flash did anyway.
+eyeballs are, so the muzzle flash (a 0.9-unit glowing sphere) and the tracer
+both rendered *inside* the camera — a full-screen white flash on every shot. The
+flash is now skipped for your own shots, your tracer starts 3.2 units ahead, and
+a small recoil kick replaces them. It reads as "I fired" better than the flash
+did anyway.
+
+**The tracer's size and the bullet's size are different numbers.**
+`BULLET.radius` (0.22) is the collision radius, added to the chicken's own in
+the swept hit test; `BULLET.tracerRadius` (0.12) is what you see. They used to
+be the same value, which meant the only way to answer "the bullets look too fat"
+was to make every shot in the game harder to land. Restyle the streak with
+`tracerRadius` and `tracerLength`; change how forgiving the game is with
+`radius`.
 
 **The minimap is not decoration.** Losing the overview is the real cost of first
 person in a four-player arena — you can no longer see who is behind you, or
 which corner the bomber came from — so it draws players, the bomber, pickups,
 nests, the hill zone and the bomb, rotated so your facing is always up.
 
-**Dying** lifts the camera 6 units and tilts it down, because there is nothing
-to look through once you are dead.
+**Dying** lifts the camera into a slow orbit above where you fell, framing your
+killer if they are still up. With no top-down view left in the game, this is the
+only overhead anyone gets, so it does real work rather than just parking the
+camera.
 
 **On desktop, pointer lock hides the cursor**, which makes every HUD button
 unclickable until Esc gives it back. That is correct FPS behaviour and totally
 baffling unannounced, so the game says "ESC TO FREE THE CURSOR" the first time
 it captures the pointer.
 
-## Graphics settings
+## Settings
 
-Under **Graphics** on the menu, aimed at older phones:
+The menu panel is called **Settings**, not Graphics — it holds feel controls as
+well, and nobody looking for a sensitivity slider opens a menu called
+"Graphics". The module, the storage key and the element ids are all still `gfx`
+on purpose: renaming them would silently reset the saved settings of everyone
+who already has some.
+
+Performance, aimed at older phones. These apply to your **next match**, because
+the renderer is built at match start:
 
 - **Resolution** — Full down to 50%. The biggest single win; the engine
   otherwise renders at up to 1.5× device pixel ratio.
@@ -445,7 +538,19 @@ Under **Graphics** on the menu, aimed at older phones:
   routinely 30–50% of frame time on budget GPUs.
 - **Antialiasing** — MSAA, meaningful cost on mobile.
 
-These apply to your next match, because the renderer is built at match start.
+Feel, all of which apply **immediately** — the only way to judge any of them is
+to play with them running:
+
+- **Look sensitivity** — 0.25× to 2×, over the tuned base rates in
+  `controls.js`. One multiplier for both mouse and touch: they already sit at
+  different base rates for good reasons, and what a player is adjusting is
+  "faster or slower than this game's normal", not the relationship between the
+  two devices. Every look delta in the game goes through one `applyLook` call,
+  so the setting cannot apply to some inputs and not others. It updates on
+  `input` (so dragging the slider turns the view as you drag) and saves on
+  `change` (one settled value in storage, not forty).
+- **Aim assist** — see above.
+- **Move the touch buttons** — drag mode for FIRE and JUMP.
 
 Some optimisations are unconditional: each chicken is merged into a **single
 mesh** with part colours baked into vertex colours (four players plus the bomber
@@ -524,18 +629,17 @@ npm install -D playwright && npx playwright install chromium
 | `smoke` | Two real clients: state sync, input acks, chat rate-limiting, **match clock drift** |
 | `test:seats` | Seat allocation and bot eviction when a human joins |
 | `test:rooms` | Room-code isolation — a stranger must not reach a private match |
-| `test:mobile` | iPhone SE landscape: zoom suppression, HUD sizing, camera views, rotate prompt, results scrolling |
+| `test:mobile` | iPhone SE landscape: zoom suppression, HUD sizing, rotate prompt, results scrolling |
 | `test:private` | Two real browsers: host creates a code, friend joins with it, stranger cannot |
-| `test:touch` | Emulated phone in landscape, both joysticks dragged with real touch events |
-| `test:camera` | Alive / dead / respawn framing, and centring at dpr 1.5 |
 | `test:nameplates` | HUD-to-mesh alignment, measured in pixels |
 | `test:audio` | Context unlock, cue routing, fuse cadence, mute and volume persistence |
 | `test:perf` | Draw-call and material counts, thin instances, graphics settings |
 | `test:stats` | Server status panel and the in-game network readout |
 | `test:tasks` | Both new modes end-to-end in a browser: nests and eggs render, the bomb is pickable, the contract strip names and counts its task, the zone marker follows a relocation |
-| `test:control` | **Knockback can never take the wheel** — see below — plus movement symmetry on every map and in every mode |
-| `test:fps` | First person on desktop: camera at eye level and on the player, own body hidden, facing-relative movement, mouse look in both axes, crosshair, minimap, and everything restored on the way out |
-| `test:fps-touch` | First person on an emulated phone: swipe-to-look **proportionality**, pitch and its clamp, the fire button, firing and looking with two thumbs at once, and dragging the fire button to a new home |
+| `test:control` | **Knockback can never take the wheel** — see below — plus movement symmetry on every map and in every mode, and the vertical axis: jump arcs, the height ceiling, air control, and that nothing but your own jump can lift you |
+| `test:combat` | Aim assist in both axes, all three ammo types, and shooting in 3D — over a target, onto a jumping one, down out of a jump, into the floor, over a wall |
+| `test:controls` | First person on desktop: camera at eye level and on the player, own body hidden, facing-relative movement, mouse look in both axes, `Space` jumps and `F` fires, the centre crosshair, world markers and the spectator orbit |
+| `test:fps-touch` | First person on an emulated phone: swipe-to-look **proportionality**, pitch and its clamp, FIRE and JUMP, jumping and firing and looking with three thumbs at once, and dragging both buttons to new homes |
 | `test:retention` | Killed-by panel, the nemesis ring, the auto-requeue countdown and its cancellation |
 
 ### The knockback bug, and why `test:control` exists
@@ -571,9 +675,11 @@ inside a test window, and the path worth proving in a browser is the player's
 own — touch it, and the HUD has to say so. The rules themselves are covered
 deterministically in `shared/test/tasks.mjs`.
 
-`test:touch` is not optional cover. Every other browser test drives WASD and the
-mouse, which never touches nipplejs — a change in its listener signature once
-broke both joysticks completely while the whole suite stayed green.
+`test:fps-touch` is not optional cover. Every other browser test drives WASD and
+the mouse, which never touches nipplejs — a change in its listener signature once
+broke the movement stick completely while the whole suite stayed green. It is
+also the only test that dispatches real multi-touch, which is the one thing the
+FIRE and JUMP buttons genuinely depend on.
 
 Two things worth knowing before adding tests here, both learned the hard way:
 
@@ -827,10 +933,13 @@ bugs. Don't "clean them up" without checking:
   buffer.** On a jittery connection that shows as rubber-banding, and at low
   framerates the factor clamps to 1 and it snaps. Proper snapshot interpolation
   (buffer two states, render ~100ms behind) is the fix and costs nothing on the GPU.
-- First person gives up a lot of what makes the top-down view work: you cannot
-  see the bomber creeping up behind you, and reading a four-way fight is much
-  harder. The minimap covers some of that, not all of it. It is offered as a
-  choice for players who want it, and the top-down view remains the default.
+- First person gives up a lot of what the old top-down view did for free: you
+  cannot see the bomber creeping up behind you, and reading a four-way fight is
+  much harder. The minimap and the off-screen world markers cover some of that,
+  not all of it. There is no top-down view to fall back to any more.
+- Jumping is movement, not tactics. There is nothing to jump *onto* — the arenas
+  are flat — so it dodges, it looks alive, and that is all. Cover would change
+  that, and cover needs bot obstacle avoidance in the same change.
 - Under a very slow renderer the offline practice sim runs slower than real time,
   because per-frame delta is clamped. That's the right trade — better than
   fast-forwarding the match — and online play is unaffected; the server owns the clock.

@@ -3,7 +3,8 @@
 // Measures the gap between where each nameplate is drawn and where its chicken
 // actually renders. Plates are HTML positioned by projecting a world point, so
 // they drift if they project the raw server position instead of the rendered
-// (predicted / interpolated) one.
+// (predicted / interpolated) one — in any of the three axes, height included
+// since chickens started jumping.
 //
 //   npm run dev:client
 //   node client/test/nameplates.mjs
@@ -42,7 +43,23 @@ await page.fill('#name-input', 'Beaky');
 // this test measures cannot appear. Prediction vs server state is the real case.
 await page.click(process.env.PLAY_MODE === 'practice' ? '#practice-btn' : '#play-btn');
 await passLobby(page);
-await page.waitForTimeout(process.env.PLAY_MODE === 'practice' ? 3500 : 12000);
+
+// Wait on the CONDITION, not the clock. This used to be a flat 12-second sleep
+// and it intermittently measured a match that had not started yet — reported as
+// "0 plates", which reads like a rendering bug and is really a stopwatch. Under
+// SwiftShader the render loop runs at two or three frames a second, so how long
+// a match takes to put a plate on screen is not a number worth guessing at.
+{
+  const deadline = Date.now() + 40000;
+  while (Date.now() < deadline) {
+    const ready = await page.evaluate(() => (
+      window.__cluckdown?.session?.phase === 'live'
+      && [...document.querySelectorAll('.nameplate')].some((el) => el.style.display !== 'none')
+    ));
+    if (ready) break;
+    await page.waitForTimeout(200);
+  }
+}
 
 // Drive the player so prediction/interpolation error is actually non-zero —
 // a stationary chicken would hide the bug this test exists to catch.
@@ -65,8 +82,13 @@ const measure = () => page.evaluate(() => {
     const view = game.views.get(player.id);
     if (!view) continue;
 
-    const rendered = game.projectFn(view.x, 2.35, view.z);   // where the chicken is
-    const serverPos = game.projectFn(player.x, 2.35, player.z); // where the server says
+    // 2.35 above the chicken's own feet, not above the floor. Chickens leave
+    // the ground now, and a plate pinned to a fixed world height hangs in the
+    // air below whoever is mid-jump — which is precisely the class of drift
+    // this test exists to catch, just on the axis it did not used to have.
+    const vy = view.y ?? 0;
+    const rendered = game.projectFn(view.x, vy + 2.35, view.z);   // where the chicken is
+    const serverPos = game.projectFn(player.x, (player.y ?? 0) + 2.35, player.z); // where the server says
     if (!rendered) continue;
 
     out.push({

@@ -1,4 +1,5 @@
-// Control-authority test.
+// Control-authority test — horizontal and, since the simulation grew a Y axis,
+// vertical.
 //
 // Knockback is ADDED to your movement velocity, so an uncapped shove means the
 // player stops being able to steer. A three-shot burst under LOW GRAVITY used
@@ -8,11 +9,18 @@
 // That is what "sliding left, hard to go right" was: you were being shot from
 // the right, and the game had taken the wheel.
 //
+// The vertical half of this file exists for the same reason. Being in the air
+// is the one state you cannot steer your way out of, so the rules are: only
+// your own jump can lift you, nothing can lift you higher than the walls are
+// tall, and you keep full control of where you are going while you are up
+// there. Every check below is one of those three sentences.
+//
 //   node shared/test/control.mjs
 
 import {
   createWorld, addPlayer, stepWorld, beginMatch,
   TICK_DT, PLAYER, BULLET, BOMBER, MODIFIER_POOL, MAPS, MODE_LIST, modValue,
+  applyInput, GRAVITY, WALL_HEIGHT,
 } from '../src/index.js';
 
 const failures = [];
@@ -159,6 +167,189 @@ for (const modifier of MODIFIER_POOL) {
   const { travelled } = pushBack(modifier, 4);
   check(`${modifier}: a 4-shot burst still leaves you able to advance`,
     travelled > 0, `${travelled.toFixed(2)}u`);
+}
+
+// ---------------------------------------------------------------- vertical
+
+/**
+ * Steps the world and reports the arc the player traced.
+ *
+ * `input` may be an object (held for the whole run) or a function of the tick
+ * index — jump is level-triggered, so "tap once" and "hold it down" are two
+ * genuinely different inputs and both need testing.
+ */
+function hop(input, seconds = 2, modifier = 'none') {
+  const { w, p } = live('casual', modifier);
+  p.x = 0; p.z = 0; p.kx = 0; p.kz = 0;
+  const at = typeof input === 'function' ? input : () => input;
+  const trace = [];
+  for (let t = 0; t < seconds / TICK_DT; t++) {
+    p.hp = PLAYER.maxHp;
+    applyInput(w, 'a', { seq: t, ...at(t) });
+    stepWorld(w, TICK_DT);
+    trace.push({ y: p.y, vy: p.vy, x: p.x, z: p.z, t: w.time });
+  }
+  const apex = Math.max(...trace.map((s) => s.y));
+  return { w, p, trace, apex };
+}
+
+/** One tap of the jump button, on the first tick only. */
+const tapJump = (extra = {}) => (t) => ({ mx: 0, mz: 0, ...extra, jump: t === 0 });
+
+console.log('\n--- jumping ---');
+{
+  const still = hop({ mx: 0, mz: 0, jump: false }, 1);
+  check('standing still leaves you on the floor', still.apex === 0, `apex ${still.apex}`);
+
+  const up = hop(tapJump(), 1.2);
+  console.log(`  a jump peaks at ${up.apex.toFixed(2)}u after ${(up.trace.findIndex((s) => s.y === up.apex) * TICK_DT).toFixed(2)}s`);
+  check('jumping actually leaves the ground', up.apex > 0.5, `${up.apex.toFixed(2)}u`);
+  check('...and gravity brings you back down',
+    up.trace[up.trace.length - 1].y === 0, `${up.trace[up.trace.length - 1].y.toFixed(3)}u`);
+
+  // The whole reason maxJumpHeight is a hard clamp rather than a tuned impulse.
+  // Eye height plus the apex has to stay under the wall, or you are looking at
+  // the void the arena floats above.
+  const eyeAtApex = PLAYER.eyeHeight + up.apex;
+  console.log(`  eye at apex: ${eyeAtApex.toFixed(2)}u vs ${WALL_HEIGHT}u walls`);
+  check('you never see over the walls at the top of a jump',
+    eyeAtApex < WALL_HEIGHT, `${eyeAtApex.toFixed(2)} vs ${WALL_HEIGHT}`);
+  check('the ceiling is respected exactly', up.apex <= PLAYER.maxJumpHeight + 1e-9,
+    `${up.apex.toFixed(3)} vs cap ${PLAYER.maxJumpHeight}`);
+}
+
+// Holding the button is a bunny hop, not a jetpack: you may leave the ground
+// again on landing, but never while already rising.
+{
+  const held = hop({ mx: 0, mz: 0, jump: true }, 3);
+  const landings = held.trace.filter((s, i) => i > 0 && s.y === 0 && held.trace[i - 1].y > 0).length;
+  // A boost is velocity INCREASING while both ends of the step are off the
+  // floor. Without the second half of that condition, the landing tick itself
+  // reads as a boost — vy goes from very negative to zero as you hit the
+  // ground — and the check passes or fails for entirely the wrong reason.
+  const climbs = held.trace.filter((s, i) => (
+    i > 0 && s.vy > held.trace[i - 1].vy + 1e-6 && held.trace[i - 1].y > 0 && s.y > 0
+  )).length;
+  console.log(`  holding jump for 3s: ${landings} landing(s), ${climbs} mid-air boost(s)`);
+  check('holding jump hops again once you are back down', landings >= 2, `${landings}`);
+  check('...but never gives you a second jump in mid-air', climbs === 0, `${climbs}`);
+}
+
+// LOW GRAVITY finally means what it says — and still cannot lift you over a wall.
+console.log('\n--- low gravity floats, it does not launch ---');
+{
+  const normal = hop({ mx: 0, mz: 0, jump: false }, 1.5);
+  const light = hop({ mx: 0, mz: 0, jump: false }, 1.5, 'lowGravity');
+  // Drop both from the ceiling and time the fall.
+  const fall = (modifier) => {
+    const { w, p } = live('casual', modifier);
+    p.y = PLAYER.maxJumpHeight;
+    p.vy = 0;
+    let t = 0;
+    for (; t < 4 / TICK_DT && p.y > 0; t++) {
+      p.hp = PLAYER.maxHp;
+      applyInput(w, 'a', { mx: 0, mz: 0, jump: false, seq: t });
+      stepWorld(w, TICK_DT);
+    }
+    return t * TICK_DT;
+  };
+  const fastFall = fall('none');
+  const slowFall = fall('lowGravity');
+  console.log(`  falling ${PLAYER.maxJumpHeight}u takes ${fastFall.toFixed(2)}s normally, ${slowFall.toFixed(2)}s in low gravity`);
+  check('low gravity really does make you fall slower', slowFall > fastFall * 1.2,
+    `${fastFall.toFixed(2)}s -> ${slowFall.toFixed(2)}s`);
+
+  const floaty = hop(tapJump(), 3, 'lowGravity');
+  console.log(`  low-gravity jump peaks at ${floaty.apex.toFixed(2)}u`);
+  check('low gravity buys hang time, not altitude',
+    floaty.apex <= PLAYER.maxJumpHeight + 1e-9,
+    `${floaty.apex.toFixed(3)} vs cap ${PLAYER.maxJumpHeight}`);
+  check('...so the walls still hide the void in every modifier',
+    PLAYER.eyeHeight + floaty.apex < WALL_HEIGHT,
+    `${(PLAYER.eyeHeight + floaty.apex).toFixed(2)}`);
+  void normal; void light;
+}
+
+// Being airborne must not cost you the controls — the vertical restatement of
+// the whole point of this file.
+console.log('\n--- you still steer while you are in the air ---');
+{
+  const ground = hop({ mx: 1, mz: 0, jump: false }, 0.5);
+  const air = hop(tapJump({ mx: 1 }), 0.5);
+  console.log(`  0.5s of running: ${ground.p.x.toFixed(2)}u on the floor, ${air.p.x.toFixed(2)}u mid-jump`);
+  check('a jump does not slow you down', Math.abs(air.p.x - ground.p.x) < 1e-6,
+    `${ground.p.x.toFixed(3)} vs ${air.p.x.toFixed(3)}`);
+  check('...and you are genuinely off the ground for it', air.apex > 0.5, `${air.apex.toFixed(2)}u`);
+
+  // Change your mind in mid-air and the sim obeys immediately.
+  const { w, p } = live();
+  p.x = 0; p.z = 0;
+  // Both halves have to fit inside one ~0.64s hop, or the reversal is measured
+  // with both feet back on the floor and proves nothing.
+  for (let t = 0; t < 0.2 / TICK_DT; t++) {
+    p.hp = PLAYER.maxHp;
+    applyInput(w, 'a', { mx: 1, mz: 0, jump: t === 0, seq: t });
+    stepWorld(w, TICK_DT);
+  }
+  const turnAt = p.x;
+  for (let t = 0; t < 0.2 / TICK_DT; t++) {
+    p.hp = PLAYER.maxHp;
+    applyInput(w, 'a', { mx: -1, mz: 0, jump: false, seq: 100 + t });
+    stepWorld(w, TICK_DT);
+  }
+  console.log(`  reversed in mid-air (y=${p.y.toFixed(2)}): ${turnAt.toFixed(2)}u -> ${p.x.toFixed(2)}u`);
+  check('you can reverse direction in mid-air', p.y > 0 && p.x < turnAt,
+    `y=${p.y.toFixed(2)} x ${turnAt.toFixed(2)} -> ${p.x.toFixed(2)}`);
+}
+
+// Nothing but your own jump lifts you. Knockback is horizontal by construction,
+// and this is the check that keeps it that way — a blast that launched people
+// would be the vertical version of "sliding left, can't go right".
+console.log('\n--- being hit must never launch you ---');
+for (const modifier of MODIFIER_POOL) {
+  const { w, p } = live('casual', modifier);
+  p.x = 0; p.z = 0;
+  p.kx = 999; p.kz = 999; // an absurd shove from every direction at once
+  let highest = 0;
+  for (let t = 0; t < 1 / TICK_DT; t++) {
+    p.hp = PLAYER.maxHp;
+    applyInput(w, 'a', { mx: 0, mz: 0, jump: false, seq: t });
+    stepWorld(w, TICK_DT);
+    highest = Math.max(highest, p.y);
+  }
+  check(`${modifier}: an absurd shove never lifts you off the floor`, highest === 0,
+    `${highest.toFixed(3)}u`);
+}
+
+// Gravity itself has to be symmetric with the impulse, or the arc is lopsided.
+console.log('\n--- the arc is an arc ---');
+{
+  const up = hop({ mx: 0, mz: 0, jump: true }, 1.5);
+  const apexAt = up.trace.findIndex((s) => s.y === up.apex);
+  const landedAt = up.trace.findIndex((s, i) => i > apexAt && s.y === 0);
+  const rise = apexAt * TICK_DT;
+  const fall = (landedAt - apexAt) * TICK_DT;
+  console.log(`  rise ${rise.toFixed(3)}s, fall ${fall.toFixed(3)}s (gravity ${GRAVITY})`);
+  check('going up takes about as long as coming down', Math.abs(rise - fall) < 0.05,
+    `${rise.toFixed(3)}s vs ${fall.toFixed(3)}s`);
+}
+
+// Pitch is input, and input is never trusted.
+console.log('\n--- the server clamps the look angle it is sent ---');
+{
+  const { w, p } = live();
+  for (const [label, sent] of [['straight down', -99], ['straight up', 99], ['garbage', NaN]]) {
+    applyInput(w, 'a', { mx: 0, mz: 0, pitch: sent, seq: 1 });
+    stepWorld(w, TICK_DT);
+    check(`${label} (${sent}) is clamped into range`,
+      p.pitch >= PLAYER.pitchMin - 1e-9 && p.pitch <= PLAYER.pitchMax + 1e-9,
+      `${p.pitch.toFixed(3)}`);
+  }
+  // A sane angle passes through untouched — the clamp must not also be a filter.
+  applyInput(w, 'a', { mx: 0, mz: 0, pitch: 0.4, seq: 2 });
+  stepWorld(w, TICK_DT);
+  check('a legal angle arrives exactly as sent', Math.abs(p.pitch - 0.4) < 1e-9,
+    `${p.pitch.toFixed(6)}`);
 }
 
 console.log(failures.length ? `\n✗ ${failures.length} check(s) failed\n` : '\n✓ all checks passed\n');

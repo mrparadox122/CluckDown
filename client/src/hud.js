@@ -308,19 +308,19 @@ export class Hud {
   }
 
   /**
-   * Moves the reticle to where the shot will actually land.
+   * Shows or hides the reticle. That is the whole job now.
    *
-   * Pitch is a look control, not an aim one — everything in this game stands on
-   * the ground plane — so a reticle nailed to screen centre starts lying the
-   * moment the view tilts. This takes the projected aim point instead, which
-   * stays truthful at any pitch. Passing null hides it, which is what happens
-   * while you are dead.
+   * It used to be projected into screen space every frame, because the shot
+   * ignored pitch and left along the yaw at chest height — a reticle at screen
+   * centre would have been pointing somewhere the bullet was never going. Aim
+   * is genuinely 3D now and fire() builds the bullet from the same yaw and
+   * pitch the camera looks down, so screen centre is the aim point by
+   * construction and the CSS can simply park it there.
+   *
+   * Hidden while dead, where there is nothing to aim.
    */
-  setCrosshairAt(pt) {
-    const el = $('crosshair');
-    if (!pt) { el.style.opacity = '0'; return; }
-    el.style.opacity = '1';
-    el.style.transform = `translate(${pt.x}px, ${pt.y}px) translate(-50%, -50%)`;
+  setCrosshair(visible) {
+    $('crosshair').style.opacity = visible ? '1' : '0';
   }
 
   /**
@@ -676,7 +676,10 @@ export class Hud {
       const view = getView?.(p.id);
       const wx = view ? view.x : p.x;
       const wz = view ? view.z : p.z;
-      const pos = projectFn(wx, 2.35, wz);
+      // Rides up with a jumping chicken, or the plate stays pinned at head
+      // height over an empty patch of floor while its owner is in the air.
+      const wy = view ? (view.y ?? 0) : (p.y ?? 0);
+      const pos = projectFn(wx, wy + 2.35, wz);
       // projectFn returns null only for points behind the camera. A player off
       // the side of the screen still projects to a valid coordinate, so the
       // plate would be positioned outside the viewport and merely clipped by

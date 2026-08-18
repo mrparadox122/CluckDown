@@ -7,8 +7,21 @@
 // surface instead, because a swipe is a positional mapping — you move your
 // thumb by the amount you want to turn.
 //
-// This proves the new scheme: swipe to look, a separate fire button, both
-// thumbs usable at once, and pitch that actually exists.
+// This proves the new scheme: swipe to look, separate FIRE and JUMP buttons,
+// both thumbs usable at once, and pitch that actually exists — and now reaches
+// the simulation, so a swipe up genuinely raises where the bullet goes.
+//
+// The section that matters most is "fire and aim in one gesture". Players
+// reported the fire button pinning their thumb: sliding a few pixels off it
+// stopped the gun, so tracking a moving target meant lifting off, swiping, and
+// pressing again — by which point the target has gone. A press now belongs to
+// the finger rather than to the circle, and dragging it turns the view through
+// the same call the look surface uses.
+//
+// Jump is a button rather than a gesture for the same reason fire is. Every
+// touch here is tracked by pointerId; a double-tap or a swipe-up would have to
+// share the look surface with looking, and the two are indistinguishable until
+// it is too late to do either well.
 //
 //   npm run dev:client
 //   node client/test/fps-touch.mjs
@@ -94,17 +107,26 @@ const surfaces = await page.evaluate(() => {
   };
   const at = (x, y) => document.elementFromPoint(x, y)?.id ?? 'none';
   const fire = document.getElementById('fire-btn').getBoundingClientRect();
+  const jump = document.getElementById('jump-btn').getBoundingClientRect();
+  const hit = (r, id) => document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2)
+    ?.closest(`#${id}`)?.id ?? 'none';
   return {
     look: vis('look-zone'),
     fire: vis('fire-btn'),
+    jump: vis('jump-btn'),
     // The aim stick element is gone from the document entirely now.
     noAimStick: !document.getElementById('stick-right'),
     leftStickTop: at(110, 300),
     lookTop: at(600, 300),
-    // closest(), because the button has a <span> label inside it that is
+    // closest(), because each button has a <span> label inside it that is
     // what elementFromPoint actually returns.
-    fireCentre: document.elementFromPoint(fire.left + fire.width / 2, fire.top + fire.height / 2)
-      ?.closest('#fire-btn')?.id ?? 'none',
+    fireCentre: hit(fire, 'fire-btn'),
+    jumpCentre: hit(jump, 'jump-btn'),
+    // Two buttons under one thumb is worse than one, so they must not overlap.
+    overlap: !(jump.right < fire.left || jump.left > fire.right
+      || jump.bottom < fire.top || jump.top > fire.bottom),
+    onScreen: jump.left >= 0 && jump.right <= window.innerWidth
+      && jump.top >= 0 && jump.bottom <= window.innerHeight,
   };
 });
 console.log('  ', JSON.stringify(surfaces));
@@ -116,6 +138,11 @@ check('the movement stick still owns the left thumb', surfaces.leftStickTop === 
 check('the look surface receives the right thumb', surfaces.lookTop === 'look-zone', surfaces.lookTop);
 check('the fire button sits above the look surface', surfaces.fireCentre === 'fire-btn',
   surfaces.fireCentre);
+check('the jump button exists', surfaces.jump);
+check('...and it too sits above the look surface', surfaces.jumpCentre === 'jump-btn',
+  surfaces.jumpCentre);
+check('the two buttons do not overlap', !surfaces.overlap);
+check('the jump button is fully on screen in landscape', surfaces.onScreen);
 
 // --- swiping turns you, proportionally ------------------------------------
 console.log('\n--- swipe to look ---');
@@ -214,15 +241,24 @@ const low = await until(page, () => {
   return p > -90 ? +p.toFixed(2) : null;
 }, 12000);
 console.log('  clamped to:', JSON.stringify({ high, low }));
-check('pitch is clamped both ways', high !== null && low !== null && high < 1 && low > -2,
+// The limits are PLAYER.pitchMin/pitchMax now, not a renderer constant — the
+// server clamps incoming pitch to the same two numbers, because pitch is half
+// of where the shot goes. Up used to stop at 0.42 on the grounds that there was
+// nothing above the arena worth seeing; that ceiling is most of what "the
+// crosshair only moves left and right" felt like, so it is generous now, and
+// this checks it is generous rather than absent.
+check('pitch is clamped both ways', high !== null && low !== null && high < 1.6 && low > -1.6,
+  JSON.stringify({ high, low }));
+check('...but far enough to aim up and down properly', high > 0.9 && low < -0.9,
   JSON.stringify({ high, low }));
 
 // --- fire button, and both thumbs at once ---------------------------------
-console.log('\n--- fire ---');
 const fireRect = await page.evaluate(() => {
   const r = document.getElementById('fire-btn').getBoundingClientRect();
   return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
 });
+
+console.log('\n--- fire ---');
 
 await cdp.send('Input.dispatchTouchEvent', {
   type: 'touchStart', touchPoints: [{ x: fireRect.x, y: fireRect.y, id: 7 }],
@@ -231,7 +267,7 @@ await cdp.send('Input.dispatchTouchEvent', {
 // frame — a couple per second here. Poll rather than sleep.
 const firing = await until(page, () => {
   const c = window.__cluckdown.game.controls;
-  return c.input.shoot ? { shoot: c.input.shoot, touchFiring: c.touchFiring } : null;
+  return c.input.shoot ? { shoot: c.input.shoot, held: c.fire.held } : null;
 }, 12000);
 check('holding the fire button shoots', firing?.shoot === true, JSON.stringify(firing));
 
@@ -269,6 +305,194 @@ const released = await until(page, () => {
 }, 12000);
 check('releasing stops firing', released === 'stopped', String(released));
 
+// --- fire and aim in ONE gesture ------------------------------------------
+console.log('\n--- hold fire and drag to aim ---');
+
+/**
+ * Presses the fire button, drags that ONE finger across the screen, and reports
+ * whether the gun kept firing the whole way.
+ *
+ * The drag deliberately ends far outside the button. That is the case that used
+ * to break: the visual boundary is not the hitbox once a press has started.
+ */
+async function fireAndDrag(dx, dy, id = 21) {
+  const before = await page.evaluate(() => {
+    const c = window.__cluckdown.game.controls;
+    return { yaw: c.yaw, pitch: c.pitch };
+  });
+  await cdp.send('Input.dispatchTouchEvent', {
+    type: 'touchStart', touchPoints: [{ x: fireRect.x, y: fireRect.y, id }],
+  });
+  // Poll for a rendered frame that saw the press, rather than assuming one
+  // happened: under SwiftShader sample() runs two or three times a second.
+  const pressed = await until(page, () => (
+    window.__cluckdown.game.controls.input.shoot ? true : null
+  ), 12000);
+
+  let firingThroughout = true;
+  for (let i = 1; i <= 5; i++) {
+    await cdp.send('Input.dispatchTouchEvent', {
+      type: 'touchMove',
+      touchPoints: [{ x: fireRect.x + (dx * i) / 5, y: fireRect.y + (dy * i) / 5, id }],
+    });
+    await page.waitForTimeout(50);
+    const still = await page.evaluate(() => {
+      const c = window.__cluckdown.game.controls;
+      return c.fire.held && c.input.shoot;
+    });
+    if (!still) firingThroughout = false;
+  }
+
+  const after = await page.evaluate(() => {
+    const c = window.__cluckdown.game.controls;
+    const r = document.getElementById('fire-btn').getBoundingClientRect();
+    return {
+      yaw: c.yaw,
+      pitch: c.pitch,
+      held: c.fire.held,
+      shoot: c.input.shoot,
+      litUp: document.getElementById('fire-btn').classList.contains('is-held'),
+      btn: { x: r.left + r.width / 2, y: r.top + r.height / 2, w: r.width, h: r.height },
+    };
+  });
+  await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+  await page.waitForTimeout(120);
+  return {
+    pressed: !!pressed,
+    firingThroughout,
+    dYaw: after.yaw - before.yaw,
+    dPitch: after.pitch - before.pitch,
+    ...after,
+  };
+}
+
+const dragged1 = await fireAndDrag(150, 0);
+console.log('  ', JSON.stringify({
+  pressed: dragged1.pressed,
+  firingThroughout: dragged1.firingThroughout,
+  dYaw: +dragged1.dYaw.toFixed(3),
+  endedHeld: dragged1.held,
+  litUp: dragged1.litUp,
+}));
+check('pressing FIRE shoots', dragged1.pressed);
+// 150px is well past the edge of a 74-92px button, so the finger is nowhere
+// near it by the end of the drag.
+check('dragging the finger right off the button keeps firing',
+  dragged1.firingThroughout && dragged1.held && dragged1.shoot,
+  JSON.stringify({ throughout: dragged1.firingThroughout, held: dragged1.held }));
+check('...and the drag turns the view at the same time', dragged1.dYaw > 0.1,
+  dragged1.dYaw.toFixed(3));
+check('the finger travelled well outside the button',
+  150 > dragged1.btn.w, `dragged 150px across a ${Math.round(dragged1.btn.w)}px button`);
+check('the button stays visibly pressed while the thumb is off it', dragged1.litUp === true);
+
+// Vertical too — tracking someone who jumped is the case aim assist alone
+// cannot cover, and it is the reason pitch is on this gesture at all.
+const dragged2 = await fireAndDrag(0, -110, 22);
+console.log(`  dragging up while firing: dPitch ${dragged2.dPitch.toFixed(3)}`);
+check('dragging up while firing raises the aim', dragged2.dPitch > 0.05,
+  dragged2.dPitch.toFixed(3));
+check('...and it is still firing at the top of that drag',
+  dragged2.firingThroughout && dragged2.shoot, JSON.stringify(dragged2.firingThroughout));
+
+// The drag has to feel like the look surface, because it IS the look surface.
+// Same pixels, same rotation, or the gesture is a different control that merely
+// looks like one.
+const swipeSame = await swipe(120, 0, 23);
+console.log(`  120px: ${dragged1.dYaw.toFixed(3)} rad dragging from FIRE vs ${swipeSame.dYaw.toFixed(3)} rad on the look zone (150px vs 120px)`);
+check('a drag from FIRE turns at the same rate as a swipe on the look zone',
+  Math.abs((dragged1.dYaw / 150) / (swipeSame.dYaw / 120) - 1) < 0.05,
+  `${(dragged1.dYaw / 150).toExponential(3)} vs ${(swipeSame.dYaw / 120).toExponential(3)} rad/px`);
+
+// A tap is one shot. The touch can begin and end between two rendered frames,
+// so without a latch a quick tap does nothing at all — which reads as the
+// button being unresponsive rather than as a frame-timing detail.
+console.log('\n--- a tap fires once ---');
+const tap = await page.evaluate(() => {
+  const c = window.__cluckdown.game.controls;
+  c.usingTouch = true;
+  c.fire.onUp();          // clean slate
+  c.fire.takeTap();
+  // Press and release with no sample() in between, which is what a fast tap is.
+  c.fire.onDown({ pointerId: 31, clientX: 700, clientY: 300, preventDefault() {} });
+  c.fire.onUp({ pointerId: 31 });
+  const first = c.sample(null, 1 / 60, []).shoot;   // the tap is seen
+  const second = c.sample(null, 1 / 60, []).shoot;  // ...exactly once
+  return { first, second, held: c.fire.held };
+});
+console.log('  ', JSON.stringify(tap));
+check('a tap too quick to span a frame still fires', tap.first === true, JSON.stringify(tap));
+check('...and fires exactly once, not continuously', tap.second === false, JSON.stringify(tap));
+check('a released button is not held', tap.held === false);
+
+// --- the jump button ------------------------------------------------------
+console.log('\n--- jump ---');
+const jumpRect = await page.evaluate(() => {
+  const r = document.getElementById('jump-btn').getBoundingClientRect();
+  return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+});
+
+await cdp.send('Input.dispatchTouchEvent', {
+  type: 'touchStart', touchPoints: [{ x: jumpRect.x, y: jumpRect.y, id: 9 }],
+});
+// Poll for a RENDERED frame. input.jump is only written when sample() runs,
+// which is once per frame — two or three a second under SwiftShader.
+const jumped = await until(page, () => {
+  const S = window.__cluckdown;
+  const c = S.game.controls;
+  const me = S.session.world.players.get(S.session.selfId);
+  if (me) { me.hp = 100; me.invulnUntil = S.session.world.time + 60; }
+  return c.input.jump && me && me.y > 0.4
+    ? { jump: true, y: +me.y.toFixed(3), camY: +S.game.camera.position.y.toFixed(3) }
+    : null;
+}, 15000);
+console.log('  ', JSON.stringify(jumped));
+check('holding the jump button leaves the ground', !!jumped, JSON.stringify(jumped));
+check('...and the camera goes up with the chicken', (jumped?.camY ?? 0) > (jumped?.y ?? 0),
+  JSON.stringify(jumped));
+
+// The whole reason these are two buttons and not one gesture: JUMP, FIRE and a
+// thumb swiping to look are three independent pointers.
+const beforeLook = await page.evaluate(() => window.__cluckdown.game.controls.yaw);
+await cdp.send('Input.dispatchTouchEvent', {
+  type: 'touchStart',
+  touchPoints: [
+    { x: jumpRect.x, y: jumpRect.y, id: 9 },
+    { x: fireRect.x, y: fireRect.y, id: 10 },
+    { x: 560, y: 210, id: 11 },
+  ],
+});
+await page.waitForTimeout(60);
+for (let i = 1; i <= 3; i++) {
+  await cdp.send('Input.dispatchTouchEvent', {
+    type: 'touchMove',
+    touchPoints: [
+      { x: jumpRect.x, y: jumpRect.y, id: 9 },
+      { x: fireRect.x, y: fireRect.y, id: 10 },
+      { x: 560 + i * 25, y: 210, id: 11 },
+    ],
+  });
+  await page.waitForTimeout(50);
+}
+const triple = await until(page, () => {
+  const c = window.__cluckdown.game.controls;
+  return c.input.shoot && c.input.jump ? { shoot: true, jump: true, yaw: c.yaw } : null;
+}, 12000) ?? await page.evaluate(() => {
+  const c = window.__cluckdown.game.controls;
+  return { shoot: c.input.shoot, jump: c.input.jump, yaw: c.yaw };
+});
+console.log(`  jump+fire+look together: ${JSON.stringify(triple)} (yaw was ${beforeLook.toFixed(3)})`);
+check('you can jump, fire and look all at once',
+  triple.shoot === true && triple.jump === true && Math.abs(triple.yaw - beforeLook) > 0.05,
+  JSON.stringify(triple));
+
+await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+const stopped = await until(page, () => {
+  const c = window.__cluckdown.game.controls;
+  return c.input.jump === false && c.input.shoot === false ? 'released' : null;
+}, 12000);
+check('releasing both buttons stops both', stopped === 'released', String(stopped));
+
 // --- movement is still full 360, relative to facing -----------------------
 console.log('\n--- movement ---');
 const moved = await page.evaluate(() => {
@@ -294,26 +518,89 @@ check('...and still forward after turning 90 degrees',
   Math.abs(moved.fwd[1].mx - 1) < 0.05, JSON.stringify(moved.fwd[1]));
 check('stick sideways strafes', Math.abs(moved.strafe.mx - 1) < 0.05, JSON.stringify(moved.strafe));
 
-// --- the fire button can be moved -----------------------------------------
-console.log('\n--- repositioning fire ---');
+// --- look sensitivity -----------------------------------------------------
+//
+// A thumb on a 5" phone and a mouse on a desk are not the same instrument, and
+// no single tuned constant has ever suited everyone. The setting is a
+// multiplier over the base rate, so the check is proportionality: double the
+// sensitivity, double the turn for the same swipe.
+console.log('\n--- look sensitivity ---');
+const sensitivity = await page.evaluate(() => {
+  const c = window.__cluckdown.game.controls;
+  const turn = (mul) => {
+    c.setSensitivity(mul);
+    c.yaw = 0;
+    c.pitch = 0;
+    c.applyLook(100, -100, 0.005);
+    return { yaw: c.yaw, pitch: c.pitch };
+  };
+  const base = turn(1);
+  const fast = turn(2);
+  const slow = turn(0.5);
+  // Out-of-range values must not be able to make the game unplayable.
+  c.setSensitivity(0);
+  const zero = c.sensitivity;
+  c.setSensitivity('nonsense');
+  const junk = c.sensitivity;
+  c.setSensitivity(1);
+  return { base, fast, slow, zero, junk };
+});
+console.log('  ', JSON.stringify(sensitivity));
+check('doubling sensitivity doubles the turn',
+  Math.abs(sensitivity.fast.yaw / sensitivity.base.yaw - 2) < 0.001,
+  `${(sensitivity.fast.yaw / sensitivity.base.yaw).toFixed(3)}x`);
+check('halving it halves the turn',
+  Math.abs(sensitivity.slow.yaw / sensitivity.base.yaw - 0.5) < 0.001,
+  `${(sensitivity.slow.yaw / sensitivity.base.yaw).toFixed(3)}x`);
+check('it scales pitch as well as yaw, so the two stay in proportion',
+  Math.abs(sensitivity.fast.pitch / sensitivity.base.pitch - 2) < 0.001,
+  `${(sensitivity.fast.pitch / sensitivity.base.pitch).toFixed(3)}x`);
+check('a nonsense sensitivity cannot freeze the camera',
+  sensitivity.zero > 0 && sensitivity.junk > 0,
+  JSON.stringify({ zero: sensitivity.zero, junk: sensitivity.junk }));
+
+// --- both buttons can be moved --------------------------------------------
+//
+// Thumb reach varies enormously by hand and by phone, and a fixed layout is the
+// difference between comfortable and unplayable. The jump button inherits this
+// wholesale rather than reimplementing it — which is exactly the thing worth
+// checking, because "the new button almost behaves like the old one" is how
+// these diverge.
+console.log('\n--- repositioning the thumb buttons ---');
 const dragged = await page.evaluate(async () => {
   const c = window.__cluckdown.game.controls;
-  c.setFireEdit(true);
-  const btn = document.getElementById('fire-btn');
-  const before = btn.getBoundingClientRect().left;
-  c.onFireDown({ pointerId: 3, clientX: 700, clientY: 300, preventDefault() {} });
-  c.onFireMove({ pointerId: 3, clientX: 500, clientY: 200 });
-  c.onFireUp({ pointerId: 3 });
-  const after = btn.getBoundingClientRect().left;
-  const stored = JSON.parse(localStorage.getItem('cluckdown.fire.v1') ?? 'null');
-  c.setFireEdit(false);
-  return { before: Math.round(before), after: Math.round(after), stored, editing: c.fireEdit };
+  c.setButtonEdit(true);
+
+  const drag = (button, id, to) => {
+    const before = button.el.getBoundingClientRect().left;
+    button.onDown({ pointerId: id, clientX: 700, clientY: 300, preventDefault() {} });
+    button.onMove({ pointerId: id, clientX: to.x, clientY: to.y });
+    button.onUp({ pointerId: id });
+    return { before: Math.round(before), after: Math.round(button.el.getBoundingClientRect().left) };
+  };
+
+  const fire = drag(c.fire, 3, { x: 500, y: 200 });
+  const jump = drag(c.jump, 4, { x: 300, y: 320 });
+  const stored = {
+    fire: JSON.parse(localStorage.getItem('cluckdown.fire.v1') ?? 'null'),
+    jump: JSON.parse(localStorage.getItem('cluckdown.jump.v1') ?? 'null'),
+  };
+  c.setButtonEdit(false);
+  // Dragging must not have left either button stuck "held" — the pointerup
+  // that ended the drag is not the one that would have released it.
+  return { fire, jump, stored, editing: c.fire.edit || c.jump.edit, held: c.fire.held || c.jump.held };
 });
 console.log('  ', JSON.stringify(dragged));
-check('edit mode moves the fire button', Math.abs(dragged.after - dragged.before) > 40,
-  `${dragged.before} → ${dragged.after}`);
-check('the new position is saved', !!dragged.stored, JSON.stringify(dragged.stored));
+check('edit mode moves the fire button', Math.abs(dragged.fire.after - dragged.fire.before) > 40,
+  `${dragged.fire.before} → ${dragged.fire.after}`);
+check('edit mode moves the jump button too', Math.abs(dragged.jump.after - dragged.jump.before) > 40,
+  `${dragged.jump.before} → ${dragged.jump.after}`);
+check('both positions are saved separately',
+  !!dragged.stored.fire && !!dragged.stored.jump
+  && dragged.stored.fire.x !== dragged.stored.jump.x,
+  JSON.stringify(dragged.stored));
 check('edit mode turns back off', dragged.editing === false);
+check('leaving edit mode does not leave a button held down', dragged.held === false);
 
 await shot(page, `${OUT}/16-fps-touch.png`);
 check('no exceptions anywhere', pageErrors.length === 0,

@@ -1,4 +1,10 @@
-// Player-facing graphics settings.
+// Player-facing settings.
+//
+// The panel is called Settings rather than Graphics now, because it holds feel
+// controls too — aim assist, look sensitivity, thumb-button layout — and a
+// player looking for those was never going to open a menu called "Graphics".
+// The module, the storage key and the element ids still say gfx: renaming them
+// would reset the saved settings of everyone who already has some.
 //
 // These three are the levers that actually matter on weak hardware, in order:
 // render resolution (fill rate), the glow layer (a wide blur on a separate
@@ -25,8 +31,21 @@ const DEFAULTS = {
   antialias: true,
   // Cluckdown is first person. There is no camera setting any more.
   assist: true,    // aim assist, applied client-side before input is sent
-  fireEdit: false, // drag-to-reposition mode for the touch fire button
+  fireEdit: false, // drag-to-reposition mode for the touch buttons
+
+  /**
+   * Look sensitivity, as a multiplier over the tuned base rates in controls.js.
+   *
+   * 1 is the default the game ships with. The range below is deliberately wide
+   * — a thumb on a 5" phone and a mouse on a desk are not the same instrument,
+   * and there has never been one number that suits both the player who flicks
+   * and the player who tracks.
+   */
+  sensitivity: 1,
 };
+
+export const SENSITIVITY_MIN = 0.25;
+export const SENSITIVITY_MAX = 2;
 
 export function loadGfx() {
   try {
@@ -38,6 +57,7 @@ export function loadGfx() {
     merged.antialias = !!merged.antialias;
     merged.fireEdit = !!merged.fireEdit;
     merged.assist = merged.assist !== false;
+    merged.sensitivity = clampSensitivity(merged.sensitivity);
     return merged;
   } catch {
     return { ...DEFAULTS };
@@ -52,10 +72,18 @@ export function saveGfx(gfx) {
       antialias: gfx.antialias,
       assist: gfx.assist !== false,
       fireEdit: !!gfx.fireEdit,
+      sensitivity: clampSensitivity(gfx.sensitivity),
     }));
   } catch {
     // Private mode — settings just won't persist.
   }
+}
+
+/** Keeps a hand-edited or stale value from making the game unplayable. */
+export function clampSensitivity(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return DEFAULTS.sensitivity;
+  return Math.min(SENSITIVITY_MAX, Math.max(SENSITIVITY_MIN, n));
 }
 
 /**

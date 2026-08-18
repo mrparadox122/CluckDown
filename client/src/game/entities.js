@@ -93,8 +93,13 @@ export class PlayerView {
     this.baseEmissive = this.bodyMat.emissiveColor.clone();
 
     this.x = player.x;
+    this.y = player.y ?? 0;
     this.z = player.z;
     this.aim = player.aim;
+    // The waddle is tracked apart from `y` so the two can be added rather than
+    // fighting over mesh.position.y — a bob written straight onto the mesh
+    // would be overwritten by the jump height, and vice versa.
+    this.bobY = 0;
     this.bob = Math.random() * Math.PI * 2;
     this.hidden = false;
     this.flash = 0;
@@ -172,6 +177,7 @@ export class PlayerView {
   update(dt, target, { moving, lerpT }) {
     this.x += (target.x - this.x) * lerpT;
     this.z += (target.z - this.z) * lerpT;
+    this.y += ((target.y ?? 0) - this.y) * lerpT;
 
     // Shortest-path angle interpolation, so turning past ±180° doesn't spin.
     let d = (target.aim - this.aim) % (Math.PI * 2);
@@ -186,13 +192,15 @@ export class PlayerView {
     // Waddle: bounce vertically and rock side to side while moving.
     if (moving) {
       this.bob += dt * 13;
-      this.root.position.y = Math.abs(Math.sin(this.bob)) * 0.16;
+      this.bobY = Math.abs(Math.sin(this.bob)) * 0.16;
       this.root.rotation.z = Math.sin(this.bob) * 0.09;
     } else {
       this.bob += dt * 2.4;
-      this.root.position.y += (Math.sin(this.bob) * 0.03 - this.root.position.y) * 0.1;
+      this.bobY += (Math.sin(this.bob) * 0.03 - this.bobY) * 0.1;
       this.root.rotation.z *= 0.85;
     }
+    // Jump height plus waddle. `this.y` is the simulation's; the bob is ours.
+    this.root.position.y = this.y + this.bobY;
 
     if (this.flash > 0) {
       this.flash = Math.max(0, this.flash - dt * 5);

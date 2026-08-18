@@ -18,6 +18,25 @@ export const PATCH_MS = 1000 / PATCH_HZ;
 // keeps that behaviour identical at any TICK_HZ.
 export const MAX_CATCHUP = 0.25;
 
+// ------------------------------------------------------------------ GRAVITY
+//
+// The simulation has a Y axis: chickens jump, bullets rise and fall, and a shot
+// can pass over someone's head. Everything vertical is tuned from here.
+//
+// Magnitude only — the sim applies it downward. 22 with a 7.0 jump gives a
+// ~0.64s hop, which is close to what a shooter's muscle memory expects.
+export const GRAVITY = 22;
+
+/**
+ * Height of the arena walls, in units.
+ *
+ * Shared rather than a renderer detail because the simulation needs it now: a
+ * shot steep enough to clear the parapet is not a wall hit, it is a shot that
+ * left the building. The renderer builds the walls to this same number, so the
+ * two can never drift apart.
+ */
+export const WALL_HEIGHT = 2.6;
+
 export const PLAYER = {
   radius: 0.6,
   height: 1.2,
@@ -43,6 +62,61 @@ export const PLAYER = {
    * you around, but sustained fire can no longer take the wheel outright.
    */
   maxKnockback: 7.2 * 1.5,
+
+  // --- the vertical axis ---------------------------------------------------
+
+  /**
+   * Where the camera sits, and where shots leave from.
+   *
+   * Chicken height, not human height: at 1.15 the 2.6-unit walls actually
+   * enclose you. Raise it much past 1.6 and you look straight over the top into
+   * the abyss the arena floats above.
+   */
+  eyeHeight: 1.15,
+
+  /**
+   * The hitbox, from the floor to the top of the comb.
+   *
+   * Combined with `radius` this makes a capsule roughly the size of the chicken
+   * you can see, which is the whole point of the change: a shot that visibly
+   * sails over someone now misses, and one aimed down at a target below you
+   * lands. `radius` still does the horizontal work, unchanged, so duelling on
+   * flat ground feels exactly as it did.
+   */
+  hitHeight: 1.8,
+
+  /** Upward velocity of a jump, in units/second. See maxJumpHeight. */
+  jumpSpeed: 7.0,
+
+  /**
+   * Hard ceiling on how far above the floor you can get, in units.
+   *
+   * This is a wall, not a suggestion, and it exists for one reason: the arena
+   * walls are 2.6 tall and eye height is 1.15, so anything above ~1.4 lets you
+   * see over the top into the void the platform floats above. Clamping the
+   * position rather than tuning the impulse means LOW GRAVITY, a blast, or a
+   * future launcher pad cannot quietly reintroduce the problem.
+   *
+   * (7.0 against gravity 22 apexes at 1.11 on its own, so a normal jump never
+   * touches this. It is here for everything that isn't a normal jump.)
+   */
+  maxJumpHeight: 1.25,
+
+  /**
+   * Vertical look limits, in radians. Roughly -78 to +72 degrees.
+   *
+   * These live in the simulation, not the renderer, because pitch is part of
+   * the shot now: the server has to clamp what a client sends it. The camera
+   * uses the same two numbers, so what you can look at and what you can hit are
+   * the same range by construction.
+   *
+   * Up used to be capped hard at 0.42 on the grounds that there was nothing
+   * above the arena worth looking at. There still isn't much — but "the
+   * crosshair only moves left and right" was a player report, and a stingy
+   * ceiling is exactly what that feels like.
+   */
+  pitchMin: -1.36,
+  pitchMax: 1.26,
 };
 
 // ---------------------------------------------------------- AIM ASSIST
@@ -69,6 +143,17 @@ export const AIM_ASSIST = {
   stickyRange: 32,    // a locked target is kept until it passes this
   lead: 0.55,         // 0..1 how much to aim ahead of a moving target
   minAimInput: 0.15,  // stick deflection below this counts as "not aiming"
+
+  /**
+   * Where up the target's body the vertical pull aims, as a fraction of
+   * PLAYER.hitHeight.
+   *
+   * Assist gained a vertical component when shots did. Slightly above centre:
+   * aiming at the exact middle of the capsule is the safest shot, but it looks
+   * like the game is aiming at a chicken's belly, and a hair higher reads as
+   * aiming at the bird.
+   */
+  aimHeight: 0.55,
 };
 
 export const BULLET = {
@@ -77,10 +162,29 @@ export const BULLET = {
   damage: 11,
   life: 1.3, // seconds -> ~39 unit range
   knockback: 3.5,
+
+  /**
+   * The tracer you can SEE, which is deliberately NOT `radius` above.
+   *
+   * `radius` is the collision size and it is generous on purpose — it is added
+   * to the chicken's own radius in the swept hit test, and shaving it makes
+   * every shot in the game harder to land. Drawing the tracer at that size was
+   * a separate decision that nobody actually made: it just inherited the
+   * number, and players read the result as fat blobs rather than gunfire.
+   *
+   * So the two are split. Change this to restyle the tracer; change `radius`
+   * to change how hard the game is.
+   */
+  tracerRadius: 0.12,
+  tracerLength: 1.5, // world units, nose to tail — the streak, not the round
 };
 
 export const BOMBER = {
   radius: 0.7,
+  // Taller than a player because it is drawn at 1.25 scale. Bullets travel in
+  // three dimensions now, so this is what stops a shot arcing over the bomber
+  // from counting as a hit on it.
+  hitHeight: 2.25,
   maxHp: 45,
   speed: 5.0, // slower than a player: you can always kite it
   detectRadius: 20,
@@ -420,8 +524,14 @@ export const MODIFIERS = {
     id: 'lowGravity',
     label: 'LOW GRAVITY',
     blurb: 'Everything floats. Knockback sends you flying.',
-    // There is no jumping in a top-down game, so "low gravity" is expressed as
-    // momentum: knockback barely decays, so hits send chickens skating.
+    // Now that the game has a Y axis this finally means what it says: you fall
+    // slowly and hang at the top of a jump. The knockback half stays — skating
+    // across the floor was the good part of the old top-down interpretation.
+    //
+    // The apex does NOT scale with this. PLAYER.maxJumpHeight clamps the
+    // position outright, so halving gravity buys hang time, not altitude, and
+    // nobody ends up floating over the walls.
+    gravityMul: 0.5,
     knockbackDecayMul: 0.22,
     knockbackMul: 2.4,
     debrisGravityMul: 0.3,

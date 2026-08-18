@@ -24,6 +24,13 @@ const DIFFICULTY = {
   hard: { think: 0.13, aimError: 0.08, range: 8.5, fireArc: 0.18, dodge: 1.0 },
 };
 
+// How long a bot waits between hops, in seconds. Not a tactic — a bot that
+// never leaves the floor reads as scenery the moment the human next to it
+// discovers the jump button, and "the other chickens are inert" is the kind of
+// thing that makes a practice match feel like a menu.
+const JUMP_MIN = 1.8;
+const JUMP_SPREAD = 3.4;
+
 export function initBot(p, difficulty = 'normal') {
   p.bot = {
     cfg: DIFFICULTY[difficulty] ?? DIFFICULTY.normal,
@@ -32,6 +39,8 @@ export function initBot(p, difficulty = 'normal') {
     strafeAt: 0,
     aimJitterX: 0,
     aimJitterZ: 0,
+    aimJitterY: 0,
+    jumpAt: JUMP_MIN + Math.random() * JUMP_SPREAD,
   };
 }
 
@@ -43,6 +52,7 @@ export function stepBots(world, dt) {
 
     b.thinkAt -= dt;
     b.strafeAt -= dt;
+    b.jumpAt -= dt;
     if (b.strafeAt <= 0) {
       b.strafe = Math.random() < 0.5 ? 1 : -1;
       b.strafeAt = 0.8 + Math.random() * 1.2;
@@ -51,8 +61,19 @@ export function stepBots(world, dt) {
     b.thinkAt = b.cfg.think;
     b.aimJitterX = (Math.random() * 2 - 1) * b.cfg.aimError;
     b.aimJitterZ = (Math.random() * 2 - 1) * b.cfg.aimError;
+    b.aimJitterY = (Math.random() * 2 - 1) * b.cfg.aimError * 0.5;
 
-    applyInput(world, p.id, decide(world, p, b));
+    // The jump flag rides on the input struct until the next think tick, which
+    // is at most 0.34s away — long enough to leave the ground, far short of the
+    // ~0.64s hop, so a bot never re-triggers on landing and pogos on the spot.
+    const input = decide(world, p, b);
+    input.pitch = aimPitch(world, p, b);
+    if (b.jumpAt <= 0) {
+      input.jump = true;
+      b.jumpAt = JUMP_MIN + Math.random() * JUMP_SPREAD;
+    }
+
+    applyInput(world, p.id, input);
   }
 }
 
@@ -294,6 +315,42 @@ function bombErrand(world, p, b) {
 
   // Someone else is carrying it — hunting the carrier is just the normal fight.
   return null;
+}
+
+/**
+ * How far up or down a bot is looking.
+ *
+ * Bots express aim as a direction vector (ax, az) and have no opinion about
+ * height, so this is derived rather than decided: whatever it is most likely to
+ * be shooting at, aimed at the middle of that thing's body from the bot's own
+ * eye. Get this wrong and a bot standing next to you fires over your head,
+ * because a flat shot from eye height is only a hit while both of you are on
+ * the floor — which stopped being guaranteed the moment jumping existed.
+ *
+ * The jitter is scaled down from the horizontal error on purpose. The vertical
+ * target is barely two units tall, so the same spread that reads as "human aim"
+ * sideways reads as "cannot shoot" up and down.
+ */
+function aimPitch(world, p, b) {
+  const foe = nearestFoe(world, p);
+  const bomber = world.bomber?.alive ? world.bomber : null;
+
+  let target = foe;
+  let height = PLAYER.hitHeight * 0.55;
+  if (bomber && (!foe || dist2(p.x, p.z, bomber.x, bomber.z) < dist2(p.x, p.z, foe.x, foe.z))) {
+    target = bomber;
+    height = BOMBER.hitHeight * 0.5;
+  }
+  if (!target) return 0;
+
+  const d = Math.sqrt(dist2(p.x, p.z, target.x, target.z));
+  const eye = p.y + PLAYER.eyeHeight;
+  const at = (target.y ?? 0) + height;
+  return clamp(
+    Math.atan2(at - eye, Math.max(0.001, d)) + b.aimJitterY,
+    PLAYER.pitchMin,
+    PLAYER.pitchMax,
+  );
 }
 
 function aimedAt(p, dx, dz, arc) {

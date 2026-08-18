@@ -63,11 +63,25 @@ async function main() {
   const clockAtStart = r1.state.clock;
   const measuredFrom = Date.now();
 
+  // Peak height and pitch seen for our own chicken over the whole run. Both are
+  // new fields on the schema, and a field that is defined but never actually
+  // populated looks exactly like a field that works — right up until a jump is
+  // invisible to everyone but the person doing it.
+  let peakY = 0;
+  let peakPitch = 0;
+
   let seq = 0;
   const drive = setInterval(() => {
     seq++;
     const t = seq / 20;
-    r1.send('input', { mx: Math.cos(t), mz: Math.sin(t), ax: 1, az: 0, shoot: true, seq });
+    const mine = r1.state.players?.get(r1.sessionId);
+    if (mine) {
+      peakY = Math.max(peakY, mine.y ?? 0);
+      peakPitch = Math.max(peakPitch, mine.pitch ?? 0);
+    }
+    // Jump and look up as well as run and shoot: this is the round trip for the
+    // vertical axis, from an input message through the sim to a synced field.
+    r1.send('input', { mx: Math.cos(t), mz: Math.sin(t), ax: 1, az: 0, pitch: 0.4, jump: true, shoot: true, seq });
     r2.send('input', { mx: -Math.cos(t), mz: -Math.sin(t), ax: -1, az: 0, shoot: true, seq });
   }, 50);
 
@@ -113,6 +127,9 @@ async function main() {
   check('own player is present and named', me?.name === 'Alice', me?.name);
   check('server acknowledged our inputs', (me?.ack ?? 0) > 100, `ack=${me?.ack}`);
   check('players actually moved', players.some((p) => Math.abs(p.x) > 0.5 || Math.abs(p.z) > 0.5));
+  console.log(`  (peak height ${peakY.toFixed(2)}u, peak pitch ${peakPitch.toFixed(2)}rad)`);
+  check('jumping reaches other clients as height', peakY > 0.4, `${peakY.toFixed(2)}u`);
+  check('vertical aim reaches other clients as pitch', peakPitch > 0.3, `${peakPitch.toFixed(2)}rad`);
   check('shots were fired', (fx.shot ?? 0) > 0, `${fx.shot ?? 0} shots`);
   check('bullets resolved (hit or expired)', (fx.bulletEnd ?? 0) > 0, `${fx.bulletEnd ?? 0}`);
   check('damage was dealt', (fx.hit ?? 0) > 0, `${fx.hit ?? 0} hits`);

@@ -32,7 +32,7 @@ export class BulletPool {
 
     for (const [id, hex] of Object.entries(kinds)) {
       const proto = MeshBuilder.CreateSphere(`bullet_${id}`, {
-        diameter: BULLET.radius * 2, segments: 6,
+        diameter: BULLET.tracerRadius * 2, segments: 6,
       }, scene);
       proto.material = emissiveMat(scene, `bulletMat_${id}`, hex, { intensity: 1.0 });
       proto.isPickable = false;
@@ -65,14 +65,29 @@ export class BulletPool {
     const mesh = this.pools[kind].pop();
     if (!mesh) return; // pool exhausted — drop the visual rather than stutter
     mesh.setEnabled(true);
-    const dx = Math.sin(ev.aim);
-    const dz = Math.cos(ev.aim);
-    mesh.position.set(ev.x + dx * ahead, 0.85, ev.z + dz * ahead);
+    // Same spherical direction the simulation built the bullet from. Drawing
+    // this flat while the real round climbed would put the streak somewhere
+    // the damage was not, which is the one thing a tracer must never do.
+    const pitch = ev.pitch ?? 0;
+    const cp = Math.cos(pitch);
+    const dx = Math.sin(ev.aim) * cp;
+    const dy = Math.sin(pitch);
+    const dz = Math.cos(ev.aim) * cp;
+    mesh.position.set(ev.x + dx * ahead, (ev.y ?? 0.85) + dy * ahead, ev.z + dz * ahead);
+    // Babylon composes mesh.rotation as yaw-pitch-roll, so a mesh stretched
+    // along local +Z points at (sin y·cos x, -sin x, cos y·cos x). Hence the
+    // negated pitch: rotation.x is nose-DOWN positive.
     mesh.rotation.y = ev.aim;
-    mesh.scaling.set(0.85, 0.85, 3.2); // stretched along travel = tracer streak
+    mesh.rotation.x = -pitch;
+    // Stretched along travel: an elongated sphere fakes motion blur far more
+    // cheaply than a particle trail, and the glow layer turns it into a streak.
+    // Length is in world units, so the shape does not change when the tracer is
+    // made thinner or thicker.
+    mesh.scaling.set(1, 1, BULLET.tracerLength / (BULLET.tracerRadius * 2));
     this.active.set(ev.id, {
-      mesh, kind, aim: ev.aim,
-      vx: dx * BULLET.speed, vz: dz * BULLET.speed, life: BULLET.life,
+      mesh, kind, aim: ev.aim, pitch,
+      vx: dx * BULLET.speed, vy: dy * BULLET.speed, vz: dz * BULLET.speed,
+      life: BULLET.life,
     });
   }
 
@@ -81,12 +96,14 @@ export class BulletPool {
    * the visual would carry straight on through the wall while the authoritative
    * bullet went the other way.
    */
-  redirect(id, x, z) {
+  redirect(id, x, y, z) {
     const t = this.active.get(id);
     if (!t) return;
     // Reflect off whichever axis the impact was on, matching the simulation.
+    // Vertical velocity is untouched: the walls are vertical, so a ricochet
+    // keeps whatever climb the round already had.
     if (Math.abs(x) > Math.abs(z)) t.vx = -t.vx; else t.vz = -t.vz;
-    t.mesh.position.set(x, 0.85, z);
+    t.mesh.position.set(x, y ?? 0.85, z);
     t.aim = Math.atan2(t.vx, t.vz);
     t.mesh.rotation.y = t.aim;
   }
@@ -106,6 +123,7 @@ export class BulletPool {
       t.life -= dt;
       if (t.life <= 0) { this.end(id); continue; }
       t.mesh.position.x += t.vx * dt;
+      t.mesh.position.y += t.vy * dt;
       t.mesh.position.z += t.vz * dt;
     }
   }
@@ -310,10 +328,10 @@ export class MuzzleFlash {
     this.cursor = 0;
   }
 
-  fire(x, z) {
+  fire(x, y, z) {
     const it = this.items[this.cursor++ % this.items.length];
     it.m.setEnabled(true);
-    it.m.position.set(x, 0.85, z);
+    it.m.position.set(x, y ?? 0.85, z);
     it.m.scaling.setAll(1);
     it.life = 0.07;
   }

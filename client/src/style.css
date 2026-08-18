@@ -781,6 +781,27 @@ input[type="text"]:focus { border-color: var(--hot); box-shadow: 0 0 0 3px rgba(
   cursor: pointer;
 }
 
+/* A slider plus its live readout. The number is not decoration: "1.35x" is the
+   only way a player can put the setting back where it was after experimenting,
+   and reusing .volume means the slider itself already looks like the one in the
+   audio row above. */
+.setting-slider {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 46%;
+}
+.setting-slider .volume { flex: 1 1 auto; }
+.setting-value {
+  flex: 0 0 auto;
+  min-width: 42px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+  text-align: right;
+}
+
 .settings-hint {
   font-size: 11px;
   line-height: 1.45;
@@ -1048,18 +1069,19 @@ input[type="text"]:focus { border-color: var(--hot); box-shadow: 0 0 0 3px rgba(
 .contract-time { font-size: 10px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .contract.urgent .contract-time { color: var(--hot); }
 /* ======================= FIRST PERSON =======================
-   Only rendered in the 'fps' camera mode. */
+   There is only one camera, so all of this is unconditional. */
 
-/* Positioned by JS each frame at the projected aim point — see setCrosshairAt.
-   left/top stay at 0 because the transform carries the whole position. */
+/* Dead centre, and static. The shot goes exactly where the camera points now,
+   so the middle of the screen IS the aim point — no per-frame projection, and
+   nothing to keep in sync. */
 .crosshair {
   position: absolute;
-  left: 0;
-  top: 0;
+  left: 50%;
+  top: 50%;
   width: 22px;
   height: 22px;
+  margin: -11px 0 0 -11px;
   pointer-events: none;
-  will-change: transform;
 }
 /* Two bars and a centre dot. Deliberately thin and slightly transparent — a
    heavy reticle on a 375px-tall phone screen covers the target it is aiming at. */
@@ -1110,6 +1132,10 @@ input[type="text"]:focus { border-color: var(--hot); box-shadow: 0 0 0 3px rgba(
   touch-action: none;
 }
 
+/* Sits ON TOP of the look surface, not beside it. Once a thumb is down on it
+   the press belongs to that finger until it lifts, so dragging from here both
+   keeps firing and turns the view — the button is a place to start the gesture,
+   not a box the thumb has to stay inside. */
 .fire-btn {
   position: absolute;
   left: 82%;
@@ -1132,18 +1158,52 @@ input[type="text"]:focus { border-color: var(--hot); box-shadow: 0 0 0 3px rgba(
   z-index: 6;
   transition: background .1s, transform .1s;
 }
-.fire-btn:active { background: rgba(255, 45, 75, 0.5); transform: scale(0.94); }
-/* Layout edit mode: the button is draggable rather than firing. */
-.fire-btn.editing {
+/* `.is-held` matters as much as `:active` here: the browser drops :active the
+   moment the finger leaves the element, and the whole point is that firing
+   does not stop when that happens. Without it the button visibly un-presses
+   mid-burst and the gun looks jammed. */
+.fire-btn:active,
+.fire-btn.is-held { background: rgba(255, 45, 75, 0.5); transform: scale(0.94); }
+
+/* JUMP. Same machinery as FIRE, smaller and cooler-coloured: it sits within
+   reach of the same thumb, and it must never be mistaken for the trigger in
+   the half-second where that matters. */
+.jump-btn {
+  position: absolute;
+  left: 93%;
+  top: 44%;
+  width: 72px;
+  height: 72px;
+  margin: -36px 0 0 -36px;
+  border-radius: 50%;
+  border: 2px solid rgba(142, 202, 230, 0.75);
+  background: rgba(142, 202, 230, 0.2);
+  color: var(--ink);
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 2px;
+  pointer-events: auto;
+  touch-action: none;
+  z-index: 6;
+  transition: background .1s, transform .1s;
+}
+.jump-btn:active,
+.jump-btn.is-held { background: rgba(142, 202, 230, 0.46); transform: scale(0.94); }
+
+/* Layout edit mode: the buttons are draggable rather than active. Listed after
+   the :active/.is-held rules so it wins while dragging. */
+.fire-btn.editing,
+.jump-btn.editing {
   border-style: dashed;
   border-color: var(--gold);
   background: rgba(255, 204, 61, 0.28);
   animation: pulse 1s ease-in-out infinite;
 }
 
-/* Desktop has a mouse; none of this belongs on it. */
+/* Desktop has a mouse and a spacebar; none of this belongs on it. */
 @media (hover: hover) {
-  .look-zone, .fire-btn { display: none !important; }
+  .look-zone, .fire-btn, .jump-btn { display: none !important; }
 }
 
 /* ======================= ACTION PROMPT =======================
@@ -1280,6 +1340,7 @@ input[type="text"]:focus { border-color: var(--hot); box-shadow: 0 0 0 3px rgba(
   #hud .killfeed { margin-top: 92px; max-height: 20vh; }
   .crosshair { width: 16px; height: 16px; }
   .fire-btn { width: 74px; height: 74px; margin: -37px 0 0 -37px; font-size: 10px; }
+  .jump-btn { width: 58px; height: 58px; margin: -29px 0 0 -29px; font-size: 9px; }
 
   .icon-btn.hud-mute { width: 24px; height: 24px; font-size: 10px; margin-top: 2px; }
   .hud-buttons { gap: 4px; }

@@ -4,6 +4,10 @@
 // loudest piece of player feedback the game has ever had. This softly pulls your
 // aim onto a nearby enemy and keeps it there while they stay in front of you.
 //
+// Two axes, in two functions: pullAim turns you toward them, pullPitch tilts you
+// onto them. They are separate because acquisition is a horizontal decision —
+// everyone is on the same floor — while the vertical is only ever a correction.
+//
 // WHERE THIS RUNS MATTERS. It is applied by the CLIENT to its own look angle,
 // before that angle is sent, rather than by the server to the angle it received.
 // In first person the camera renders your local yaw, so a server that quietly
@@ -73,4 +77,31 @@ export function pullAim(self, target, aim, dt, strength = AIM_ASSIST.strength) {
 
   const k = 1 - Math.exp(-strength * 12 * dt);
   return aim + angleDelta(aim, want) * k;
+}
+
+/**
+ * The vertical half of the same pull.
+ *
+ * Assist was horizontal-only for as long as shots were: pitch did not reach the
+ * simulation, so there was nothing vertical to help with. Now that a shot goes
+ * exactly where the camera points, an unassisted vertical axis would be the new
+ * version of the old problem — a thumb that lands the yaw and misses high.
+ *
+ * Deliberately simpler than pullAim: no lead, because chickens only move
+ * vertically by jumping and leading a jump would drag your shot to where they
+ * are about to *not* be. It aims at the body and lets the capsule be generous.
+ *
+ * Pitch is not an angle on a circle — it is clamped to a range and can never
+ * wrap — so this eases linearly rather than through angleDelta.
+ *
+ * @returns the new pitch angle.
+ */
+export function pullPitch(self, target, pitch, dt, strength = AIM_ASSIST.strength) {
+  const d = Math.hypot(target.x - self.x, target.z - self.z);
+  const eye = (self.y ?? 0) + PLAYER.eyeHeight;
+  const aimAt = (target.y ?? 0) + PLAYER.hitHeight * AIM_ASSIST.aimHeight;
+  const want = Math.atan2(aimAt - eye, Math.max(0.001, d));
+
+  const k = 1 - Math.exp(-strength * 12 * dt);
+  return pitch + (want - pitch) * k;
 }

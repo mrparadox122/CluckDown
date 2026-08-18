@@ -1,7 +1,6 @@
 import { Vector3, Matrix } from '@babylonjs/core/Maths/math';
 import {
   createStage, buildArena, buildHillZone, buildSafeZone, CameraRig,
-  FPS_PITCH_MIN, FPS_PITCH_MAX,
 } from './scene.js';
 import {
   PlayerView, BomberView, PickupView, PotatoView, NestView, LooseEggView, BombView,
@@ -11,18 +10,13 @@ import { Controls } from './controls.js';
 import { sfx } from '../audio/sfx.js';
 import {
   PLAYER, BULLET, BOMBER, MODIFIERS, MODES, HILL, BOMB, HEIST, SEAT_COLORS,
-  modValue, clampUnit, clamp,
+  GRAVITY, modValue, clampUnit, clamp,
 } from '@cluckdown/shared';
 
 // Matches the server's simulation rate: sending slower would leave most ticks
 // with no new input to act on, wasting the responsiveness a 60Hz sim buys.
 const INPUT_HZ = 60;
 const INPUT_DT = 1 / INPUT_HZ;
-
-// How far down the firing line the first-person reticle is drawn. Roughly a
-// duel's worth of distance: near enough that it tracks a real target, far
-// enough that it doesn't swing wildly as you turn.
-const CROSSHAIR_RANGE = 16;
 
 // Prediction error above this means something real happened (a blast, a wall,
 // a rejected move) — snap instead of sliding the player across the arena.
@@ -81,7 +75,7 @@ export class Game {
     this.potatoView = new PotatoView(this.scene);
 
     // Locally predicted position for our own chicken.
-    this.pred = { x: 0, z: 0, aim: 0, has: false };
+    this.pred = { x: 0, y: 0, z: 0, vy: 0, aim: 0, has: false };
     this.inputAcc = 0;
     this.statsAt = 0;
     this.lastHp = PLAYER.maxHp;
@@ -90,8 +84,9 @@ export class Game {
       leftZone: document.getElementById('stick-left'),
       canvas,
     });
-    this.controls.setFireEdit(!!gfx?.fireEdit);
+    this.controls.setButtonEdit(!!gfx?.fireEdit);
     this.controls.setAssist(gfx?.assist !== false);
+    this.controls.setSensitivity(gfx?.sensitivity ?? 1);
 
     // Who to watch while dead — set from the kill event, cleared on respawn.
     this.killedBy = null;
@@ -128,9 +123,11 @@ export class Game {
     this.engine.runRenderLoop(() => this.frame());
   }
 
-  setFireEdit(on) { this.controls.setFireEdit(on); }
+  setButtonEdit(on) { this.controls.setButtonEdit(on); }
 
   setAssist(on) { this.controls.setAssist(on); }
+
+  setSensitivity(mul) { this.controls.setSensitivity(mul); }
 
   // ------------------------------------------------------------------ setup
 
@@ -180,11 +177,13 @@ export class Game {
         case 'shot': {
           // Your own gun goes off roughly where your eyeballs are, so in first
           // person both of these effects were rendering INSIDE the camera: a
-          // 0.9-unit glowing sphere and a 3.2-unit tracer, at point blank. The
-          // result was a full-screen white flash on every shot.
+          // 0.9-unit glowing sphere and the tracer streak, at point blank. The
+          // result was a full-screen white flash on every shot. 3.2 units of
+          // push is camera clearance, not tracer length — it has to stay clear
+          // of the near plane whatever BULLET.tracerLength is set to.
           const ownShot = self && e.owner === self.id;
           this.bullets.spawn(e, ownShot ? 3.2 : 0);
-          if (!ownShot) this.muzzle.fire(e.x, e.z);
+          if (!ownShot) this.muzzle.fire(e.x, e.y, e.z);
           // ...replaced by a recoil kick, which reads as "I fired" far better
           // than a flash does anyway.
           if (ownShot) this.rig.addRecoil();
@@ -193,8 +192,9 @@ export class Game {
         }
         case 'bulletEnd': {
           this.bullets.end(e.id);
-          // Sparks fly back out of whatever the bullet hit.
-          this.debris.emit('red', e.x, 0.85, e.z, e.wall ? 4 : 6, {
+          // Sparks fly back out of whatever the bullet hit — at the height it
+          // hit at, which is now the floor, a wall, or somebody's head.
+          this.debris.emit('red', e.x, e.y ?? 0.85, e.z, e.wall ? 4 : 6, {
             speed: e.wall ? 5 : 7, up: 0.5, size: 0.35, life: 0.32, drag: 3.5,
           });
           break;
@@ -203,8 +203,11 @@ export class Game {
           const view = this.views.get(e.target);
           if (view) view.hit();
           const at = e.target === 'bomber' ? { x: e.x, z: e.z } : (view ?? { x: e.x, z: e.z });
-          this.debris.feathers(at.x, 1.2, at.z, 3);
-          this.hud.popDamage(this.projectFn(at.x, 1.9, at.z), e.amount, e.kind === 'burn' ? 'burn' : 'hit');
+          // The view carries its height, so feathers and damage numbers follow
+          // a chicken that was in the air when you hit it.
+          const atY = at.y ?? 0;
+          this.debris.feathers(at.x, atY + 1.2, at.z, 3);
+          this.hud.popDamage(this.projectFn(at.x, atY + 1.9, at.z), e.amount, e.kind === 'burn' ? 'burn' : 'hit');
           if (self && e.target === self.id) {
             this.rig.addShake(0.18);
             this.flashHurt();
@@ -216,7 +219,7 @@ export class Game {
           break;
         }
         case 'kill': {
-          this.explodeChicken(e.x, e.z, e.color);
+          this.explodeChicken(e.x, e.y ?? 0, e.z, e.color);
           if (self && e.target === self.id) {
             this.rig.addShake(0.75);
             sfx.play('death');
@@ -269,8 +272,8 @@ export class Game {
         }
         case 'bounce': {
           // Keep the tracer in step with the authoritative ricochet.
-          this.bullets.redirect(e.id, e.x, e.z);
-          this.debris.emit('white', e.x, 0.85, e.z, 3, {
+          this.bullets.redirect(e.id, e.x, e.y, e.z);
+          this.debris.emit('white', e.x, e.y ?? 0.85, e.z, 3, {
             speed: 4, up: 0.4, size: 0.22, life: 0.25, drag: 4,
           });
           sfx.play('hit');
@@ -427,6 +430,16 @@ export class Game {
           if (self && e.by === self.id && !isHeal) this.hud.announce('RAPID FIRE');
           break;
         }
+        case 'jump': {
+          // A puff of floor dust. Small on purpose — jumping happens a lot, and
+          // an effect that reads as an event would be exhausting within a
+          // minute. It exists so other players' jumps are legible: from across
+          // the arena a chicken rising 1.25 units is easy to miss entirely.
+          this.debris.emit('white', e.x, 0.1, e.z, 4, {
+            speed: 2.6, up: 0.25, size: 0.16, life: 0.28, drag: 4,
+          });
+          break;
+        }
         case 'respawn': {
           this.debris.emit('white', e.x, 0.8, e.z, 10, { speed: 6, up: 1.1, size: 0.3, life: 0.5 });
           if (self && e.target === self.id) {
@@ -434,6 +447,8 @@ export class Game {
             this.rig.respawnPunch(e.x, e.z);
             this.pred.x = e.x;
             this.pred.z = e.z;
+            this.pred.y = 0;
+            this.pred.vy = 0;
             this.hud.announce('GO!');
             this.killedBy = null;
             sfx.play('respawn');
@@ -446,12 +461,12 @@ export class Game {
     }
   }
 
-  explodeChicken(x, z, color) {
+  explodeChicken(x, y, z, color) {
     // The chicken bursts into its own cubes, then a cloud of feathers.
     const key = color === '#ffd166' ? 'gold' : 'white';
-    this.debris.emit(key, x, 0.9, z, 16, { speed: 9, up: 1.15, size: 0.5, life: 1.1, drag: 1.1 });
-    this.debris.emit('red', x, 0.9, z, 6, { speed: 7, up: 1, size: 0.3, life: 0.6 });
-    this.debris.feathers(x, 1.4, z, 14);
+    this.debris.emit(key, x, y + 0.9, z, 16, { speed: 9, up: 1.15, size: 0.5, life: 1.1, drag: 1.1 });
+    this.debris.emit('red', x, y + 0.9, z, 6, { speed: 7, up: 1, size: 0.3, life: 0.6 });
+    this.debris.feathers(x, y + 1.4, z, 14);
   }
 
   flashHurt() {
@@ -489,17 +504,21 @@ export class Game {
     // would make the whole view stutter at the network tick rate.
     const focusX = self ? (this.pred.has ? this.pred.x : self.x) : 0;
     const focusZ = self ? (this.pred.has ? this.pred.z : self.z) : 0;
+    // Height is predicted for exactly the same reason X and Z are: a jump that
+    // waited for a round-trip before the view left the ground would feel like
+    // the button was broken.
+    const focusY = self ? (this.pred.has ? this.pred.y : (self.y ?? 0)) : 0;
     const alive = !self || self.alive;
     this.rig.setAlive(alive);
     // The camera follows the LOCAL look direction, never the server's — a 40Hz
     // round-trip on "where am I looking" is the most noticeable lag there is.
-    this.controls.clampPitch(FPS_PITCH_MIN, FPS_PITCH_MAX);
+    this.controls.clampPitch();
     // Dead: watch whoever put you there, if they are still up.
     const killer = !alive && this.killedBy?.id
       ? players.find((p) => p.id === this.killedBy.id && p.alive)
       : null;
     this.rig.update(
-      dt, focusX, focusZ, this.controls.yaw, alive, this.controls.pitch,
+      dt, focusX, focusY, focusZ, this.controls.yaw, alive, this.controls.pitch,
       killer ? { x: killer.x, z: killer.z } : null,
     );
 
@@ -533,20 +552,15 @@ export class Game {
         h: this.engine.getRenderHeight() * this.engine.getHardwareScalingLevel() },
     );
     {
-      // The crosshair is placed where the shot will actually be, not at screen
-      // centre.
+      // The crosshair is simply the middle of the screen.
       //
-      // Shots travel along the yaw at chest height — pitch is a look control,
-      // not an aim one, because everything in this game stands on the ground.
-      // So a fixed centre reticle would start lying the moment you tilted the
-      // view. Projecting the real aim point keeps it honest at any pitch, and
-      // with aim assist off in first person that honesty is the whole contract.
-      const yaw = this.controls.yaw;
-      this.hud.setCrosshairAt(alive ? this.projectFn(
-        focusX + Math.sin(yaw) * CROSSHAIR_RANGE,
-        0.85,
-        focusZ + Math.cos(yaw) * CROSSHAIR_RANGE,
-      ) : null);
+      // It used to be projected 16 units down the firing line, because shots
+      // travelled flat at chest height whatever the view was doing — a centre
+      // reticle would have been pointing at one thing while the bullet went to
+      // another. Aim carries pitch now and fire() builds the bullet from the
+      // same yaw/pitch pair the camera looks down, so the centre of the screen
+      // IS the aim point and the projection has nothing left to correct for.
+      this.hud.setCrosshair(alive);
       this.hud.drawMinimap({
         half: this.session.safeHalf,
         players,
@@ -580,14 +594,19 @@ export class Game {
     // shared/src/aim.js for why it is on this side of the wire.
     const players = this.session.players;
     const me = players.find((p) => p.isSelf);
+    // `y` rides along because assist is vertical now too: pulling onto someone
+    // standing on the floor and pulling onto someone mid-jump are different
+    // angles, and the one that matters is whichever of you left the ground.
     const foes = me
       ? players.filter((p) => !p.isSelf).map((p) => ({
-        id: p.id, x: p.x, z: p.z, alive: p.alive, team: p.team,
+        id: p.id, x: p.x, y: p.y ?? 0, z: p.z, alive: p.alive, team: p.team,
         invuln: p.invuln, mx: 0, mz: 0,
       }))
       : [];
     const input = this.controls.sample(
-      me && me.alive ? { id: me.id, x: src.x, z: src.z, team: me.team } : null,
+      me && me.alive
+        ? { id: me.id, x: src.x, y: src.y ?? 0, z: src.z, team: me.team }
+        : null,
       dt,
       foes,
     );
@@ -600,6 +619,7 @@ export class Game {
       this.session.sendInput({
         mx: input.mx, mz: input.mz,
         ax: input.ax, az: input.az,
+        pitch: input.pitch, jump: input.jump,
         shoot: input.shoot, seq: input.seq,
       });
     }
@@ -617,7 +637,9 @@ export class Game {
 
     if (!this.pred.has || !self.alive) {
       this.pred.x = self.x;
+      this.pred.y = self.y ?? 0;
       this.pred.z = self.z;
+      this.pred.vy = 0;
       this.pred.aim = self.aim;
       this.pred.has = self.alive;
       return;
@@ -626,6 +648,7 @@ export class Game {
     // Offline sessions are already authoritative in this tab — no prediction.
     if (this.session.offline) {
       this.pred.x = self.x;
+      this.pred.y = self.y ?? 0;
       this.pred.z = self.z;
       this.pred.aim = self.aim;
       return;
@@ -654,6 +677,22 @@ export class Game {
     this.pred.x = clamp(this.pred.x + vx * dt, -half + PLAYER.radius, half - PLAYER.radius);
     this.pred.z = clamp(this.pred.z + vz * dt, -half + PLAYER.radius, half - PLAYER.radius);
 
+    // The vertical, mirroring stepPlayers exactly — same jump condition, same
+    // gravity, same ceiling. Unlike knockback there is nothing to be told about
+    // here: the impulse comes from an input this client just sent, so it can
+    // run the whole arc itself and only ease toward the server's answer.
+    const gravity = GRAVITY * modValue(this.modifier, 'gravityMul');
+    if (inp.jump && this.pred.y <= 0 && this.pred.vy <= 0) this.pred.vy = PLAYER.jumpSpeed;
+    this.pred.vy -= gravity * dt;
+    this.pred.y += this.pred.vy * dt;
+    if (this.pred.y <= 0) {
+      this.pred.y = 0;
+      this.pred.vy = 0;
+    } else if (this.pred.y >= PLAYER.maxJumpHeight) {
+      this.pred.y = PLAYER.maxJumpHeight;
+      if (this.pred.vy > 0) this.pred.vy = 0;
+    }
+
     const ex = self.x - this.pred.x;
     const ez = self.z - this.pred.z;
     const err = Math.hypot(ex, ez);
@@ -665,6 +704,11 @@ export class Game {
       this.pred.x += ex * t;
       this.pred.z += ez * t;
     }
+
+    // Height is corrected on its own, and gently. A whole jump is 1.25 units,
+    // so the horizontal SNAP_ERROR of 3.5 would never fire on it — and snapping
+    // the view vertically is far more noticeable than snapping it sideways.
+    this.pred.y += ((self.y ?? 0) - this.pred.y) * (1 - Math.exp(-CORRECTION_RATE * dt));
   }
 
   syncPlayers(dt, players, self) {
@@ -694,7 +738,7 @@ export class Game {
       const nemesis = !!self && !p.isSelf && self.nemesis === p.id;
       const target = isSelf && this.pred.has
         ? {
-          x: this.pred.x, z: this.pred.z, aim: p.aim,
+          x: this.pred.x, y: this.pred.y, z: this.pred.z, aim: p.aim,
           invuln: p.invuln, rapid: p.rapid, burning: p.burning, bounty: crowned,
           nemesis: false,
         }

@@ -10,10 +10,10 @@ import {
   MULTIKILL_WINDOW, SEAT_COLORS, MODIFIER_POOL, modValue,
   TEAM_COLORS, teamForSeat, HILL, SHRINK, AMMO, rollPickup,
   MAPS, DEFAULT_MAP, pickMapCandidates, BOUNTY, POTATO,
-  CONTRACT, CONTRACTS, CONTRACT_LIST, HEIST, BOMB, REVENGE,
+  CONTRACT, CONTRACTS, CONTRACT_LIST, HEIST, BOMB, REVENGE, GRAVITY, WALL_HEIGHT,
 } from './constants.js';
 import {
-  clamp, clampUnit, norm, len, dist2, segPointDist2, mulberry32, angleDelta,
+  clamp, clampUnit, norm, len, dist2, segHitsCapsule, mulberry32, angleDelta,
 } from './math.js';
 
 let localIdCounter = 1;
@@ -176,8 +176,13 @@ export function addPlayer(world, { id, name, seat, isBot = false }) {
       : SEAT_COLORS[seatIdx % SEAT_COLORS.length],
     isBot,
     x: sp.x, z: sp.z,
+    // Height above the floor, and the vertical velocity that changes it.
+    // Deliberately NOT part of knockback: kx/kz are a shove you steer against,
+    // while y is somewhere you are. Nothing but your own jump lifts you.
+    y: 0, vy: 0,
     kx: 0, kz: 0, // knockback velocity
     aim: Math.atan2(-sp.x, -sp.z), // face the middle
+    pitch: 0, // vertical look, and therefore the vertical half of every shot
     hp: PLAYER.maxHp,
     alive: true,
     respawnAt: 0,
@@ -205,7 +210,7 @@ export function addPlayer(world, { id, name, seat, isBot = false }) {
     kills: 0, deaths: 0, score: 0,
     streak: 0, lastKillAt: -99,
     damageDealt: 0,
-    input: { mx: 0, mz: 0, ax: 0, az: 0, shoot: false, seq: 0 },
+    input: { mx: 0, mz: 0, ax: 0, az: 0, pitch: 0, jump: false, shoot: false, seq: 0 },
     lastSeq: 0,
     connected: true,
   };
@@ -223,7 +228,14 @@ export function applyInput(world, id, input) {
   // Sanitize: never trust a client to send a sane vector.
   const [mx, mz] = clampUnit(Number(input.mx) || 0, Number(input.mz) || 0);
   const [ax, az] = clampUnit(Number(input.ax) || 0, Number(input.az) || 0);
-  p.input = { mx, mz, ax, az, shoot: !!input.shoot, seq: input.seq | 0 };
+  // Pitch is part of the shot now, so it is exactly as untrustworthy as the
+  // rest of the struct: clamped to the same range the camera can render, and
+  // NaN-proofed, or a hand-rolled client could fire straight down through the
+  // floor and out at somebody's feet from across the map.
+  const pitch = clamp(Number(input.pitch) || 0, PLAYER.pitchMin, PLAYER.pitchMax);
+  p.input = {
+    mx, mz, ax, az, pitch, jump: !!input.jump, shoot: !!input.shoot, seq: input.seq | 0,
+  };
   p.lastSeq = input.seq | 0;
 }
 
@@ -280,6 +292,7 @@ function stepPlayers(world, dt) {
   const half = world.safeHalf;
   const r = PLAYER.radius;
   const knockDecayMul = modValue(world.modifier, 'knockbackDecayMul');
+  const gravity = GRAVITY * modValue(world.modifier, 'gravityMul');
 
   for (const p of world.players.values()) {
     if (!p.alive) {
@@ -311,6 +324,31 @@ function stepPlayers(world, dt) {
 
     p.x = clamp(p.x + vx * dt, -half + r, half - r);
     p.z = clamp(p.z + vz * dt, -half + r, half - r);
+
+    // --- vertical.
+    //
+    // Jump is level-triggered rather than edge-triggered: holding the button
+    // hops again the moment you land. That is deliberate on touch, where
+    // reliably re-tapping a button while a second thumb is swiping to look is
+    // genuinely hard. `vy <= 0` is what stops it becoming a double jump — you
+    // cannot push off again while you are still on the way up.
+    if (inp.jump && p.y <= 0 && p.vy <= 0) {
+      p.vy = PLAYER.jumpSpeed;
+      emit(world, { type: 'jump', x: p.x, z: p.z, target: p.id });
+    }
+    p.vy -= gravity * dt;
+    p.y += p.vy * dt;
+    if (p.y <= 0) {
+      p.y = 0;
+      p.vy = 0;
+    } else if (p.y >= PLAYER.maxJumpHeight) {
+      // Bumping your head on the ceiling described in PLAYER.maxJumpHeight.
+      // Killing the upward velocity rather than only the position matters:
+      // otherwise a low-gravity hop would press against the cap for half a
+      // second and then still be climbing when it came off it.
+      p.y = PLAYER.maxJumpHeight;
+      if (p.vy > 0) p.vy = 0;
+    }
 
     // Knockback bleeds off exponentially so hits feel punchy but not floaty.
     const damp = Math.exp(-PLAYER.knockbackDecay * knockDecayMul * dt);
@@ -347,6 +385,9 @@ function stepPlayers(world, dt) {
  */
 function applyAim(p) {
   p.aim = p.aimRaw;
+  // Pitch has no movement fallback the way yaw does: an idle stick means
+  // "still looking where I was looking", not "point at your feet".
+  p.pitch = p.input.pitch;
 }
 
 /** The cursed egg burns its holder for as long as they are carrying it. */
@@ -408,11 +449,18 @@ function fire(world, p) {
   p.nextShotAt = world.time
     + (rapid ? PLAYER.rapidCooldown : PLAYER.fireCooldown)
       * modValue(world.modifier, 'fireCooldownMul');
-  const dx = Math.sin(p.aim);
-  const dz = Math.cos(p.aim);
+  // Spherical direction: yaw and pitch together. This is the line that makes
+  // the crosshair honest — the shot leaves along exactly the vector the camera
+  // is looking down, so a reticle nailed to screen centre is the truth rather
+  // than an approximation of it.
+  const cp = Math.cos(p.pitch);
+  const dx = Math.sin(p.aim) * cp;
+  const dy = Math.sin(p.pitch);
+  const dz = Math.cos(p.aim) * cp;
   const muzzle = PLAYER.radius + BULLET.radius + 0.25;
   const id = nextId(world);
   const bx = p.x + dx * muzzle;
+  const by = p.y + PLAYER.eyeHeight + dy * muzzle;
   const bz = p.z + dz * muzzle;
   const ammo = world.time < p.ammoUntil ? p.ammo : 'none';
   world.bullets.push({
@@ -421,15 +469,21 @@ function fire(world, p) {
     team: p.team,
     ammo,
     x: bx,
+    y: by,
     z: bz,
     vx: dx * BULLET.speed,
+    vy: dy * BULLET.speed,
     vz: dz * BULLET.speed,
     life: BULLET.life,
     bounces: ammo === 'bouncy' ? AMMO.bouncy.bounces : 0,
   });
   // The id lets clients retire the exact tracer that landed, instead of
-  // letting the visual sail on through the chicken it just hit.
-  emit(world, { type: 'shot', id, x: bx, z: bz, aim: p.aim, owner: p.id, rapid, ammo });
+  // letting the visual sail on through the chicken it just hit. `y` and `pitch`
+  // ride along so every client draws the same climbing or falling line.
+  emit(world, {
+    type: 'shot', id, x: bx, y: by, z: bz,
+    aim: p.aim, pitch: p.pitch, owner: p.id, rapid, ammo,
+  });
 }
 
 function stepBullets(world, dt) {
@@ -440,25 +494,47 @@ function stepBullets(world, dt) {
     b.life -= dt;
     if (b.ammo === 'tracking') steerBullet(world, b, dt);
     const px = b.x;
+    const py = b.y;
     const pz = b.z;
     b.x += b.vx * dt;
+    b.y += b.vy * dt;
     b.z += b.vz * dt;
 
     if (b.life <= 0) {
-      emit(world, { type: 'bulletEnd', id: b.id, x: b.x, z: b.z, wall: false });
+      emit(world, { type: 'bulletEnd', id: b.id, x: b.x, y: b.y, z: b.z, wall: false });
+      continue;
+    }
+
+    // Floor hit. Aiming down is a real option now, so a shot into the ground
+    // has to stop there and throw sparks, rather than carrying on underneath
+    // the arena and coming up at someone's ankles.
+    if (b.y <= 0) {
+      const t = py > b.y ? py / (py - b.y) : 0; // where along this step it landed
+      emit(world, {
+        type: 'bulletEnd',
+        id: b.id,
+        x: px + (b.x - px) * t,
+        y: 0,
+        z: pz + (b.z - pz) * t,
+        wall: true,
+      });
       continue;
     }
 
     // Wall hit. Bouncy rounds reflect instead of dying, which is just negating
     // the velocity component on whichever axis was crossed — the walls are
     // axis-aligned, so there is no surface-normal maths to do.
+    //
+    // Only below the parapet. The walls are WALL_HEIGHT tall, so a shot fired
+    // steeply enough clears them and sails off into the void — which is what
+    // looking at the place would lead you to expect.
     const edge = half - BULLET.radius;
-    if (Math.abs(b.x) > edge || Math.abs(b.z) > edge) {
+    if (b.y <= WALL_HEIGHT && (Math.abs(b.x) > edge || Math.abs(b.z) > edge)) {
       if (b.bounces > 0) {
         b.bounces--;
         if (Math.abs(b.x) > edge) { b.vx = -b.vx; b.x = clamp(b.x, -edge, edge); }
         if (Math.abs(b.z) > edge) { b.vz = -b.vz; b.z = clamp(b.z, -edge, edge); }
-        emit(world, { type: 'bounce', id: b.id, x: b.x, z: b.z, owner: b.owner });
+        emit(world, { type: 'bounce', id: b.id, x: b.x, y: b.y, z: b.z, owner: b.owner });
         out.push(b);
         continue;
       }
@@ -466,6 +542,7 @@ function stepBullets(world, dt) {
         type: 'bulletEnd',
         id: b.id,
         x: clamp(b.x, -half, half),
+        y: b.y,
         z: clamp(b.z, -half, half),
         wall: true,
       });
@@ -478,9 +555,11 @@ function stepBullets(world, dt) {
     const bomber = world.bomber;
     if (bomber && bomber.alive) {
       const rr = BOMBER.radius + BULLET.radius;
-      if (segPointDist2(px, pz, b.x, b.z, bomber.x, bomber.z) <= rr * rr) {
+      if (segHitsCapsule(px, py, pz, b.x, b.y, b.z, bomber.x, 0, bomber.z, BOMBER.hitHeight, rr)) {
         damageBomber(world, BULLET.damage, b.owner, b.vx, b.vz);
-        emit(world, { type: 'bulletEnd', id: b.id, x: bomber.x, z: bomber.z, wall: false });
+        emit(world, {
+          type: 'bulletEnd', id: b.id, x: bomber.x, y: b.y, z: bomber.z, wall: false,
+        });
         consumed = true;
       }
     }
@@ -494,8 +573,13 @@ function stepBullets(world, dt) {
         // blocked by them.
         if (t.team !== null && owner && t.team === owner.team) continue;
         const rr = PLAYER.radius + BULLET.radius;
-        if (segPointDist2(px, pz, b.x, b.z, t.x, t.z) > rr * rr) continue;
+        if (!segHitsCapsule(px, py, pz, b.x, b.y, b.z, t.x, t.y, t.z, PLAYER.hitHeight, rr)) continue;
 
+        // Knockback stays flat on purpose. A hit may shove you across the floor
+        // — that is what it is for — but it must never lift you, because being
+        // airborne is the one state you cannot steer your way out of. Same
+        // principle as PLAYER.maxKnockback: a hit can move you, it must never
+        // take the wheel.
         const [nx, nz] = norm(b.vx, b.vz);
         const knock = BULLET.knockback * modValue(world.modifier, 'knockbackMul');
         t.kx += nx * knock;
@@ -508,7 +592,11 @@ function stepBullets(world, dt) {
           t.burnBy = b.owner;
           emit(world, { type: 'ignite', x: t.x, z: t.z, target: t.id, by: b.owner });
         }
-        emit(world, { type: 'bulletEnd', id: b.id, x: t.x, z: t.z, wall: false });
+        emit(world, {
+          type: 'bulletEnd', id: b.id,
+          x: t.x, y: clamp(b.y, t.y, t.y + PLAYER.hitHeight), z: t.z,
+          wall: false,
+        });
         consumed = true;
         break;
       }
@@ -528,6 +616,8 @@ function stepBullets(world, dt) {
 function steerBullet(world, b, dt) {
   const cfg = AMMO.tracking;
   const heading = Math.atan2(b.vx, b.vz);
+  const flat = Math.hypot(b.vx, b.vz);
+  const climb = Math.atan2(b.vy, flat);
 
   let best = null;
   let bestD = Infinity;
@@ -537,17 +627,26 @@ function steerBullet(world, b, dt) {
 
     const d = Math.sqrt(dist2(b.x, b.z, t.x, t.z));
     if (d > cfg.range || d > bestD) continue;
+    // Acquisition stays a flat cone. Everything worth tracking is standing on
+    // the same floor, so a vertical cone would only ever reject a target the
+    // round could comfortably have curved down onto.
     if (Math.abs(angleDelta(heading, Math.atan2(t.x - b.x, t.z - b.z))) > cfg.cone) continue;
     bestD = d;
     best = t;
   }
   if (!best) return;
 
+  // Steer in both axes at the same capped rate. Yaw alone would leave a round
+  // fired from mid-jump sailing over the target it had supposedly locked on.
   const want = Math.atan2(best.x - b.x, best.z - b.z);
-  const turn = clamp(angleDelta(heading, want), -cfg.turnRate * dt, cfg.turnRate * dt);
-  const next = heading + turn;
-  b.vx = Math.sin(next) * BULLET.speed;
-  b.vz = Math.cos(next) * BULLET.speed;
+  const wantY = best.y + PLAYER.hitHeight * 0.5;
+  const wantClimb = Math.atan2(wantY - b.y, Math.max(0.001, bestD));
+  const nextAim = heading + clamp(angleDelta(heading, want), -cfg.turnRate * dt, cfg.turnRate * dt);
+  const nextClimb = climb + clamp(wantClimb - climb, -cfg.turnRate * dt, cfg.turnRate * dt);
+  const cc = Math.cos(nextClimb);
+  b.vx = Math.sin(nextAim) * cc * BULLET.speed;
+  b.vy = Math.sin(nextClimb) * BULLET.speed;
+  b.vz = Math.cos(nextAim) * cc * BULLET.speed;
 }
 
 // ------------------------------------------------------------ damage / death
@@ -578,7 +677,9 @@ function killPlayer(world, target, byId, kind) {
   target.streak = 0;
   target.respawnAt = world.time + PLAYER.respawnDelay;
   dropEggs(world, target);
-  target.input = { mx: 0, mz: 0, ax: 0, az: 0, shoot: false, seq: target.input.seq };
+  target.input = {
+    mx: 0, mz: 0, ax: 0, az: 0, pitch: 0, jump: false, shoot: false, seq: target.input.seq,
+  };
 
   const killer = byId != null ? world.players.get(byId) : null;
   let multi = 0;
@@ -612,7 +713,9 @@ function killPlayer(world, target, byId, kind) {
 
   emit(world, {
     type: 'kill',
-    x: target.x, z: target.z,
+    // `y` so the burst of feathers happens where the chicken actually was.
+    // Dying at the top of a jump used to explode a metre under your own feet.
+    x: target.x, y: target.y, z: target.z,
     target: target.id,
     by: killer && killer !== target ? killer.id : null,
     kind, // 'bullet' | 'blast' | 'zone' | 'burn' | 'potato'
@@ -660,6 +763,12 @@ function respawn(world, p) {
   p.x = clamp(best.x, -lim, lim);
   p.z = clamp(best.z, -lim, lim);
   p.kx = p.kz = 0;
+  // Back on the ground, looking level. Respawning mid-air with the pitch you
+  // died at would hand you a corner of the sky and no idea why.
+  p.y = 0;
+  p.vy = 0;
+  p.pitch = 0;
+  p.input = { ...p.input, pitch: 0, jump: false };
   p.hp = PLAYER.maxHp;
   p.alive = true;
   p.invulnUntil = world.time + PLAYER.spawnInvuln;
@@ -1441,7 +1550,8 @@ export function snapshot(world) {
       : null,
     clock: world.clock,
     players: [...world.players.values()].map((p) => ({
-      id: p.id, name: p.name, seat: p.seat, team: p.team, x: p.x, z: p.z, aim: p.aim,
+      id: p.id, name: p.name, seat: p.seat, team: p.team,
+      x: p.x, y: p.y, z: p.z, aim: p.aim, pitch: p.pitch,
       hp: p.hp, alive: p.alive, kills: p.kills, deaths: p.deaths, score: p.score,
       invuln: p.invulnUntil > world.time, rapid: p.rapidUntil > world.time,
       ammo: p.ammoUntil > world.time ? p.ammo : 'none',
@@ -1453,7 +1563,8 @@ export function snapshot(world) {
       carrying: p.carrying, contract: contractInfo(p),
     })),
     bullets: world.bullets.map((b) => ({
-      id: b.id, x: b.x, z: b.z, vx: b.vx, vz: b.vz, owner: b.owner, ammo: b.ammo,
+      id: b.id, x: b.x, y: b.y, z: b.z,
+      vx: b.vx, vy: b.vy, vz: b.vz, owner: b.owner, ammo: b.ammo,
     })),
     pickups: world.pickups.map((p) => ({ id: p.id, x: p.x, z: p.z, type: p.type })),
     bomber: world.bomber && world.bomber.alive

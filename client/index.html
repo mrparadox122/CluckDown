@@ -66,7 +66,7 @@
       </div>
 
       <details class="settings-box">
-        <summary>Graphics</summary>
+        <summary>Settings</summary>
         <div class="settings-grid">
           <label class="setting">
             <span>Resolution</span>
@@ -80,16 +80,28 @@
             <span>Antialiasing</span>
             <input id="gfx-antialias" type="checkbox" />
           </label>
+          <!-- ids and the stored keys still say "gfx" because they predate this
+               panel growing beyond graphics. Renaming them would reset every
+               existing player's saved settings for no benefit. -->
+          <label class="setting">
+            <span>Look sensitivity</span>
+            <span class="setting-slider">
+              <input id="gfx-sensitivity" type="range" min="25" max="200" step="5" class="volume" />
+              <output id="gfx-sensitivity-out" class="setting-value">1.00&#215;</output>
+            </span>
+          </label>
+          <p class="settings-hint">How far the view turns for a given swipe or mouse movement. Applies to both, and takes effect immediately — drag it mid-match until it feels right.</p>
           <label class="setting toggle">
             <span>Aim assist</span>
             <input id="gfx-assist" type="checkbox" />
           </label>
           <p class="settings-hint">Aim assist gently pulls your crosshair onto a nearby chicken. On by default — aiming with a thumb is hard.</p>
           <label class="setting toggle">
-            <span>Move the fire button</span>
+            <span>Move the touch buttons</span>
             <input id="gfx-fire-edit" type="checkbox" />
           </label>
-          <p class="settings-hint">Thumb reach varies by hand and phone, so the fire button can be dragged anywhere. Turn this on, drag it in your next match, then turn it off.</p>
+          <p class="settings-hint">Thumb reach varies by hand and phone, so FIRE and JUMP can each be dragged anywhere. Turn this on, drag them in your next match, then turn it off.</p>
+          <p class="settings-hint">Holding FIRE and sliding your thumb keeps shooting while you aim &mdash; you never need to lift off to track someone.</p>
           <p class="settings-hint">Lower resolution and glow off give the biggest speed-up on older phones. Applies to your next match.</p>
         </div>
       </details>
@@ -127,10 +139,13 @@
   <!-- ===================== IN-GAME HUD ===================== -->
   <div id="hud" class="hidden">
     <div id="world-overlay"></div>
-    <!-- The crosshair is drawn where the shot will actually land (see
-         setCrosshairAt), and the minimap gives back the spatial awareness a
-         first-person view cannot. Both are unconditional — there is no other
-         camera to switch to. -->
+    <!-- The crosshair is nailed to the centre of the screen, because that is
+         now the truth: aim carries pitch as well as yaw, so the shot leaves
+         along exactly the line the camera looks down. It used to be projected
+         16 units along the firing line specifically BECAUSE that was not true —
+         shots went flat whatever the view did, and a centre reticle would have
+         been lying. The minimap gives back the spatial awareness a first-person
+         view cannot. Both are unconditional — there is no other camera. -->
     <div id="crosshair" class="crosshair"></div>
     <!-- Touch first-person controls.
          `#look-zone` is a bare swipe surface, NOT a stick. Every successful
@@ -142,6 +157,13 @@
     <div id="look-zone" class="look-zone"></div>
     <button id="fire-btn" class="fire-btn" type="button" aria-label="Fire">
       <span>FIRE</span>
+    </button>
+    <!-- Its own element rather than a gesture on the look surface, for the same
+         reason FIRE is: every touch is tracked by pointerId, so jumping,
+         shooting and swiping to look are three thumbs that never fight. Both
+         buttons drag to wherever your hands actually are. -->
+    <button id="jump-btn" class="jump-btn" type="button" aria-label="Jump">
+      <span>JUMP</span>
     </button>
     <canvas id="minimap" class="minimap" width="150" height="150"></canvas>
 
@@ -194,7 +216,7 @@
     </div>
 
     <div id="stick-left" class="stick-zone left"></div>
-    <div id="touch-hint" class="touch-hint">Left stick moves · Right stick aims &amp; fires</div>
+    <div id="touch-hint" class="touch-hint">Left stick moves · Swipe the right to look · FIRE &amp; JUMP</div>
   </div>
 
   <!-- ===================== MATCH RESULTS ===================== -->

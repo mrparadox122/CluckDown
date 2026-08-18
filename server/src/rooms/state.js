@@ -15,8 +15,15 @@ defineTypes(PlayerState, {
   team: 'int8',      // -1 in free-for-all
   hillPct: 'uint8',  // 0-100 share of the King of the Coop target
   x: 'float32',
+  // Height above the floor. Everyone needs it: the renderer to draw a chicken
+  // in mid-air, and every shooter's client to know that a jumping target's
+  // hitbox has left the ground with them.
+  y: 'float32',
   z: 'float32',
   aim: 'float32',
+  // Vertical look. Synced for the same reason `aim` is — it is half of where
+  // this player's shots are going, and other clients draw the tracer.
+  pitch: 'float32',
   hp: 'uint8',
   alive: 'boolean',
   invuln: 'boolean',
@@ -30,6 +37,11 @@ defineTypes(PlayerState, {
   // Knockback velocity. Synced because client prediction has to apply the
   // same shove the server will, otherwise every hit ends in a correction
   // and a blast reads as a rendering glitch rather than as being hit.
+  //
+  // There is no `vy` here on purpose. Knockback arrives from events a client
+  // cannot see coming, so it has to be told; vertical velocity comes from one
+  // source only — your own jump input — which the client already has. It
+  // predicts its own arc and eases `y` toward the server's.
   kx: 'float32',
   kz: 'float32',
   nemesis: 'string', // sessionId of whoever killed you last, '' for nobody

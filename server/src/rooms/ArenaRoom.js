@@ -484,8 +484,10 @@ export class ArenaRoom extends Room {
     ps.team = p.team ?? -1;
     ps.hillPct = Math.round(hillProgress(this.world, p.seat) * 100);
     ps.x = p.x;
+    ps.y = p.y;
     ps.z = p.z;
     ps.aim = p.aim;
+    ps.pitch = p.pitch;
     ps.hp = Math.max(0, Math.round(p.hp));
     ps.alive = p.alive;
     ps.invuln = p.invulnUntil > this.world.time;

@@ -1,17 +1,24 @@
-// Aim assist and ammo types.
+// Hit detection, aim assist and ammo types.
 //
-// Ammo is pure simulation. Aim assist is not: it runs on the CLIENT, shaping
-// the look angle before it is sent, so these drive the same pure helpers the
-// client drives — plus one check that the server adds nothing of its own.
+// Ammo and hit detection are pure simulation. Aim assist is not: it runs on the
+// CLIENT, shaping the look angles before they are sent, so those checks drive
+// the same pure helpers the client drives — plus one check that the server adds
+// nothing of its own.
+//
+// The 3D section exists because "I want to shoot anywhere, not just left and
+// right" was a player report. Shots used to travel flat at chest height no
+// matter where the camera pointed, so pitch was decoration; a chicken was an
+// infinitely tall cylinder and there was no such thing as shooting over one.
+// Both halves of that changed at once, and each is a way the other can break.
 //
 //   node shared/test/combat.mjs
 
 import {
-  createWorld, addPlayer, applyInput, stepWorld,
+  createWorld, addPlayer, applyInput, stepWorld, initBot, stepBots,
   AIM_ASSIST, AMMO, PLAYER, BULLET, TICK_DT, rollPickup, PICKUP_WEIGHTS,
-  pickAimTarget, pullAim,
+  pickAimTarget, pullAim, pullPitch, WALL_HEIGHT,
 } from '../src/index.js';
-import { angleDelta } from '../src/math.js';
+import { angleDelta, segHitsCapsule } from '../src/math.js';
 
 const failures = [];
 const check = (l, c, d = '') => {
@@ -31,6 +38,109 @@ const add = (world, id, seat, x, z) => {
   p.x = x; p.z = z; p.invulnUntil = 0;
   return p;
 };
+
+// ------------------------------------------------------- shooting in 3D
+console.log('\n--- the shot goes where you are looking ---');
+
+/**
+ * Fires one shot along a given yaw and pitch and reports what it did.
+ *
+ * One shot, not a burst: the point of every check below is where a single
+ * bullet went, and a burst would let a second round paper over the first.
+ */
+function shoot({ from = [0, 0, 0], at = null, pitch = 0, aim = null, seconds = 1.6 } = {}) {
+  const world = arena();
+  const me = add(world, 'me', 0, from[0], from[2]);
+  me.y = from[1];
+  const foe = at ? add(world, 'foe', 1, at[0], at[2]) : null;
+  if (foe) foe.y = at[1];
+
+  const yaw = aim ?? (foe ? Math.atan2(foe.x - me.x, foe.z - me.z) : 0);
+  const out = { hits: 0, ends: [], damage: 0 };
+
+  for (let t = 0; t < seconds / TICK_DT; t++) {
+    if (foe) { foe.hp = PLAYER.maxHp; foe.invulnUntil = 0; foe.y = at[1]; foe.vy = 0; }
+    me.y = from[1];
+    me.vy = 0;
+    applyInput(world, 'me', {
+      mx: 0, mz: 0, ax: Math.sin(yaw), az: Math.cos(yaw), pitch, shoot: t === 0, seq: t,
+    });
+    for (const e of stepWorld(world, TICK_DT)) {
+      if (e.type === 'hit' && e.target === 'foe') { out.hits++; out.damage += e.amount; }
+      if (e.type === 'bulletEnd') out.ends.push(e);
+    }
+  }
+  return out;
+}
+
+// The baseline: nothing about a duel on flat ground may have changed.
+const flatDuel = shoot({ at: [0, 0, 12] });
+check('a level shot at someone standing in front of you still lands',
+  flatDuel.hits === 1, `${flatDuel.hits} hit(s)`);
+
+// ...and the thing that could not happen before: missing high.
+const overHead = shoot({ at: [0, 0, 12], pitch: 0.35 });
+console.log(`  same target, aimed 0.35rad up: ${overHead.hits} hit(s)`);
+check('a shot aimed over their head misses', overHead.hits === 0, `${overHead.hits} hit(s)`);
+check('...and lands somewhere else entirely', overHead.ends.length === 1,
+  `${overHead.ends.length} ending(s)`);
+
+// A jumping chicken is a target you have to lead upward. This is the exact
+// case that made the feature worth doing.
+const jumperFlat = shoot({ at: [0, PLAYER.maxJumpHeight, 12], pitch: 0 });
+const jumperUp = shoot({ at: [0, PLAYER.maxJumpHeight, 12], pitch: 0.108 });
+console.log(`  target at the top of a jump: level shot ${jumperFlat.hits}, raised shot ${jumperUp.hits}`);
+check('a level shot passes under someone at the top of a jump',
+  jumperFlat.hits === 0, `${jumperFlat.hits} hit(s)`);
+check('raising your aim onto them hits', jumperUp.hits === 1, `${jumperUp.hits} hit(s)`);
+
+// ...and the mirror image: shooting down from mid-air at someone on the floor.
+const fromAir = shoot({ from: [0, PLAYER.maxJumpHeight, 0], at: [0, 0, 12], pitch: -0.108 });
+const fromAirFlat = shoot({ from: [0, PLAYER.maxJumpHeight, 0], at: [0, 0, 12], pitch: 0 });
+console.log(`  firing from the top of a jump: level ${fromAirFlat.hits}, angled down ${fromAir.hits}`);
+check('aiming down from mid-jump hits the floor below you', fromAir.hits === 1,
+  `${fromAir.hits} hit(s)`);
+
+// The hitbox is the chicken you can see, not a pillar reaching to the ceiling.
+console.log('\n--- the hitbox is chicken-shaped ---');
+{
+  const rr = PLAYER.radius + BULLET.radius;
+  const across = (y) => segHitsCapsule(-3, y, 12, 3, y, 12, 0, 0, 12, PLAYER.hitHeight, rr);
+  const grazes = [0.1, 0.85, 1.7].map(across);
+  console.log(`  a level line at 0.1 / 0.85 / 1.7 up: ${grazes.join(', ')}`);
+  check('feet, body and head are all hittable', grazes.every(Boolean), String(grazes));
+  check('a line well above the comb is not a hit', !across(PLAYER.hitHeight + rr + 0.2));
+  check('a line under the floor is not a hit', !across(-rr - 0.2));
+  // A bullet standing still is a degenerate segment, and the closest-point
+  // maths has to survive it rather than returning NaN and silently never
+  // hitting anything again.
+  check('a zero-length sweep still tests cleanly',
+    segHitsCapsule(0, 0.85, 12, 0, 0.85, 12, 0, 0, 12, PLAYER.hitHeight, rr));
+  // Exactly parallel to the spine: the shared denominator vanishes.
+  check('a shot straight down someone\'s axis still tests cleanly',
+    segHitsCapsule(0, 4, 12, 0, 0, 12, 0, 0, 12, PLAYER.hitHeight, rr));
+}
+
+// Where a bullet stops now that down and up are real directions.
+console.log('\n--- bullets stop at the world ---');
+{
+  const down = shoot({ pitch: -1.2, aim: 0, seconds: 0.6 });
+  const end = down.ends[0];
+  console.log(`  fired into the ground: ends at y=${end?.y?.toFixed(2)}, wall=${end?.wall}`);
+  check('a shot into the floor stops at the floor', end && end.y === 0 && end.wall === true,
+    JSON.stringify(end && { y: +end.y.toFixed(2), wall: end.wall }));
+
+  // Against a wall, close range: flat stops on it, steep goes over it.
+  const world = arena();
+  const half = world.arena.half;
+  const near = half - 2;
+  const flat = shoot({ from: [0, 0, near], aim: 0, pitch: 0, seconds: 1.6 });
+  const steep = shoot({ from: [0, 0, near], aim: 0, pitch: 1.0, seconds: 1.6 });
+  console.log(`  two units from a ${WALL_HEIGHT}u wall: flat wall=${flat.ends[0]?.wall}, steep wall=${steep.ends[0]?.wall}`);
+  check('a flat shot stops on the wall', flat.ends[0]?.wall === true);
+  check('a steep shot clears the parapet instead of stopping in mid-air',
+    steep.ends[0]?.wall === false, JSON.stringify(steep.ends[0] && { wall: steep.ends[0].wall }));
+}
 
 // ------------------------------------------------------------- aim assist
 //
@@ -108,6 +218,70 @@ check('...but turning away deliberately still drops it',
 
 // A target outside the acquire range is not picked up at all.
 check('range is respected', !pickAimTarget(ME, [foeAt(0, AIM_ASSIST.range + 5)], 0));
+
+// --- the vertical half.
+//
+// Assist was horizontal-only for as long as shots were. Leaving it that way
+// once pitch reached the simulation would have recreated the original problem
+// one axis over: a thumb that lands the yaw and misses high.
+console.log('\n--- aim assist, vertically ---');
+
+/** Runs pullPitch to convergence against a target and returns the angle. */
+function settle(self, foe, frames = 60) {
+  let pitch = 0;
+  for (let t = 0; t < frames; t++) pitch = pullPitch(self, foe, pitch, TICK_DT);
+  return pitch;
+}
+
+const meDown = { id: 'me', x: 0, y: 0, z: 0, team: null };
+const standing = settle(meDown, { ...foeAt(0, 12), y: 0 });
+const jumping = settle(meDown, { ...foeAt(0, 12), y: PLAYER.maxJumpHeight });
+console.log(`  pitch onto a target on the floor ${standing.toFixed(3)}, mid-jump ${jumping.toFixed(3)}`);
+check('assist tilts UP for a target in the air', jumping > standing + 0.05,
+  `${standing.toFixed(3)} -> ${jumping.toFixed(3)}`);
+check('...and roughly level for one on the floor', Math.abs(standing) < 0.06,
+  standing.toFixed(3));
+
+// Shooting downward out of a jump is the same problem upside down.
+const meUp = { id: 'me', x: 0, y: PLAYER.maxJumpHeight, z: 0, team: null };
+const lookDown = settle(meUp, { ...foeAt(0, 12), y: 0 });
+check('assist tilts DOWN when you are the one in the air', lookDown < -0.05,
+  lookDown.toFixed(3));
+
+// The end-to-end version: an angle assist produced, fired through the real
+// simulation, at a target a level shot demonstrably misses.
+{
+  const assisted = settle(meDown, { ...foeAt(0, 12), y: PLAYER.maxJumpHeight });
+  const landed = shoot({ at: [0, PLAYER.maxJumpHeight, 12], pitch: assisted });
+  console.log(`  firing the assisted angle (${assisted.toFixed(3)}rad): ${landed.hits} hit(s)`);
+  check('the angle assist produces is one that actually lands', landed.hits === 1,
+    `${landed.hits} hit(s)`);
+}
+
+// Bots aim in three dimensions too, or they fire over your head from arm's
+// reach. Point blank on purpose: at one unit the true angle dwarfs the aim
+// jitter, so this is a deterministic check on a system that is otherwise all
+// Math.random.
+console.log('\n--- bots look up and down ---');
+{
+  const botPitch = (foeY) => {
+    const world = arena();
+    const bot = add(world, 'bot', 0, 0, 0);
+    bot.isBot = true;
+    initBot(bot, 'normal');
+    const foe = add(world, 'foe', 1, 0, 1);
+    foe.y = foeY;
+    stepBots(world, TICK_DT);
+    return bot.input.pitch;
+  };
+  const atFeet = botPitch(0);
+  const atJumper = botPitch(PLAYER.maxJumpHeight);
+  console.log(`  bot pitch: ${atFeet.toFixed(3)} at a grounded foe, ${atJumper.toFixed(3)} at a jumping one`);
+  check('a bot looks slightly down at someone on the floor', atFeet < 0, atFeet.toFixed(3));
+  check('...and up at someone above it', atJumper > 0.5, atJumper.toFixed(3));
+  check('bot pitch stays inside the legal range',
+    atJumper <= PLAYER.pitchMax && atFeet >= PLAYER.pitchMin);
+}
 
 // The simulation itself must no longer touch aim: whatever the client sends is
 // exactly what gets fired.

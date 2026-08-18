@@ -17,25 +17,22 @@ import '@babylonjs/core/Meshes/instancedMesh';
 import '@babylonjs/core/Meshes/thinInstanceMesh';
 
 import { hardwareScaling } from '../graphics.js';
-import { MAPS, DEFAULT_MAP, HILL } from '@cluckdown/shared';
+import { MAPS, DEFAULT_MAP, HILL, PLAYER, WALL_HEIGHT } from '@cluckdown/shared';
 
 // Cluckdown is a first-person game. Everything here is the camera that sits
 // behind the chicken's eyes.
 //
-// Eye height is deliberately chicken-height, not human-height: at 1.15 the
-// 2.6-unit walls actually enclose you. Raise it much past 1.6 and you look
-// straight over the top into the abyss the arena floats above.
-const FPS_EYE = 1.15;
+// Eye height and the pitch limits come from PLAYER now, not from this file.
+// They stopped being rendering choices the moment pitch became part of the
+// shot: the simulation fires from eye height along the look angle, and it
+// clamps what it is sent to the same limits. Two copies of these numbers would
+// mean the crosshair and the bullet quietly disagreeing.
+const FPS_EYE = PLAYER.eyeHeight;
 const FPS_FOV = 1.15;      // ~66 degrees
 const FPS_NEAR = 0.12;     // your own muzzle would clip against anything larger
 const FPS_YAW_LERP = 22;   // high: looking around must feel instant
 const FPS_RECOIL_KICK = 0.035;   // radians per shot
 const FPS_RECOIL_RECOVER = 9;    // per second
-
-// Pitch limits. Up is capped hard because there is nothing above the arena but
-// void; down is generous because that is where the chickens are.
-export const FPS_PITCH_MIN = -0.95;
-export const FPS_PITCH_MAX = 0.42;
 
 // Spectator orbit, used while dead. With no top-down view left, this is the
 // only overhead shot anyone ever gets.
@@ -192,7 +189,9 @@ export function buildArena(scene, size, mapId = DEFAULT_MAP) {
   // Walls: dark body + light grey cap, mirroring the screenshot's trim.
   const wallMat = litMat(scene, 'wallMat', '#1a1f33', { emissive: 0.05 });
   const capMat = litMat(scene, `capMat_${map.id}`, map.trim, { emissive: 0.16 });
-  const H = 2.6;
+  // Shared with the simulation, which needs to know when a shot has cleared
+  // the parapet rather than hit it.
+  const H = WALL_HEIGHT;
   const T = 0.9;
   const specs = [
     { x: 0, z: half + T / 2, w: size + T * 2, d: T },
@@ -285,9 +284,10 @@ export function buildArena(scene, size, mapId = DEFAULT_MAP) {
  * machinery to move between them; all of that is gone, and the file is roughly
  * a third the size for it.
  *
- * The simulation is still 2D — a position and one aim angle — which is exactly
- * what a first-person camera needs. Pitch exists only here; it never reaches
- * the sim, because everything in the game stands on the same ground plane.
+ * Pitch used to live only here: the simulation was flat, so tilting the view
+ * moved the horizon and nothing else. It reaches the sim now, along with the
+ * player's height off the floor, which is what lets the camera sit inside a
+ * jump and the crosshair sit still in the middle of the screen.
  */
 export class CameraRig {
   constructor(camera, arenaSize, engine) {
@@ -342,18 +342,19 @@ export class CameraRig {
     this.addShake(0.22);
   }
 
-  snapTo(x, z) {
-    this.focus.set(x, 0, z);
-    this.camera.position.set(x, FPS_EYE, z);
+  snapTo(x, z, y = 0) {
+    this.focus.set(x, y, z);
+    this.camera.position.set(x, y + FPS_EYE, z);
   }
 
   /**
+   * @param targetY  the player's height off the floor — nonzero mid-jump
    * @param aim      where the player is looking, in radians
    * @param alive    false switches to the spectator orbit
    * @param pitch    vertical look, already clamped by the caller
    * @param watch    optional {x, z} to spectate — normally your killer
    */
-  update(dt, targetX, targetZ, aim = 0, alive = true, pitch = 0, watch = null) {
+  update(dt, targetX, targetY, targetZ, aim = 0, alive = true, pitch = 0, watch = null) {
     this.recoil = Math.max(0, this.recoil - dt * FPS_RECOIL_RECOVER);
     if (!alive) return this.updateSpectator(dt, targetX, targetZ, watch);
 
@@ -364,7 +365,7 @@ export class CameraRig {
     if (d < -Math.PI) d += Math.PI * 2;
     this.yaw += d * Math.min(1, FPS_YAW_LERP * dt);
 
-    this.focus.set(targetX, 0, targetZ);
+    this.focus.set(targetX, targetY, targetZ);
 
     let sx = 0;
     let sy = 0;
@@ -379,12 +380,14 @@ export class CameraRig {
 
     const look = pitch + this.recoil;
     // Spherical, so looking down doesn't shorten the horizontal component and
-    // change the apparent turn rate.
+    // change the apparent turn rate. Same construction the simulation uses in
+    // fire(), which is the whole reason a centre reticle is honest.
     const cp = Math.cos(look);
-    this.camera.position.set(targetX + sx, FPS_EYE + sy, targetZ);
+    const eye = targetY + FPS_EYE;
+    this.camera.position.set(targetX + sx, eye + sy, targetZ);
     this.camera.setTarget(new Vector3(
       targetX + Math.sin(this.yaw) * cp * 10,
-      FPS_EYE + Math.sin(look) * 10,
+      eye + Math.sin(look) * 10,
       targetZ + Math.cos(this.yaw) * cp * 10,
     ));
   }

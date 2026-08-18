@@ -7,7 +7,9 @@ import { loadProfile, saveProfile, rankLabel, applyResult } from './profile.js';
 import { Hud } from './hud.js';
 import { Game } from './game/index.js';
 import { sfx } from './audio/sfx.js';
-import { loadGfx, saveGfx, RESOLUTIONS } from './graphics.js';
+import {
+  loadGfx, saveGfx, RESOLUTIONS, SENSITIVITY_MIN, SENSITIVITY_MAX, clampSensitivity,
+} from './graphics.js';
 import {
   blockZoomGestures, fullscreenSupported, isFullscreen, toggleFullscreen,
   lockLandscape, onFullscreenChange,
@@ -552,6 +554,31 @@ function bindGraphics() {
   $('gfx-glow').addEventListener('change', (e) => apply({ glow: e.target.checked }));
   $('gfx-antialias').addEventListener('change', (e) => apply({ antialias: e.target.checked }));
 
+  // Look sensitivity. Live, and it has to be: the only way anyone can tell
+  // whether a sensitivity is right is by turning with it, so a setting that
+  // waited for the next match would be tuned blind.
+  const sens = $('gfx-sensitivity');
+  const sensOut = $('gfx-sensitivity-out');
+  const showSens = (v) => { sensOut.textContent = `${v.toFixed(2)}\u00d7`; };
+  sens.min = String(SENSITIVITY_MIN * 100);
+  sens.max = String(SENSITIVITY_MAX * 100);
+  sens.value = String(Math.round(clampSensitivity(gfx.sensitivity) * 100));
+  showSens(clampSensitivity(gfx.sensitivity));
+  // `input`, not `change`: dragging must move the view as you drag, or you are
+  // choosing a number rather than a feel.
+  sens.addEventListener('input', (e) => {
+    const v = clampSensitivity(Number(e.target.value) / 100);
+    gfx = { ...gfx, sensitivity: v };
+    showSens(v);
+    game?.setSensitivity(v);
+  });
+  // Saving on release rather than on every pixel of the drag — one settled
+  // value in storage instead of forty.
+  sens.addEventListener('change', () => {
+    saveGfx(gfx);
+    sfx.play('uiClick');
+  });
+
   // Aim assist. Live, like the fire-button editor below — it is a feel setting
   // and the only way to judge it is to try it.
   const assist = $('gfx-assist');
@@ -563,16 +590,19 @@ function bindGraphics() {
     game?.setAssist(gfx.assist);
   });
 
-  // Fire-button layout editing. Also live: the whole point is to drag it while
-  // looking at the match it will be used in.
+  // Thumb-button layout editing. Also live: the whole point is to drag them
+  // while looking at the match they will be used in.
+  //
+  // The stored key is still `fireEdit` — it predates the jump button, and
+  // renaming it would silently reset the preference for everyone who has one.
   const fireEdit = $('gfx-fire-edit');
   fireEdit.checked = !!gfx.fireEdit;
   fireEdit.addEventListener('change', (e) => {
     gfx = { ...gfx, fireEdit: e.target.checked };
     saveGfx(gfx);
     sfx.play('uiClick');
-    game?.setFireEdit(gfx.fireEdit);
-    if (gfx.fireEdit) toast('Drag the FIRE button where you want it.', 3200);
+    game?.setButtonEdit(gfx.fireEdit);
+    if (gfx.fireEdit) toast('Drag FIRE and JUMP where you want them.', 3200);
   });
 }
 

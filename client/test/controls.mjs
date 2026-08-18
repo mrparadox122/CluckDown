@@ -5,6 +5,12 @@
 // toggle, no aim stick, and no top-down fallback — so this replaces the old
 // camera.mjs / touch.mjs / fps.mjs trio.
 //
+// Space is JUMP here, not fire. Something had to give when the simulation grew
+// a Y axis: Space is the jump key in every shooter anyone has played, and fire
+// already had a better home on the mouse. F is the keyboard fallback for it.
+// The two checks that pin that down are the whole reason this note exists —
+// if they ever start failing together, someone has swapped the keys back.
+//
 //   npm run dev:client
 //   node client/test/controls.mjs
 
@@ -77,6 +83,17 @@ const cam = await until(page, () => {
     minZ: g.camera.minZ,
     bodyHidden: view ? view.hidden : null,
     crosshair: !document.getElementById('crosshair').classList.contains('hidden'),
+    // Aim carries pitch now, so the shot leaves along exactly the line the
+    // camera looks down and the reticle belongs at screen centre. It used to be
+    // projected 16 units down the firing line precisely BECAUSE that was not
+    // true; if this drifts off centre, the projection has crept back in.
+    crosshairOff: (() => {
+      const r = document.getElementById('crosshair').getBoundingClientRect();
+      return Math.round(Math.hypot(
+        r.left + r.width / 2 - window.innerWidth / 2,
+        r.top + r.height / 2 - window.innerHeight / 2,
+      ));
+    })(),
     minimap: !document.getElementById('minimap').classList.contains('hidden'),
     // The things that used to exist and must not any more.
     hasViewBtn: !!document.getElementById('hud-view'),
@@ -95,6 +112,8 @@ check('first-person field of view', cam.fov > 1, String(cam.fov));
 check('near plane is close enough not to clip your own muzzle', cam.minZ < 0.5, String(cam.minZ));
 check('your own body is hidden', cam.bodyHidden === true);
 check('crosshair is up', cam.crosshair);
+check('the crosshair sits at screen centre, because that is where the shot goes',
+  cam.crosshairOff <= 2, `${cam.crosshairOff}px off centre`);
 check('minimap is up', cam.minimap);
 
 console.log('\n--- top-down is gone ---');
@@ -132,6 +151,7 @@ console.log('\n--- mouse look ---');
 const look = await page.evaluate(() => {
   const c = window.__cluckdown.game.controls;
   c.pointerLocked = true;
+  c.setSensitivity(1); // these are the shipped defaults, not whatever is stored
   c.yaw = 0; c.pitch = 0;
   c.onPointerMove({ pointerType: 'mouse', movementX: 300, movementY: 0 });
   const yaw = +c.yaw.toFixed(3);
@@ -149,6 +169,119 @@ check('moving the mouse right turns right', look.yaw > 0.1, String(look.yaw));
 check('pushing it down looks down', look.down < -0.05, String(look.down));
 check('pulling it up looks up', look.up > 0.05, String(look.up));
 
+// --- look sensitivity, wired all the way from the menu --------------------
+//
+// The slider is the whole point: no single tuned constant has ever suited both
+// the player who flicks and the player who tracks. What matters here is that
+// the control in the menu reaches the thing that turns the camera — a slider
+// that moves a number nobody reads is worse than no slider.
+console.log('\n--- look sensitivity ---');
+const sens = await page.evaluate(() => {
+  const c = window.__cluckdown.game.controls;
+  const el = document.getElementById('gfx-sensitivity');
+  const before = c.sensitivity;
+
+  // Drive it the way a player does — the element, not the API behind it.
+  el.value = '200';
+  el.dispatchEvent(new Event('input', { bubbles: true }));
+  const afterDrag = c.sensitivity;
+  const readout = document.getElementById('gfx-sensitivity-out').textContent;
+
+  // ...and the mouse must actually turn twice as far for the same movement.
+  c.pointerLocked = true;
+  c.setSensitivity(1);
+  c.yaw = 0;
+  c.onPointerMove({ pointerType: 'mouse', movementX: 200, movementY: 0 });
+  const atOne = c.yaw;
+  c.setSensitivity(2);
+  c.yaw = 0;
+  c.onPointerMove({ pointerType: 'mouse', movementX: 200, movementY: 0 });
+  const atTwo = c.yaw;
+
+  el.value = '100';
+  el.dispatchEvent(new Event('input', { bubbles: true }));
+  c.setSensitivity(1);
+  return { before, afterDrag, readout, atOne: +atOne.toFixed(4), atTwo: +atTwo.toFixed(4) };
+});
+console.log('  ', JSON.stringify(sens));
+check('the Settings slider reaches the live controls', sens.afterDrag === 2,
+  `${sens.before} -> ${sens.afterDrag}`);
+check('it shows the player the value it is on', /2(\.0+)?/.test(sens.readout), sens.readout);
+check('doubling it doubles how far the mouse turns you',
+  Math.abs(sens.atTwo / sens.atOne - 2) < 0.001, `${(sens.atTwo / sens.atOne).toFixed(3)}x`);
+
+// --- jumping, and where the fire key went ---------------------------------
+console.log('\n--- jump ---');
+const keyed = await page.evaluate(() => {
+  const c = window.__cluckdown.game.controls;
+  c.usingTouch = false;
+  c.keys.clear();
+  c.mouseDown = false;
+
+  c.keys.add('Space');
+  const space = c.sample(null, 1 / 60, []);
+  const withSpace = { jump: space.jump, shoot: space.shoot };
+  c.keys.delete('Space');
+
+  c.keys.add('KeyF');
+  const f = c.sample(null, 1 / 60, []);
+  const withF = { jump: f.jump, shoot: f.shoot };
+  c.keys.delete('KeyF');
+
+  const idle = c.sample(null, 1 / 60, []);
+  return { withSpace, withF, idle: { jump: idle.jump, shoot: idle.shoot } };
+});
+console.log('  ', JSON.stringify(keyed));
+check('Space jumps', keyed.withSpace.jump === true, JSON.stringify(keyed.withSpace));
+check('...and Space does NOT also fire', keyed.withSpace.shoot === false,
+  JSON.stringify(keyed.withSpace));
+check('F is the keyboard fire key', keyed.withF.shoot === true, JSON.stringify(keyed.withF));
+check('...and F does not jump', keyed.withF.jump === false, JSON.stringify(keyed.withF));
+check('nothing held means neither', keyed.idle.jump === false && keyed.idle.shoot === false,
+  JSON.stringify(keyed.idle));
+
+// The camera has to actually leave the ground. Polled for a RENDERED frame:
+// under SwiftShader the loop runs at two or three frames a second, so a fixed
+// wait routinely measures a frame in which nothing has happened yet.
+const eyeLevel = await page.evaluate(() => +window.__cluckdown.game.camera.position.y.toFixed(3));
+const airborne = await until(page, () => {
+  const S = window.__cluckdown;
+  const c = S.game.controls;
+  const me = S.session.world.players.get(S.session.selfId);
+  if (me) { me.hp = 100; me.invulnUntil = S.session.world.time + 60; }
+  c.usingTouch = false;
+  c.keys.add('Space'); // level-triggered, so holding it is a legitimate jump
+  return me && me.y > 0.4
+    ? { y: +me.y.toFixed(3), camY: +S.game.camera.position.y.toFixed(3) }
+    : null;
+}, 15000);
+await page.evaluate(() => window.__cluckdown.game.controls.keys.delete('Space'));
+console.log('  ', JSON.stringify(airborne), 'from eye level', eyeLevel);
+check('holding jump lifts the chicken off the floor', !!airborne, JSON.stringify(airborne));
+check('...and the camera goes up with it', (airborne?.camY ?? 0) > eyeLevel + 0.3,
+  `${eyeLevel} -> ${airborne?.camY}`);
+
+// ...and comes back down. A jump you cannot land is a bug with a much worse
+// name than "jump".
+const landed = await until(page, () => {
+  const S = window.__cluckdown;
+  const me = S.session.world.players.get(S.session.selfId);
+  if (me) { me.hp = 100; me.invulnUntil = S.session.world.time + 60; }
+  return me && me.y === 0 ? 'grounded' : null;
+}, 15000);
+check('gravity brings you back down', landed === 'grounded', String(landed));
+
+// Hand spawn protection back before moving on. stepBomber filters invulnerable
+// players out of its target list entirely, so a chicken left permanently
+// shielded is one the bomber will never chase, never arm on, and never mark —
+// which silently fails the whole marker section below for reasons that have
+// nothing to do with markers.
+await page.evaluate(() => {
+  const S = window.__cluckdown;
+  const me = S.session.world.players.get(S.session.selfId);
+  if (me) me.invulnUntil = 0;
+});
+
 // --- aim assist runs on THIS side of the wire -----------------------------
 //
 // It used to be applied by the server, which was invisible in top-down but a
@@ -158,8 +291,8 @@ console.log('\n--- aim assist ---');
 const assist = await page.evaluate(() => {
   const c = window.__cluckdown.game.controls;
   // A target 10 units ahead and slightly to the right of where we are aiming.
-  const self = { id: 'me', x: 0, z: 0, team: null };
-  const foes = [{ id: 'foe', x: 2, z: 10, alive: true, team: null, invuln: false, mx: 0, mz: 0 }];
+  const self = { id: 'me', x: 0, y: 0, z: 0, team: null };
+  const foes = [{ id: 'foe', x: 2, y: 0, z: 10, alive: true, team: null, invuln: false, mx: 0, mz: 0 }];
   const want = Math.atan2(2, 10);
 
   c.setAssist(true);
@@ -179,7 +312,20 @@ const assist = await page.evaluate(() => {
   const inp = c.sample(self, 1 / 60, foes);
   const off = +Math.atan2(inp.ax, inp.az).toFixed(3);
   c.setAssist(true);
-  return { want: +want.toFixed(3), pulled, rawAfter, off };
+
+  // The vertical half. A target at the top of a jump has to pull the sent pitch
+  // UP, or assist would be quietly recreating "the crosshair only moves left
+  // and right" one axis over.
+  const high = [{ ...foes[0], x: 0, y: 1.25 }];
+  c.yaw = 0; c.pitch = 0;
+  let sentPitch = 0;
+  for (let i = 0; i < 30; i++) sentPitch = c.sample(self, 1 / 60, high).pitch;
+  const rawPitchAfter = +c.pitch.toFixed(3);
+
+  return {
+    want: +want.toFixed(3), pulled, rawAfter, off,
+    sentPitch: +sentPitch.toFixed(3), rawPitchAfter,
+  };
 });
 console.log('  ', JSON.stringify(assist));
 check('assist pulls the sent aim toward the target',
@@ -189,6 +335,10 @@ check('the RAW look angle is left alone, so turning away still drops the lock',
   Math.abs(assist.rawAfter) < 0.001, String(assist.rawAfter));
 check('turning assist off sends exactly what you asked for',
   Math.abs(assist.off) < 0.001, String(assist.off));
+check('assist raises the sent pitch onto a target in the air',
+  assist.sentPitch > 0.03, String(assist.sentPitch));
+check('the RAW pitch is left alone too, for the same reason as the yaw',
+  Math.abs(assist.rawPitchAfter) < 0.001, String(assist.rawPitchAfter));
 
 // --- markers: the bomber, and wherever the objective is -------------------
 console.log('\n--- world markers ---');
