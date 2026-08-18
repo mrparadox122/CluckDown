@@ -1,6 +1,6 @@
 import { Room, ServerError } from 'colyseus';
 import {
-  createWorld, addPlayer, removePlayer, applyInput, stepWorld,
+  createWorld, addPlayer, removePlayer, applyInput, stepWorld, xpForLevel,
   stepBots, initBot, botName,
   MODES, TICK_HZ, TICK_DT, PATCH_MS, MAX_CATCHUP, QUICK_CHAT, PLAYER, cleanRoomCode,
   hillProgress, castVote, voteTally, beginMatch, MAP_VOTE, contractInfo, BOMB,
@@ -491,9 +491,11 @@ export class ArenaRoom extends Room {
     ps.hp = Math.max(0, Math.round(p.hp));
     ps.alive = p.alive;
     ps.invuln = p.invulnUntil > this.world.time;
-    ps.rapid = p.rapidUntil > this.world.time;
-    ps.ammo = p.ammoUntil > this.world.time ? p.ammo : '';
-    ps.burning = p.burnUntil > this.world.time;
+    ps.level = p.level;
+    ps.xp = Math.max(0, Math.min(65535, Math.round(p.xp)));
+    ps.nextXp = Math.max(0, Math.min(65535, Math.round(xpForLevel(p.level + 1))));
+    ps.wind = p.windUntil > this.world.time;
+    ps.frenzy = p.frenzyUntil > this.world.time;
     ps.crop = Math.max(0, Math.min(255, Math.floor(p.crop)));
     ps.pecking = !!p.pecking;
     ps.feeding = !!p.feeding;

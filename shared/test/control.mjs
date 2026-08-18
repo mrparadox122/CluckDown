@@ -19,7 +19,7 @@
 
 import {
   createWorld, addPlayer, stepWorld, beginMatch,
-  TICK_DT, PLAYER, BULLET, BOMBER, MODIFIER_POOL, MAPS, MODE_LIST, modValue,
+  TICK_DT, PLAYER, BOMBER, MODIFIER_POOL, MAPS, MODE_LIST, modValue,
   applyInput, GRAVITY, WALL_HEIGHT,
 } from '../src/index.js';
 
@@ -42,12 +42,19 @@ function live(mode = 'casual', modifier = 'none', map = 'coop') {
  * Runs into a shove and reports the worst velocity achieved along the axis the
  * player is pushing toward. Negative means "moving backwards while sprinting
  * forwards", which is the thing that must not happen.
+ *
+ * Driven with BLAST knockback now. Bullets stopped applying any when shooting
+ * went hitscan — being shot tags you (a brief slow) instead of shoving you,
+ * which is the same idea taken further: a slow cannot move you against your
+ * input at all. Explosions still throw you, correctly, so they are what the cap
+ * has left to bound and what this has to measure. Blasts hit harder than
+ * bullets did, so `blasts` here is worth several of the old `shots`.
  */
-function pushBack(modifier, shots) {
+function pushBack(modifier, blasts) {
   const { w, p } = live('casual', modifier);
-  const kb = BULLET.knockback * modValue(modifier, 'knockbackMul');
+  const kb = BOMBER.blastKnockback * modValue(modifier, 'knockbackMul');
   p.x = 0; p.z = 0; p.kx = 0; p.kz = 0;
-  for (let i = 0; i < shots; i++) p.kx -= kb;
+  for (let i = 0; i < blasts; i++) p.kx -= kb;
 
   let worst = Infinity;
   let travelled = 0;
@@ -63,15 +70,15 @@ function pushBack(modifier, shots) {
   return { worst, travelled };
 }
 
-console.log('\n--- being shot must never take the wheel ---');
+console.log('\n--- being hit must never take the wheel ---');
 for (const modifier of ['none', 'lowGravity']) {
   for (const shots of [1, 3, 6]) {
     const { worst, travelled } = pushBack(modifier, shots);
-    console.log(`  ${modifier.padEnd(10)} ${shots} shot(s): worst ${worst.toFixed(2)} u/s, net ${travelled.toFixed(2)}u over 2s`);
+    console.log(`  ${modifier.padEnd(10)} ${shots} blast(s): worst ${worst.toFixed(2)} u/s, net ${travelled.toFixed(2)}u over 2s`);
     // Being shoved backwards briefly is the point of knockback. Ending up
     // behind where you started, after two seconds of sprinting the other way,
     // is not.
-    check(`${modifier}, ${shots} shots: you still end up ahead of where you started`,
+    check(`${modifier}, ${shots} blasts: you still end up ahead of where you started`,
       travelled > 0, `${travelled.toFixed(2)}u`);
   }
 }
@@ -165,8 +172,40 @@ console.log('\n--- walls are the same distance out on every side ---');
 console.log('\n--- no modifier can take the wheel ---');
 for (const modifier of MODIFIER_POOL) {
   const { travelled } = pushBack(modifier, 4);
-  check(`${modifier}: a 4-shot burst still leaves you able to advance`,
+  check(`${modifier}: four blasts still leave you able to advance`,
     travelled > 0, `${travelled.toFixed(2)}u`);
+}
+
+// The strongest form of the same guarantee, and the reason bullets stopped
+// shoving at all: a trace that tags you cannot move you one unit against your
+// input, however much of it lands.
+console.log('\n--- gunfire cannot move you at all any more ---');
+{
+  const { w, p } = live();
+  const shooter = w.players.get('b');
+  p.x = 0; p.z = 0; p.kx = 0; p.kz = 0;
+  p.invulnUntil = 0;
+  shooter.x = 0; shooter.z = -10; shooter.invulnUntil = 0;
+  const yaw = Math.atan2(0, 10);
+
+  let worstDrift = 0;
+  for (let t = 0; t < 1.5 / TICK_DT; t++) {
+    p.hp = PLAYER.maxHp;
+    p.invulnUntil = 0;
+    shooter.crop = 999;
+    shooter.dry = false;
+    applyInput(w, 'b', {
+      mx: 0, mz: 0, ax: Math.sin(yaw), az: Math.cos(yaw), shoot: true, seq: t,
+    });
+    applyInput(w, 'a', { mx: 0, mz: 0, seq: t });
+    stepWorld(w, TICK_DT);
+    worstDrift = Math.max(worstDrift, Math.hypot(p.x, p.z));
+  }
+  console.log(`  stood still under 1.5s of sustained fire: moved ${worstDrift.toFixed(3)}u`);
+  check('sustained fire does not push a standing player anywhere',
+    worstDrift < 1e-6, `${worstDrift.toFixed(4)}u`);
+  check('...and leaves no knockback velocity behind', p.kx === 0 && p.kz === 0,
+    `(${p.kx}, ${p.kz})`);
 }
 
 // ---------------------------------------------------------------- vertical

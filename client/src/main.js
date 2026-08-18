@@ -7,6 +7,7 @@ import { loadProfile, saveProfile, rankLabel, applyResult } from './profile.js';
 import { Hud } from './hud.js';
 import { Game } from './game/index.js';
 import { sfx } from './audio/sfx.js';
+import { tts } from './audio/index.js';
 import {
   loadGfx, saveGfx, RESOLUTIONS, SENSITIVITY_MIN, SENSITIVITY_MAX, clampSensitivity,
   BRIGHTNESS_MIN, BRIGHTNESS_MAX, clampBrightness,
@@ -507,6 +508,9 @@ function bindAudio() {
   const toggle = () => {
     sfx.unlock();
     sfx.toggleMute();
+    // Mute means mute. Speech is on a separate channel from the synth and
+    // would otherwise keep talking over a silenced game.
+    tts.setMuted(sfx.muted);
     syncAudioUi();
     if (!sfx.muted) sfx.play('uiClick');
   };
@@ -625,6 +629,19 @@ function bindGraphics() {
   sens.addEventListener('change', () => {
     saveGfx(gfx);
     sfx.play('uiClick');
+  });
+
+  // The spoken announcer. Live, and it speaks once on being switched on — a
+  // toggle for something you cannot see needs to demonstrate itself, or the
+  // player has no idea whether it worked.
+  const announcer = $('gfx-announcer');
+  announcer.checked = !!gfx.announcer;
+  announcer.addEventListener('change', (e) => {
+    gfx = { ...gfx, announcer: e.target.checked };
+    saveGfx(gfx);
+    sfx.play('uiClick');
+    tts.setEnabled(gfx.announcer);
+    if (gfx.announcer) tts.say('Announcer on', { priority: 5, key: 'announcerTest' });
   });
 
   // Aim assist. Live, like the fire-button editor below — it is a feel setting

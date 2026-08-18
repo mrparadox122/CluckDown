@@ -3,7 +3,7 @@
 // offline practice opponents on the client with zero extra code.
 
 import { applyInput } from './sim.js';
-import { PLAYER, BULLET, BOMBER, PICKUP, HILL, HEIST, BOMB, CROP, cropCapacity } from './constants.js';
+import { PLAYER, BOMBER, PICKUP, HILL, HEIST, BOMB, CROP, cropCapacity } from './constants.js';
 import { norm, len, dist2, clamp, angleDelta, segBoxEntry } from './math.js';
 
 const BOT_NAMES = [
@@ -289,11 +289,9 @@ function decide(world, p, b) {
 
   const d = Math.sqrt(dist2(p.x, p.z, foe.x, foe.z));
 
-  // Lead the target: aim where they'll be when the bullet arrives.
-  const flight = d / BULLET.speed;
-  const leadX = foe.x + (foe.input?.mx ?? 0) * PLAYER.speed * flight;
-  const leadZ = foe.z + (foe.input?.mz ?? 0) * PLAYER.speed * flight;
-  const [lx, lz] = norm(leadX - p.x, leadZ - p.z);
+  // Straight at them. Shots are hitscan, so there is nothing to lead — bots
+  // used to aim ahead of a moving target, which now misses behind it.
+  const [lx, lz] = norm(foe.x - p.x, foe.z - p.z);
   ax = lx + b.aimJitterX;
   az = lz + b.aimJitterZ;
   shoot = aimedAt(p, lx, lz, b.cfg.fireArc) && canSee(world, p, foe);

@@ -15,6 +15,7 @@
     "test:tasks": "node test/tasks.mjs",
     "test:control": "node test/control.mjs",
     "test:cover": "node test/cover.mjs",
-    "test:crop": "node test/crop.mjs"
+    "test:crop": "node test/crop.mjs",
+    "test:levels": "node test/levels.mjs"
   }
 }

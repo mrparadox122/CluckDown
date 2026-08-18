@@ -1,4 +1,4 @@
-// Hit detection, aim assist and ammo types.
+// Hit detection and aim assist.
 //
 // Ammo and hit detection are pure simulation. Aim assist is not: it runs on the
 // CLIENT, shaping the look angles before they are sent, so those checks drive
@@ -15,8 +15,8 @@
 
 import {
   createWorld, addPlayer, applyInput, stepWorld, initBot, stepBots,
-  AIM_ASSIST, AMMO, PLAYER, BULLET, TICK_DT, rollPickup, PICKUP_WEIGHTS,
-  pickAimTarget, pullAim, pullPitch, WALL_HEIGHT,
+  AIM_ASSIST, PLAYER, BULLET, TICK_DT, rollPickup, PICKUP_WEIGHTS,
+  pickAimTarget, pullAim, pullPitch, WALL_HEIGHT, LEVELS,
 } from '../src/index.js';
 import { angleDelta, segHitsCapsule } from '../src/math.js';
 
@@ -56,7 +56,10 @@ function shoot({ from = [0, 0, 0], at = null, pitch = 0, aim = null, seconds = 1
   if (foe) foe.y = at[1];
 
   const yaw = aim ?? (foe ? Math.atan2(foe.x - me.x, foe.z - me.z) : 0);
-  const out = { hits: 0, ends: [], damage: 0 };
+  // `ends` are the impact points. They ride on the shot event itself now: the
+  // trace resolves in the instant it is fired, so where it started and where it
+  // stopped are decided together and there is nothing left to report later.
+  const out = { hits: 0, ends: [], damage: 0, sameTick: null };
 
   for (let t = 0; t < seconds / TICK_DT; t++) {
     if (foe) { foe.hp = PLAYER.maxHp; foe.invulnUntil = 0; foe.y = at[1]; foe.vy = 0; }
@@ -65,9 +68,19 @@ function shoot({ from = [0, 0, 0], at = null, pitch = 0, aim = null, seconds = 1
     applyInput(world, 'me', {
       mx: 0, mz: 0, ax: Math.sin(yaw), az: Math.cos(yaw), pitch, shoot: t === 0, seq: t,
     });
-    for (const e of stepWorld(world, TICK_DT)) {
-      if (e.type === 'hit' && e.target === 'foe') { out.hits++; out.damage += e.amount; }
-      if (e.type === 'bulletEnd') out.ends.push(e);
+    const events = stepWorld(world, TICK_DT);
+    const fired = events.some((e) => e.type === 'shot' && e.owner === 'me');
+    for (const e of events) {
+      if (e.type === 'hit' && e.target === 'foe') {
+        out.hits++;
+        out.damage += e.amount;
+        // Hitscan's defining property: the hit is in the SAME batch of events
+        // as the shot that caused it.
+        out.sameTick ??= fired;
+      }
+      if (e.type === 'shot' && e.owner === 'me') {
+        out.ends.push({ x: e.hx, y: e.hy, z: e.hz, wall: e.wall, hit: e.hit, head: e.head });
+      }
     }
   }
   return out;
@@ -302,81 +315,195 @@ console.log(`  server drift from the angle sent: ${untouched.toFixed(4)}rad`);
 check('the server fires exactly the angle it was sent, with no assist of its own',
   untouched < 1e-6, `${untouched.toFixed(6)}rad`);
 
-// ------------------------------------------------------------- ammo types
-console.log('\n--- ammo types ---');
+// ---------------------------------------------------------------- hitscan
+console.log('\n--- shots resolve instantly ---');
+// The reason this stopped being a projectile at all.
+//
+// Players arriving from CS or Valorant said shooting felt unsatisfying and could
+// not say why. The answer was travel time: those games are hitscan, so a player
+// trained on them never leads a target — they put the dot on it and click. Here
+// a round took a couple of tenths to arrive even after the speed was raised
+// twice, so every shot landed behind where they were looking and the game felt
+// like it was arguing with them. Raising the speed again would not have fixed
+// it, because it was never a tuning problem.
+{
+  const duel = shoot({ at: [0, 0, 12] });
+  check('a hit lands on the same tick as the shot that caused it',
+    duel.hits === 1 && duel.sameTick === true, `hits ${duel.hits}, sameTick ${duel.sameTick}`);
+  check('...and the shot event carries where it landed',
+    duel.ends.length === 1 && Number.isFinite(duel.ends[0].z), JSON.stringify(duel.ends[0]));
+  check('...and says what it hit', duel.ends[0]?.hit === 'player', String(duel.ends[0]?.hit));
 
-/** Fires at a target for `seconds` and reports what landed. */
-function fireAt(ammo, { offsetRad = 0, foeAt = [0, 10], seconds = 2 } = {}) {
+  // Nothing is left in flight afterwards, because nothing was ever in flight.
   const world = arena();
-  const me = add(world, 'me', 0, 0, 0);
-  const foe = add(world, 'foe', 1, foeAt[0], foeAt[1]);
-  if (ammo !== 'none') { me.ammo = ammo; me.ammoUntil = world.time + 60; }
-
-  const angle = Math.atan2(foe.x - me.x, foe.z - me.z) + offsetRad;
-  const tally = { hits: 0, damage: 0, bounces: 0, ignites: 0, burnDamage: 0, shots: 0 };
-
-  for (let t = 0; t < seconds / TICK_DT; t++) {
-    foe.hp = PLAYER.maxHp; // keep it standing so we can count everything
-    foe.invulnUntil = 0;
-    applyInput(world, 'me', { mx: 0, mz: 0, ax: Math.sin(angle), az: Math.cos(angle), shoot: true, seq: t });
-    for (const e of stepWorld(world, TICK_DT)) {
-      if (e.type === 'shot') tally.shots++;
-      if (e.type === 'bounce') tally.bounces++;
-      if (e.type === 'ignite') tally.ignites++;
-      if (e.type === 'hit' && e.target === 'foe') {
-        tally.hits++;
-        tally.damage += e.amount;
-        if (e.kind === 'burn') tally.burnDamage += e.amount;
-      }
-    }
-  }
-  return tally;
+  add(world, 'me', 0, 0, 0);
+  applyInput(world, 'me', { mx: 0, mz: 0, ax: 0, az: 1, shoot: true, seq: 1 });
+  stepWorld(world, TICK_DT);
+  check('there are no projectiles to keep track of', world.bullets === undefined,
+    JSON.stringify(world.bullets));
 }
 
-// Tracking: fire deliberately wide, with assist disabled so only the bullet
-// steering can explain a hit.
-const assistWas = AIM_ASSIST.enabled;
-AIM_ASSIST.enabled = false;
+// A trace has no per-tick step to tunnel through anyone, which was a real risk
+// while this was a projectile: at the end it moved 0.87 units per tick against
+// a 0.76-unit hit radius and would have passed clean THROUGH a chicken between
+// two frames if the sweep had ever been simplified to a point test. Range is
+// what bounds a trace instead, so that is what gets swept here.
+{
+  const world = arena();
+  // Widened, because the default arena is 48 across and its walls stop a trace
+  // long before its range does. Testing reach inside a box half its length
+  // would measure the box.
+  world.arena = { size: 140, half: 70 };
+  world.safeHalf = 70;
+  world.obstacles = [];
 
-const plainWide = fireAt('none', { offsetRad: 0.32 });
-const trackWide = fireAt('tracking', { offsetRad: 0.32 });
-console.log(`  wide shot: plain ${plainWide.hits} hits, tracking ${trackWide.hits} hits`);
-check('tracking rounds curve onto a target a plain shot misses',
-  trackWide.hits > plainWide.hits, `${plainWide.hits} -> ${trackWide.hits}`);
+  const at = (range) => {
+    const w = arena();
+    w.arena = { size: 140, half: 70 };
+    w.safeHalf = 70;
+    w.obstacles = [];
+    const me = add(w, 'me', 0, 0, 0);
+    const foe = add(w, 'foe', 1, 0, range);
+    let hits = 0;
+    for (let t = 0; t < 0.4 / TICK_DT; t++) {
+      foe.hp = PLAYER.maxHp;
+      foe.invulnUntil = 0;
+      applyInput(w, 'me', { mx: 0, mz: 0, ax: 0, az: 1, shoot: t === 0, seq: t });
+      for (const e of stepWorld(w, TICK_DT)) if (e.type === 'hit' && e.target === 'foe') hits++;
+    }
+    return hits;
+  };
 
-AIM_ASSIST.enabled = assistWas;
+  const inside = [2, 3.5, 6, 12, 22, 34, BULLET.range - 2].map((r) => `${r}u:${at(r)}`);
+  console.log(`  point blank to the edge of its reach — ${inside.join(' ')}`);
+  check('a level shot connects at every range inside its reach',
+    inside.every((r) => r.endsWith(':1')), inside.join(' '));
 
-// Bouncy: shoot at a wall with nobody in front.
-const bouncy = fireAt('bouncy', { offsetRad: Math.PI, foeAt: [0, 10], seconds: 1.5 });
-const plainWall = fireAt('none', { offsetRad: Math.PI, foeAt: [0, 10], seconds: 1.5 });
-console.log(`  into the wall: plain ${plainWall.bounces} bounces, bouncy ${bouncy.bounces} bounces`);
-check('bouncy rounds ricochet', bouncy.bounces > 0, `${bouncy.bounces} bounces`);
-check('plain rounds do not', plainWall.bounces === 0, `${plainWall.bounces} bounces`);
+  const beyond = at(BULLET.range + 6);
+  console.log(`  ${(BULLET.range + 6).toFixed(0)}u, past a ${BULLET.range}u reach: ${beyond} hits`);
+  check('...and stops at the end of it', beyond === 0, `${beyond} hits`);
+}
 
-// Fire: burn keeps ticking and is credited to the shooter.
-const fire = fireAt('fire', { seconds: 2 });
-const plain = fireAt('none', { seconds: 2 });
-console.log(`  fire: ${fire.ignites} ignites, ${fire.burnDamage.toFixed(0)} burn damage of ${fire.damage.toFixed(0)} total`);
-check('fire rounds ignite the target', fire.ignites > 0, `${fire.ignites}`);
-check('burning deals damage over time', fire.burnDamage > 0, `${fire.burnDamage.toFixed(0)}`);
-check('fire out-damages plain rounds', fire.damage > plain.damage,
-  `${plain.damage.toFixed(0)} -> ${fire.damage.toFixed(0)}`);
-check('plain rounds never ignite', plain.ignites === 0);
+// -------------------------------------------------------------- headshots
+console.log('\nHEADSHOTS');
+// The skill expression hitscan needed. With every shot doing the same damage
+// wherever it lands, aiming carefully and aiming vaguely pay identically — which
+// is half of why shooting felt flat to anyone arriving from CS or Valorant.
+//
+// The subtle part is WHERE the line goes, and the first attempt got it exactly
+// backwards. Two chickens stand at the same height, so a shot fired dead level
+// leaves one eye at 1.15 and arrives at the other at 1.15. Put the head line
+// below that and every flat shot is a free headshot: no skill, a two-round
+// time-to-kill, and aim assist — which pulls BELOW the line — quietly making
+// your shots worse. It has to sit above eye height so the head is a thing you
+// aim at.
+{
+  check('the head line sits above eye height, or level shots are free heads',
+    BULLET.headFrom > PLAYER.eyeHeight,
+    `head ${BULLET.headFrom} vs eye ${PLAYER.eyeHeight}`);
+  check('...and below the top of the hitbox, or it is unreachable',
+    BULLET.headFrom < PLAYER.hitHeight, `${BULLET.headFrom} vs ${PLAYER.hitHeight}`);
+  check('a headshot is worth several body shots', BULLET.headDamage > BULLET.damage * 3,
+    `${BULLET.damage} vs ${BULLET.headDamage}`);
 
-// Burn continues after the shooting stops, and expires.
-const lingering = (() => {
+  const level = shoot({ at: [0, 0, 12], pitch: 0 });
+  console.log(`  level shot at 12u: ${level.damage} damage, head=${level.ends[0]?.head}`);
+  check('a level shot hits the body, not the head', level.damage === BULLET.damage,
+    `${level.damage} damage`);
+
+  // Nudged up by the angle the constant implies. This is the crosshair
+  // placement the whole feature exists to reward.
+  const up = Math.atan2(BULLET.headFrom + 0.18 - PLAYER.eyeHeight, 12);
+  const head = shoot({ at: [0, 0, 12], pitch: up });
+  console.log(`  aimed ${(up * 180 / Math.PI).toFixed(2)} degrees higher: ${head.damage} damage, head=${head.ends[0]?.head}`);
+  check('aiming a fraction higher hits the head', head.damage === BULLET.headDamage,
+    `${head.damage} damage`);
+  check('...and the shot event says so', head.ends[0]?.head === true, String(head.ends[0]?.head));
+
+  // Two heads kill; ten bodies do. The gap is the point.
+  check('two headshots are lethal', BULLET.headDamage * 2 >= PLAYER.maxHp,
+    `${BULLET.headDamage * 2} vs ${PLAYER.maxHp}hp`);
+  check('...but one is not, so it is never a one-shot game',
+    BULLET.headDamage < PLAYER.maxHp, String(BULLET.headDamage));
+
+  // Aim assist must NOT hand them out — it exists so a thumb can land body
+  // shots, not so it can play the skill part of the game for you.
+  const assistAt = PLAYER.hitHeight * AIM_ASSIST.aimHeight;
+  console.log(`  aim assist pulls to ${assistAt.toFixed(2)}, head line at ${BULLET.headFrom}`);
+  check('aim assist aims at the body, never the head', assistAt < BULLET.headFrom,
+    `${assistAt.toFixed(2)} vs ${BULLET.headFrom}`);
+}
+
+// ---------------------------------------------------------------- tagging
+console.log('\n--- being shot slows you, it does not shove you ---');
+{
   const world = arena();
   const me = add(world, 'me', 0, 0, 0);
-  const foe = add(world, 'foe', 1, 0, 10);
-  foe.burnUntil = world.time + AMMO.fire.burnDuration;
-  foe.burnBy = me.id;
-  const before = foe.hp;
-  for (let t = 0; t < 6 / TICK_DT; t++) stepWorld(world, TICK_DT);
-  return { lost: before - foe.hp, stillBurning: foe.burnUntil > world.time };
-})();
-console.log(`  lingering burn took ${lingering.lost.toFixed(0)} hp`);
-check('a burn keeps ticking with no further shots', lingering.lost > 10, `${lingering.lost.toFixed(0)} hp`);
-check('a burn eventually goes out', !lingering.stillBurning);
+  const foe = add(world, 'foe', 1, 0, 12);
+  const startX = foe.x;
+  const startZ = foe.z;
+
+  applyInput(world, 'me', { mx: 0, mz: 0, ax: 0, az: 1, shoot: true, seq: 1 });
+  stepWorld(world, TICK_DT);
+  console.log(`  after a hit: knockback (${foe.kx.toFixed(2)}, ${foe.kz.toFixed(2)}), tagged for ${(foe.taggedUntil - world.time).toFixed(2)}s`);
+  check('a bullet applies no knockback at all', foe.kx === 0 && foe.kz === 0,
+    `(${foe.kx}, ${foe.kz})`);
+  check('...it tags you instead', foe.taggedUntil > world.time,
+    `${(foe.taggedUntil - world.time).toFixed(2)}s`);
+
+  // The distinction that matters: a tagged chicken is slower, but it is still
+  // going exactly where its player pointed it. Knockback moved you against your
+  // input; this cannot.
+  const runFor = (tagged) => {
+    const w = arena();
+    const p = add(w, 'me', 0, 0, 0);
+    if (tagged) p.taggedUntil = w.time + 99;
+    for (let t = 0; t < 0.5 / TICK_DT; t++) {
+      p.hp = PLAYER.maxHp;
+      if (tagged) p.taggedUntil = w.time + 99;
+      applyInput(w, 'me', { mx: 1, mz: 0, seq: t });
+      stepWorld(w, TICK_DT);
+    }
+    return p.x;
+  };
+  const free = runFor(false);
+  const slow = runFor(true);
+  console.log(`  half a second of running: ${free.toFixed(2)}u free, ${slow.toFixed(2)}u tagged`);
+  check('tagging really does slow you', slow < free * 0.85, `${free.toFixed(2)} -> ${slow.toFixed(2)}`);
+  check('...but you still go where you pointed', slow > 0, `${slow.toFixed(2)}u`);
+  void startX; void startZ;
+}
+
+// ------------------------------------------------------ the fire rate floor
+console.log('\n--- stacked fire-rate multipliers ---');
+// The ammo types are gone; power comes from the ladder now. What replaced them
+// can stack in a way ammo never could — Rapid Peck, Feeding Frenzy and TRIGGER
+// HAPPY all multiply the same cooldown — so the floor that used to belong to
+// the rapid-fire pickup is doing more work than it was.
+{
+  const world = arena({ modifier: 'trigger' });
+  const me = add(world, 'me', 0, 0, 0);
+  add(world, 'foe', 1, 0, 12);
+  me.level = LEVELS.max;                 // Rapid Peck AND Feeding Frenzy
+  me.frenzyUntil = world.time + 99;
+  me.crop = 9999;
+
+  let shots = 0;
+  for (let t = 0; t < 1 / TICK_DT; t++) {
+    me.crop = 9999;
+    me.dry = false;
+    applyInput(world, 'me', { mx: 0, mz: 0, ax: 0, az: 1, shoot: true, seq: t });
+    for (const e of stepWorld(world, TICK_DT)) if (e.type === 'shot') shots++;
+  }
+  const gap = 1 / shots;
+  console.log(`  top rung + frenzy + TRIGGER HAPPY: ${shots} shots/s, ${(gap * 1000).toFixed(0)}ms apart`);
+  check('three stacked multipliers cannot outrun the cooldown floor',
+    gap >= PLAYER.minCooldown - 1e-6, `${(gap * 1000).toFixed(1)}ms vs a ${PLAYER.minCooldown * 1000}ms floor`);
+  // ...and it is still meaningfully faster than nothing, or the floor has eaten
+  // the perk rather than bounded it.
+  check('...but it is still much faster than a plain shot',
+    gap < PLAYER.fireCooldown * 0.75, `${(gap * 1000).toFixed(1)}ms vs ${PLAYER.fireCooldown * 1000}ms`);
+}
 
 // --------------------------------------------------------------- pickups
 console.log('\n--- pickups ---');
@@ -392,20 +519,21 @@ check('every weighted pickup can appear',
   PICKUP_WEIGHTS.every(([k]) => counts[k] > 0), Object.keys(counts).join(', '));
 check('health is the most common', Object.entries(counts).sort((a, b) => b[1] - a[1])[0][0] === 'health');
 
-// Picking a type up loads it, and replaces whatever was there.
-const slot = (() => {
+// Health is now the only thing on the floor — power comes from the pecking
+// order instead. Kept as a check rather than deleted: the weighted roll still
+// has to work, and a table that silently returns undefined would spawn pickups
+// nobody can collect.
+{
   const world = arena();
   const p = add(world, 'me', 0, 0, 0);
-  world.pickups = [{ id: 1, type: 'tracking', x: 0, z: 0 }];
+  p.hp = 40;
+  world.pickups = [{ id: 1, type: 'health', x: 0, z: 0 }];
   stepWorld(world, TICK_DT);
-  const first = p.ammo;
-  world.pickups = [{ id: 2, type: 'fire', x: 0, z: 0 }];
-  stepWorld(world, TICK_DT);
-  return { first, second: p.ammo, until: p.ammoUntil > world.time };
-})();
-check('an ammo pickup loads that type', slot.first === 'tracking', slot.first);
-check('a second pickup replaces the first', slot.second === 'fire', slot.second);
-check('ammo is on a timer', slot.until);
+  check('a health pickup still heals', p.hp > 40, `${p.hp}hp`);
+  check('nothing on the table is a shooting power-up',
+    PICKUP_WEIGHTS.every(([k]) => k === 'health'),
+    PICKUP_WEIGHTS.map(([k]) => k).join(', '));
+}
 
 console.log(failures.length ? `\n✗ ${failures.length} check(s) failed\n` : '\n✓ all checks passed\n');
 process.exit(failures.length ? 1 : 0);

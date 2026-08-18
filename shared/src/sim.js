@@ -8,7 +8,8 @@
 import {
   PLAYER, BULLET, BOMBER, PICKUP, SCORE, MODES,
   MULTIKILL_WINDOW, SEAT_COLORS, MODIFIER_POOL, modValue,
-  TEAM_COLORS, teamForSeat, HILL, SHRINK, AMMO, rollPickup,
+  TEAM_COLORS, teamForSeat, HILL, SHRINK, rollPickup,
+  LEVELS, levelFromXp, xpForLevel, perkValue, rungOf,
   MAPS, DEFAULT_MAP, pickMapCandidates, BOUNTY, POTATO,
   CONTRACT, CONTRACTS, CONTRACT_LIST, HEIST, BOMB, REVENGE, GRAVITY, WALL_HEIGHT,
   coverFor, CROP, cropCapacity,
@@ -55,7 +56,6 @@ export function createWorld({ mode = 'casual', seed = (Math.random() * 1e9) | 0,
     phase: 'lobby', // lobby -> warmup -> live -> over
     clock: cfg.matchTime,
     players: new Map(),
-    bullets: [],
     pickups: [],
     bomber: null,
     bomberSpawnAt: cfg.bomberFirstSpawn * modValue(mod, 'bomberFirstSpawnMul'),
@@ -195,6 +195,15 @@ export function addPlayer(world, { id, name, seat, isBot = false }) {
     respawnAt: 0,
     invulnUntil: PLAYER.spawnInvuln,
     nextShotAt: 0,
+    // The pecking order. XP is the truth and level is derived from it, never
+    // the other way round — one number to move, and no way for the two to
+    // disagree after a demotion.
+    xp: 0,
+    level: 1,
+    windUntil: 0,   // Second Wind, rung 5
+    windUsed: false,
+    frenzyUntil: 0, // Feeding Frenzy, rung 6
+
     // Grain. See CROP: the crop is the magazine, pecking is the reload, and
     // standing on your own feeder is the shortcut that costs you a walk.
     crop: cropCapacity(world.modifier),
@@ -204,13 +213,8 @@ export function addPlayer(world, { id, name, seat, isBot = false }) {
     pecking: false, // synced: it is the tell other players read
     feeding: false,
     healAcc: 0,
-    rapidUntil: 0,
-    ammo: 'none',
-    ammoUntil: 0,
     lastHurtAt: -99, // for the feeder's out-of-combat regen
-    burnUntil: 0,
-    burnBy: null,
-    burnAcc: 0,
+    taggedUntil: 0,  // briefly slowed by a bullet — see fire()
     aimRaw: Math.atan2(-sp.x, -sp.z), // what the stick asked for, before assist
     aimTarget: null,  // sticky aim-assist lock
     carrying: 0,      // eggs in hand (Egg Heist)
@@ -353,7 +357,6 @@ export function stepWorld(world, dt) {
 
   stepShrink(world, dt);
   stepPlayers(world, dt);
-  stepBullets(world, dt);
   stepBomber(world, dt);
   stepPickups(world, dt);
   stepHill(world, dt);
@@ -388,6 +391,16 @@ function stepPlayers(world, dt) {
 
     const inp = p.input;
     let moveScale = world.phase === 'live' ? 1 : 0.35;
+    // The ladder's mobility perks. Long Legs is permanent from rung 3; Second
+    // Wind and Feeding Frenzy are bursts, and they multiply — a level 6 who
+    // just took a kill and then dropped low is briefly very hard to catch,
+    // which is exactly the highlight the top of the ladder is for.
+    moveScale *= perkValue(p.level, 'speedMul');
+    // Tagged: hit by a bullet in the last moment. A slow rather than a shove —
+    // see fire(). It expires on its own and never fights your input.
+    if (world.time < p.taggedUntil) moveScale *= PLAYER.tagSlow;
+    if (world.time < p.windUntil) moveScale *= perkValue(p.level, 'secondWind', {}).speedMul ?? 1;
+    if (world.time < p.frenzyUntil) moveScale *= perkValue(p.level, 'frenzy', {}).speedMul ?? 1;
     // Carrying is the cost that balances stealing: a full load makes you slow
     // and obvious, so hoarding is punished without needing a hard cap.
     if (p.carrying > 0) moveScale *= 1 - Math.min(HEIST.maxCarrySlow, HEIST.carrySlow * p.carrying);
@@ -449,9 +462,8 @@ function stepPlayers(world, dt) {
 
     applyAim(p);
     stepCrop(world, p, dt);
-    stepBurn(world, p, dt);
+    stepSecondWind(world, p);
     stepPotatoBurn(world, p, dt);
-    if (p.ammoUntil && world.time >= p.ammoUntil) { p.ammo = 'none'; p.ammoUntil = 0; }
 
     if (inp.shoot && world.phase === 'live' && world.time >= p.nextShotAt) {
       if (p.crop > 0 && !p.dry) fire(world, p);
@@ -502,22 +514,22 @@ function stepPotatoBurn(world, p, dt) {
   }
 }
 
-/** Fire ammo leaves a burn that keeps ticking after the shot landed. */
-function stepBurn(world, p, dt) {
-  if (!p.burnUntil || world.time >= p.burnUntil) {
-    if (p.burnUntil && world.time >= p.burnUntil) { p.burnUntil = 0; p.burnAcc = 0; p.burnBy = null; }
-    return;
-  }
-
-  const cfg = AMMO.fire;
-  p.burnAcc += cfg.burnDps * dt;
-  const chunk = cfg.burnDps * cfg.burnTick;
-  // Applied in chunks, not every tick: at 60Hz per-tick damage would emit sixty
-  // hit events a second and bury the kill feed in damage numbers.
-  if (p.burnAcc >= chunk) {
-    p.burnAcc -= chunk;
-    damagePlayer(world, p, chunk, p.burnBy, 'burn');
-  }
+/**
+ * Second Wind, rung 5.
+ *
+ * Fires once per life the moment health crosses the threshold, rather than
+ * ticking while you are below it. That is the difference between a perk and a
+ * state: it has a moment, a sound and a colour, and a reward you can point at
+ * the instant of is worth several you merely possess. Once per life also stops
+ * it becoming a permanent aura for anyone who simply plays hurt.
+ */
+function stepSecondWind(world, p) {
+  const wind = perkValue(p.level, 'secondWind', null);
+  if (!wind || p.windUsed) return;
+  if (p.hp > PLAYER.maxHp * wind.at) return;
+  p.windUsed = true;
+  p.windUntil = world.time + wind.seconds;
+  emit(world, { type: 'secondWind', target: p.id, x: p.x, y: p.y, z: p.z });
 }
 
 /** Soft circle separation so chickens can't occupy the same tile. */
@@ -546,14 +558,19 @@ function separatePlayers(world) {
 }
 
 function fire(world, p) {
-  const rapid = world.time < p.rapidUntil;
   p.crop--;
   // Empty. From here nothing fires until CROP.recoverTo grain are back — see
   // the constant for why nursing a crop at zero cannot be allowed to work.
   if (p.crop <= 0) p.dry = true;
-  p.nextShotAt = world.time
-    + (rapid ? PLAYER.rapidCooldown : PLAYER.fireCooldown)
-      * modValue(world.modifier, 'fireCooldownMul');
+
+  // Rapid Peck (rung 4), Feeding Frenzy (rung 6) and TRIGGER HAPPY all multiply
+  // the same number, so the floor is doing real work — three stacked
+  // multipliers without one is a fire rate nobody can react to.
+  let cooldown = PLAYER.fireCooldown
+    * modValue(world.modifier, 'fireCooldownMul')
+    * perkValue(p.level, 'fireCooldownMul');
+  if (world.time < p.frenzyUntil) cooldown *= perkValue(p.level, 'frenzy', {}).fireCooldownMul ?? 1;
+  p.nextShotAt = world.time + Math.max(PLAYER.minCooldown, cooldown);
   // Spherical direction: yaw and pitch together. This is the line that makes
   // the crosshair honest — the shot leaves along exactly the vector the camera
   // is looking down, so a reticle nailed to screen centre is the truth rather
@@ -567,27 +584,38 @@ function fire(world, p) {
   const bx = p.x + dx * muzzle;
   const by = p.y + PLAYER.eyeHeight + dy * muzzle;
   const bz = p.z + dz * muzzle;
-  const ammo = world.time < p.ammoUntil ? p.ammo : 'none';
-  world.bullets.push({
-    id,
-    owner: p.id,
-    team: p.team,
-    ammo,
-    x: bx,
-    y: by,
-    z: bz,
-    vx: dx * BULLET.speed,
-    vy: dy * BULLET.speed,
-    vz: dz * BULLET.speed,
-    life: BULLET.life,
-    bounces: ammo === 'bouncy' ? AMMO.bouncy.bounces : 0,
-  });
-  // The id lets clients retire the exact tracer that landed, instead of
-  // letting the visual sail on through the chicken it just hit. `y` and `pitch`
-  // ride along so every client draws the same climbing or falling line.
+
+  // Resolved NOW. See traceShot for why this is not a projectile any more.
+  const shot = traceShot(world, p, bx, by, bz, dx, dy, dz);
+
+  if (shot.hit === 'bomber') {
+    damageBomber(world, BULLET.damage, p.id, dx, dz);
+  } else if (shot.hit === 'player') {
+    const t = shot.target;
+    const damage = shot.head ? BULLET.headDamage : BULLET.damage;
+    // TAGGING, not shoving.
+    //
+    // Bullets used to knock you across the floor. That is a projectile-game
+    // idea, and to anyone arriving from CS or Valorant it reads as the game
+    // taking the controls away — the exact complaint PLAYER.maxKnockback exists
+    // to bound. A brief slow does the same job better: you feel the hit land,
+    // you are meaningfully worse off, and you never stop being the one steering.
+    // Blasts still throw you; being thrown by an explosion is correct.
+    t.taggedUntil = world.time + PLAYER.tagDuration;
+    damagePlayer(world, t, damage * modValue(world.modifier, 'damageMul'), p.id,
+      shot.head ? 'head' : 'bullet');
+  }
+
+  // One event carries the whole shot: where it left, and where it landed. The
+  // client draws a tracer between the two — decoration on a line that has
+  // already been resolved, which is exactly how a hitscan game does it.
   emit(world, {
-    type: 'shot', id, x: bx, y: by, z: bz,
-    aim: p.aim, pitch: p.pitch, owner: p.id, rapid, ammo, crop: p.crop,
+    type: 'shot', id,
+    x: bx, y: by, z: bz,
+    hx: shot.x, hy: shot.y, hz: shot.z,
+    hit: shot.hit, head: !!shot.head, wall: shot.wall,
+    aim: p.aim, pitch: p.pitch, owner: p.id,
+    rapid: world.time < p.frenzyUntil, crop: p.crop,
   });
 }
 
@@ -658,7 +686,11 @@ function stepCrop(world, p, dt) {
   const wants = p.crop < cap && (!inp.shoot || p.dry);
   if (!moving && wants && p.stillFor >= CROP.peckDelay) {
     p.pecking = true;
-    p.peckAcc += CROP.peckRate * modValue(world.modifier, 'peckRateMul') * dt;
+    // Quick Crop (rung 2) lands here. The most helpless moment in the game is
+    // the one the first unlock shortens, which is deliberate.
+    p.peckAcc += CROP.peckRate
+      * modValue(world.modifier, 'peckRateMul')
+      * perkValue(p.level, 'peckRateMul') * dt;
     if (p.peckAcc >= 1) {
       const grain = Math.min(Math.floor(p.peckAcc), cap - p.crop);
       p.peckAcc -= Math.floor(p.peckAcc);
@@ -674,191 +706,152 @@ function stepCrop(world, p, dt) {
   if (p.dry && p.crop >= Math.min(CROP.recoverTo, cap)) p.dry = false;
 }
 
-function stepBullets(world, dt) {
+/**
+ * Where a shot lands, resolved instantly.
+ *
+ * HITSCAN. This used to be a projectile that stepped a few units per tick, and
+ * players who came from CS or Valorant said shooting felt unsatisfying without
+ * being able to name why. The reason is travel time: even at 52 units a second
+ * a duel at fifteen units took nearly three tenths of a second to resolve, so
+ * hitting a moving chicken meant leading it. A player trained on hitscan does
+ * not lead — they put the dot on the target and click — so every shot they fired
+ * here landed behind where they were looking, and the game felt like it was
+ * disagreeing with them.
+ *
+ * No amount of extra speed fixes that, because it is not a tuning problem. It
+ * is a different physical model, and this is the other one: the shot resolves
+ * on the tick it is fired, and the tracer the client draws is decoration
+ * travelling to an endpoint that has already been decided.
+ *
+ * The ordering below is the same as the old per-tick code, done once instead of
+ * forty times: clip to the world, then look for something alive inside what is
+ * left. Solid things have to be resolved FIRST or a shot kills someone standing
+ * behind cover.
+ */
+function traceShot(world, shooter, ox, oy, oz, dx, dy, dz) {
   const { half } = world.arena;
-  const out = [];
+  const range = BULLET.range;
+  let ex = ox + dx * range;
+  let ey = oy + dy * range;
+  let ez = oz + dz * range;
+  let wall = false;
 
-  for (const b of world.bullets) {
-    b.life -= dt;
-    if (b.ammo === 'tracking') steerBullet(world, b, dt);
-    const px = b.x;
-    const py = b.y;
-    const pz = b.z;
-    b.x += b.vx * dt;
-    b.y += b.vy * dt;
-    b.z += b.vz * dt;
+  const clipTo = (t) => {
+    ex = ox + (ex - ox) * t;
+    ey = oy + (ey - oy) * t;
+    ez = oz + (ez - oz) * t;
+    wall = true;
+  };
 
-    if (b.life <= 0) {
-      emit(world, { type: 'bulletEnd', id: b.id, x: b.x, y: b.y, z: b.z, wall: false });
-      continue;
-    }
+  // The floor. Aiming down is a real option, so a shot into the ground stops
+  // there rather than carrying on under the arena.
+  if (dy < -1e-6 && ey < 0) clipTo(oy / (oy - ey));
 
-    // Floor hit. Aiming down is a real option now, so a shot into the ground
-    // has to stop there and throw sparks, rather than carrying on underneath
-    // the arena and coming up at someone's ankles.
-    if (b.y <= 0) {
-      const t = py > b.y ? py / (py - b.y) : 0; // where along this step it landed
-      emit(world, {
-        type: 'bulletEnd',
-        id: b.id,
-        x: px + (b.x - px) * t,
-        y: 0,
-        z: pz + (b.z - pz) * t,
-        wall: true,
-      });
-      continue;
-    }
-
-    // Wall hit. Bouncy rounds reflect instead of dying, which is just negating
-    // the velocity component on whichever axis was crossed — the walls are
-    // axis-aligned, so there is no surface-normal maths to do.
-    //
-    // Only below the parapet. The walls are WALL_HEIGHT tall, so a shot fired
-    // steeply enough clears them and sails off into the void — which is what
-    // looking at the place would lead you to expect.
-    const edge = half - BULLET.radius;
-    if (b.y <= WALL_HEIGHT && (Math.abs(b.x) > edge || Math.abs(b.z) > edge)) {
-      if (b.bounces > 0) {
-        b.bounces--;
-        if (Math.abs(b.x) > edge) { b.vx = -b.vx; b.x = clamp(b.x, -edge, edge); }
-        if (Math.abs(b.z) > edge) { b.vz = -b.vz; b.z = clamp(b.z, -edge, edge); }
-        emit(world, { type: 'bounce', id: b.id, x: b.x, y: b.y, z: b.z, owner: b.owner });
-        out.push(b);
-        continue;
-      }
-      emit(world, {
-        type: 'bulletEnd',
-        id: b.id,
-        x: clamp(b.x, -half, half),
-        y: b.y,
-        z: clamp(b.z, -half, half),
-        wall: true,
-      });
-      continue;
-    }
-
-    // Cover, before anything alive. A bullet cannot hit what is behind a wall,
-    // so the swept segment is CLIPPED to the wall first and the tests below
-    // then run against what is left of it. Doing it the other way round — test
-    // everyone, then check for a wall — lets a shot kill someone standing a
-    // foot behind solid cover.
-    let ex = b.x;
-    let ey = b.y;
-    let ez = b.z;
-    let hitCover = false;
-    for (const box of world.obstacles) {
-      const t = segBoxEntry(px, py, pz, ex, ey, ez, box, BULLET.radius);
-      if (t < 0) continue;
-      ex = px + (ex - px) * t;
-      ey = py + (ey - py) * t;
-      ez = pz + (ez - pz) * t;
-      hitCover = true;
-    }
-
-    let consumed = false;
-
-    // Swept test against the bomber first — it's the juicier target.
-    const bomber = world.bomber;
-    if (bomber && bomber.alive) {
-      const rr = BOMBER.radius + BULLET.radius;
-      if (segHitsCapsule(px, py, pz, ex, ey, ez, bomber.x, 0, bomber.z, BOMBER.hitHeight, rr)) {
-        damageBomber(world, BULLET.damage, b.owner, b.vx, b.vz);
-        emit(world, {
-          type: 'bulletEnd', id: b.id, x: bomber.x, y: b.y, z: bomber.z, wall: false,
-        });
-        consumed = true;
-      }
-    }
-
-    if (!consumed) {
-      const owner = world.players.get(b.owner);
-      for (const t of world.players.values()) {
-        if (t.id === b.owner || !t.alive || world.time < t.invulnUntil) continue;
-        // Team-mates are not targets. The bullet keeps travelling rather than
-        // being absorbed, so you can shoot past a partner instead of being
-        // blocked by them.
-        if (t.team !== null && owner && t.team === owner.team) continue;
-        const rr = PLAYER.radius + BULLET.radius;
-        if (!segHitsCapsule(px, py, pz, ex, ey, ez, t.x, t.y, t.z, PLAYER.hitHeight, rr)) continue;
-
-        // Knockback stays flat on purpose. A hit may shove you across the floor
-        // — that is what it is for — but it must never lift you, because being
-        // airborne is the one state you cannot steer your way out of. Same
-        // principle as PLAYER.maxKnockback: a hit can move you, it must never
-        // take the wheel.
-        const [nx, nz] = norm(b.vx, b.vz);
-        const knock = BULLET.knockback * modValue(world.modifier, 'knockbackMul');
-        t.kx += nx * knock;
-        t.kz += nz * knock;
-        damagePlayer(world, t, BULLET.damage * modValue(world.modifier, 'damageMul'), b.owner, 'bullet');
-        if (b.ammo === 'fire' && t.alive) {
-          // Refreshes rather than stacks, so sustained fire keeps someone lit
-          // without multiplying the damage.
-          t.burnUntil = world.time + AMMO.fire.burnDuration;
-          t.burnBy = b.owner;
-          emit(world, { type: 'ignite', x: t.x, z: t.z, target: t.id, by: b.owner });
-        }
-        emit(world, {
-          type: 'bulletEnd', id: b.id,
-          x: t.x, y: clamp(b.y, t.y, t.y + PLAYER.hitHeight), z: t.z,
-          wall: false,
-        });
-        consumed = true;
-        break;
-      }
-    }
-
-    // Nothing alive was in the way, but the wall still is.
-    if (!consumed && hitCover) {
-      emit(world, { type: 'bulletEnd', id: b.id, x: ex, y: ey, z: ez, wall: true });
-      consumed = true;
-    }
-
-    if (!consumed) out.push(b);
+  // The walls — but only below the parapet. A shot angled steeply enough
+  // clears them and leaves, which is what looking at the place suggests.
+  for (const [o, d] of [[ox, dx], [oz, dz]]) {
+    if (Math.abs(d) < 1e-6) continue;
+    const lim = half - BULLET.radius;
+    const t = ((d > 0 ? lim : -lim) - o) / (d * range);
+    if (t <= 0 || t >= 1) continue;
+    if (oy + (ey - oy) * t > WALL_HEIGHT) continue;
+    clipTo(t);
   }
 
-  world.bullets = out;
+  // Cover.
+  for (const box of world.obstacles) {
+    const t = segBoxEntry(ox, oy, oz, ex, ey, ez, box, BULLET.radius);
+    if (t >= 0) clipTo(t);
+  }
+
+  // ...and now whatever is alive inside what is left of the line. Nearest wins,
+  // measured along the ray — a shot that passes through two chickens hits the
+  // near one.
+  let best = null;
+  let bestAlong = Infinity;
+  const consider = (obj, cx, cy, cz, height, radius, kind) => {
+    if (!segHitsCapsule(ox, oy, oz, ex, ey, ez, cx, cy, cz, height, radius)) return;
+    const along = (cx - ox) * dx + (cy + height * 0.5 - oy) * dy + (cz - oz) * dz;
+    if (along < 0 || along >= bestAlong) return;
+    bestAlong = along;
+    best = { obj, kind, x: cx, y: clamp(oy + dy * along, cy, cy + height), z: cz };
+  };
+
+  const bomber = world.bomber;
+  if (bomber && bomber.alive) {
+    consider(bomber, bomber.x, 0, bomber.z, BOMBER.hitHeight, BOMBER.radius + BULLET.radius, 'bomber');
+  }
+  for (const t of world.players.values()) {
+    if (t.id === shooter.id || !t.alive || world.time < t.invulnUntil) continue;
+    // Team-mates are not targets, and they do not block either — you can shoot
+    // past a partner rather than being walled in by them.
+    if (t.team !== null && shooter.team !== null && t.team === shooter.team) continue;
+    consider(t, t.x, t.y, t.z, PLAYER.hitHeight, PLAYER.radius + BULLET.radius, 'player');
+  }
+
+  if (best) {
+    // Measured from the target's own feet, so it follows a jumping chicken.
+    const head = best.kind === 'player' && best.y - best.obj.y >= BULLET.headFrom;
+    return {
+      x: best.x, y: best.y, z: best.z, hit: best.kind, target: best.obj, head, wall: false,
+    };
+  }
+  return { x: ex, y: ey, z: ez, hit: null, target: null, wall };
+}
+
+// ------------------------------------------------------------ the pecking order
+
+/**
+ * Moves a player's XP and re-derives their level, announcing any change.
+ *
+ * Everything about the ladder funnels through here so that XP stays the single
+ * source of truth and `level` is never set directly — two numbers that can
+ * disagree is how a demotion ends up showing the wrong perks.
+ *
+ * @param floor lowest XP this change may take them to. The demotion guard.
+ */
+function awardXp(world, p, amount, reason, floor = 0) {
+  if (!amount) return;
+  const was = p.level;
+  p.xp = Math.max(floor, Math.min(xpForLevel(LEVELS.max + 1) - 1, p.xp + amount));
+  p.level = levelFromXp(p.xp);
+  if (p.level === was) return;
+
+  const rung = rungOf(p.level);
+  emit(world, {
+    type: p.level > was ? 'levelUp' : 'levelDown',
+    target: p.id, x: p.x, y: p.y, z: p.z,
+    level: p.level, from: was,
+    name: rung.name, perk: rung.perk, blurb: rung.blurb, color: rung.color,
+    reason,
+  });
 }
 
 /**
- * Tracking rounds. Steers toward the nearest valid enemy ahead of the bullet,
- * turning at a capped rate so a round can be dodged by moving across it rather
- * than being an unavoidable guided missile.
+ * XP for a kill, by how far apart the two of you were.
+ *
+ * Beating someone above you is worth multiples of beating someone below, which
+ * is what keeps the leader from running away with it: they are simultaneously
+ * the biggest threat and the fastest way up, so the room has a reason to go at
+ * them rather than farm whoever is already losing. Clamped both ways — nobody
+ * should be able to grind the bottom of the table, and nobody should leap three
+ * rungs off one lucky shot.
  */
-function steerBullet(world, b, dt) {
-  const cfg = AMMO.tracking;
-  const heading = Math.atan2(b.vx, b.vz);
-  const flat = Math.hypot(b.vx, b.vz);
-  const climb = Math.atan2(b.vy, flat);
+export function killXp(killerLevel, victimLevel) {
+  const gap = clamp(victimLevel - killerLevel, -LEVELS.kill.maxRungs, LEVELS.kill.maxRungs);
+  return Math.max(LEVELS.kill.floor, LEVELS.kill.base + gap * LEVELS.kill.perRung);
+}
 
-  let best = null;
-  let bestD = Infinity;
-  for (const t of world.players.values()) {
-    if (t.id === b.owner || !t.alive || world.time < t.invulnUntil) continue;
-    if (t.team !== null && b.team !== null && t.team === b.team) continue;
-
-    const d = Math.sqrt(dist2(b.x, b.z, t.x, t.z));
-    if (d > cfg.range || d > bestD) continue;
-    // Acquisition stays a flat cone. Everything worth tracking is standing on
-    // the same floor, so a vertical cone would only ever reject a target the
-    // round could comfortably have curved down onto.
-    if (Math.abs(angleDelta(heading, Math.atan2(t.x - b.x, t.z - b.z))) > cfg.cone) continue;
-    bestD = d;
-    best = t;
-  }
-  if (!best) return;
-
-  // Steer in both axes at the same capped rate. Yaw alone would leave a round
-  // fired from mid-jump sailing over the target it had supposedly locked on.
-  const want = Math.atan2(best.x - b.x, best.z - b.z);
-  const wantY = best.y + PLAYER.hitHeight * 0.5;
-  const wantClimb = Math.atan2(wantY - b.y, Math.max(0.001, bestD));
-  const nextAim = heading + clamp(angleDelta(heading, want), -cfg.turnRate * dt, cfg.turnRate * dt);
-  const nextClimb = climb + clamp(wantClimb - climb, -cfg.turnRate * dt, cfg.turnRate * dt);
-  const cc = Math.cos(nextClimb);
-  b.vx = Math.sin(nextAim) * cc * BULLET.speed;
-  b.vy = Math.sin(nextClimb) * BULLET.speed;
-  b.vz = Math.cos(nextAim) * cc * BULLET.speed;
+/**
+ * XP lost for dying, by how far BELOW you the killer was.
+ *
+ * Losing to someone above you is nearly free — you were outmatched, and
+ * punishing that just punishes being new. Losing to someone below you is what
+ * costs, because that is the one that was yours to avoid.
+ */
+export function deathXp(victimLevel, killerLevel) {
+  const under = clamp(victimLevel - killerLevel, 0, LEVELS.death.maxRungs);
+  return -(LEVELS.death.base + under * LEVELS.death.perRung);
 }
 
 // ------------------------------------------------------------ damage / death
@@ -879,7 +872,7 @@ export function damagePlayer(world, target, amount, byId, kind) {
 
   emit(world, {
     type: 'hit', x: target.x, z: target.z, amount: Math.round(dealt),
-    target: target.id, by: byId ?? null, kind,
+    target: target.id, by: byId ?? null, kind, head: kind === 'head',
   });
 
   if (target.hp <= 0) killPlayer(world, target, byId, kind);
@@ -901,6 +894,13 @@ function killPlayer(world, target, byId, kind) {
   let multi = 0;
   let revenge = false;
   const wasBounty = world.bounty === target.id;
+  // Captured BEFORE any XP moves. Awarding the kill can promote the killer past
+  // their victim, at which point asking "was this an upset" of the post-kill
+  // levels answers no — and the one kill most worth celebrating is the one that
+  // stops reporting itself.
+  const victimLevel = target.level;
+  const killerLevel = killer && killer !== target ? killer.level : null;
+  const punchedUp = killerLevel !== null && victimLevel > killerLevel;
   if (killer && killer !== target) {
     killer.kills++;
     // Taking the crown down is the whole point of marking someone.
@@ -909,6 +909,19 @@ function killPlayer(world, target, byId, kind) {
     // and arriving at the second chicken empty is how a good play turns into a
     // bad minute.
     killer.crop = Math.min(cropCapacity(world.modifier), killer.crop + CROP.killRefund);
+
+    // Feeding Frenzy, rung 6: a kill fills you outright and sets you loose.
+    // The only perk that chains, which is what makes the top of the ladder a
+    // highlight rather than a bigger number.
+    const frenzy = perkValue(killer.level, 'frenzy', null);
+    if (frenzy) {
+      killer.crop = cropCapacity(world.modifier);
+      killer.dry = false;
+      killer.frenzyUntil = world.time + frenzy.seconds;
+      emit(world, { type: 'frenzy', target: killer.id, x: killer.x, y: killer.y, z: killer.z });
+    }
+
+    awardXp(world, killer, killXp(killer.level, target.level), 'kill');
     killer.streak = world.time - killer.lastKillAt <= MULTIKILL_WINDOW ? killer.streak + 1 : 1;
     killer.lastKillAt = world.time;
     multi = killer.streak;
@@ -928,6 +941,21 @@ function killPlayer(world, target, byId, kind) {
     target.nemesisUntil = world.time + REVENGE.window;
   }
 
+  // Falling down the ladder. Two guards, and both exist because loss aversion
+  // runs about twice as strong as the pleasure of an equivalent gain — a ladder
+  // that takes as freely as it gives is one people stop climbing.
+  //
+  //   * never below rung 1, so there is always a floor to stand on
+  //   * never more than ONE rung per death, whatever the arithmetic says
+  //
+  // The second is the important one. Without it a level 5 killed by a level 1
+  // drops to 3 in a single moment, and a player who has just lost a fight is
+  // the last person who should be handed a second punishment on top.
+  if (killer && killer !== target) {
+    awardXp(world, target, deathXp(target.level, killer.level), 'death',
+      xpForLevel(Math.max(1, target.level - 1)));
+  }
+
   // The crown is vacated the instant its holder dies.
   if (wasBounty) world.bounty = null;
 
@@ -938,10 +966,17 @@ function killPlayer(world, target, byId, kind) {
     x: target.x, y: target.y, z: target.z,
     target: target.id,
     by: killer && killer !== target ? killer.id : null,
-    kind, // 'bullet' | 'blast' | 'zone' | 'burn' | 'potato'
+    kind, // 'bullet' | 'head' | 'blast' | 'zone' | 'potato'
     multi,
     bounty: wasBounty,
     revenge,
+    // The pecking order, on the event that announces the kill: what rung they
+    // were on, and whether taking them was punching up. The killfeed and the
+    // giantSlayer contract both read it, and neither should have to go looking
+    // up a player who may already have respawned.
+    level: victimLevel,
+    byLevel: killerLevel,
+    punchedUp,
     color: target.color,
     // Everything the "you were killed by" panel needs, so the client never has
     // to guess at what happened to it.
@@ -993,6 +1028,11 @@ function respawn(world, p) {
   p.hp = PLAYER.maxHp;
   p.crop = cropCapacity(world.modifier);
   p.dry = false;
+  // Second Wind is once per LIFE, not once per match — it is an escape from a
+  // fight, and a fresh life is a fresh fight.
+  p.windUsed = false;
+  p.windUntil = 0;
+  p.frenzyUntil = 0;
   p.peckAcc = 0;
   p.stillFor = 0;
   p.pecking = false;
@@ -1527,9 +1567,8 @@ function stepPotato(world, dt) {
     pot.z = holder.z;
     pot.fuse -= dt;
 
-    // Burning the holder reuses the fire system, so it already renders.
-    holder.burnUntil = world.time + 0.4;
-    holder.burnBy = null;
+    // The damage itself is applied by stepPotatoBurn, which already runs for
+    // whoever is holding it.
 
     if (pot.fuse <= 0) {
       damagePlayer(world, holder, POTATO.blastDamage, null, 'potato');
@@ -1752,12 +1791,6 @@ function stepPickups(world, dt) {
 
     if (pk.type === 'health') {
       taken.hp = Math.min(PLAYER.maxHp, taken.hp + PICKUP.health.heal);
-    } else if (pk.type === 'rapid') {
-      taken.rapidUntil = world.time + PICKUP.rapid.duration;
-    } else if (AMMO[pk.type]) {
-      // One ammo slot: a new type replaces whatever was loaded.
-      taken.ammo = pk.type;
-      taken.ammoUntil = world.time + AMMO[pk.type].duration;
     }
     emit(world, { type: 'pickupTaken', x: pk.x, z: pk.z, kind: pk.type, id: pk.id, by: taken.id });
   }
@@ -1791,19 +1824,17 @@ export function snapshot(world) {
       id: p.id, name: p.name, seat: p.seat, team: p.team,
       x: p.x, y: p.y, z: p.z, aim: p.aim, pitch: p.pitch,
       hp: p.hp, alive: p.alive, kills: p.kills, deaths: p.deaths, score: p.score,
-      invuln: p.invulnUntil > world.time, rapid: p.rapidUntil > world.time,
+      invuln: p.invulnUntil > world.time,
       crop: Math.floor(p.crop), pecking: p.pecking, feeding: p.feeding, dry: p.dry,
-      ammo: p.ammoUntil > world.time ? p.ammo : 'none',
-      burning: p.burnUntil > world.time,
+      // The ladder. `level` is what everyone sees above your head; `xp` and
+      // `nextXp` are what draws your own bar.
+      level: p.level, xp: p.xp, nextXp: xpForLevel(p.level + 1),
+      wind: p.windUntil > world.time, frenzy: p.frenzyUntil > world.time,
       respawnIn: p.alive ? 0 : Math.max(0, p.respawnAt - world.time),
       kx: p.kx, kz: p.kz,
       nemesis: world.time < p.nemesisUntil ? p.nemesis : null,
       seq: p.lastSeq, isBot: p.isBot,
       carrying: p.carrying, contract: contractInfo(p),
-    })),
-    bullets: world.bullets.map((b) => ({
-      id: b.id, x: b.x, y: b.y, z: b.z,
-      vx: b.vx, vy: b.vy, vz: b.vz, owner: b.owner, ammo: b.ammo,
     })),
     pickups: world.pickups.map((p) => ({ id: p.id, x: p.x, z: p.z, type: p.type })),
     bomber: world.bomber && world.bomber.alive

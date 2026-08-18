@@ -19,10 +19,12 @@ const THROTTLE = {
   shot: 0.035,
   hit: 0.045,
   hurt: 0.09,
+  headshot: 0.05,
   feather: 0.08,
   // The crop refills nine grain a second and the feeder heals in chunks, so
   // both would otherwise fire several times per second forever. Throttled to
   // roughly a heartbeat: enough to read as ongoing, not enough to nag.
+  rivalUp: 0.5,
   peck: 0.16,
   fed: 0.3,
   dryFire: 0.25,
@@ -200,6 +202,42 @@ export class Sfx {
         this.tone({ freq: r(620, 760), to: 300, type: 'triangle', dur: 0.045, gain: 0.05 });
         break;
 
+      // Climbing a rung. A rising major arpeggio — the most unambiguously
+      // "you won something" shape in western music, and the one moment in the
+      // match that has to feel like a reward rather than an event.
+      case 'levelUp':
+        this.tone({ freq: 523, type: 'triangle', dur: 0.09, gain: 0.09 });
+        this.tone({ freq: 659, type: 'triangle', dur: 0.09, gain: 0.09, delay: 0.075 });
+        this.tone({ freq: 784, type: 'triangle', dur: 0.1, gain: 0.1, delay: 0.15 });
+        this.tone({ freq: 1046, to: 1180, type: 'sine', dur: 0.26, gain: 0.09, delay: 0.23 });
+        break;
+
+      // Falling. The same figure inverted and detuned — recognisably the level
+      // sound played backwards, so it needs no learning to understand.
+      case 'levelDown':
+        this.tone({ freq: 620, type: 'triangle', dur: 0.1, gain: 0.08 });
+        this.tone({ freq: 440, type: 'triangle', dur: 0.12, gain: 0.08, delay: 0.08 });
+        this.tone({ freq: 300, to: 190, type: 'sawtooth', dur: 0.3, gain: 0.09, delay: 0.17 });
+        break;
+
+      // Somebody else climbed. Deliberately small: it is information, not an
+      // event, and at four players this fires often.
+      case 'rivalUp':
+        this.tone({ freq: 880, to: 1100, type: 'sine', dur: 0.09, gain: 0.045 });
+        break;
+
+      // Second Wind: a sharp intake, rising fast. It has to read as rescue.
+      case 'secondWind':
+        this.noise({ freq: 700, to: 2600, dur: 0.22, gain: 0.09, type: 'bandpass', q: 1.4 });
+        this.tone({ freq: 330, to: 880, type: 'sine', dur: 0.24, gain: 0.08 });
+        break;
+
+      // Feeding Frenzy: low, wide and greedy.
+      case 'frenzy':
+        this.tone({ freq: 180, to: 420, type: 'sawtooth', dur: 0.28, gain: 0.1 });
+        this.tone({ freq: 720, to: 1200, type: 'square', dur: 0.18, gain: 0.055, delay: 0.05 });
+        break;
+
       // Standing on the feeder: warm and rising, the same shape as the health
       // pickup so it reads as the same KIND of good thing.
       case 'fed':
@@ -211,6 +249,17 @@ export class Sfx {
       case 'hit':
         this.tone({ freq: 1500, to: 900, type: 'sine', dur: 0.05, gain: 0.09 });
         this.noise({ freq: 2600, dur: 0.04, gain: 0.05, type: 'bandpass', q: 2 });
+        break;
+
+      // A HEADSHOT. Deliberately the most distinctive sound in the game: a
+      // bright metallic ping over the ordinary hit, an octave up and ringing.
+      // The whole value of headshots is that landing one feels different from
+      // landing a body shot, and the ear registers that faster than any number
+      // popping off a health bar.
+      case 'headshot':
+        this.tone({ freq: 2100, to: 2600, type: 'sine', dur: 0.07, gain: 0.11 });
+        this.tone({ freq: 3150, to: 2400, type: 'sine', dur: 0.16, gain: 0.06, delay: 0.02 });
+        this.noise({ freq: 5200, to: 2600, dur: 0.07, gain: 0.06, type: 'bandpass', q: 3 });
         break;
 
       // Taking a hit yourself: low and dull, unmistakably different.

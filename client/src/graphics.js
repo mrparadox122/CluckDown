@@ -62,6 +62,16 @@ const DEFAULTS = {
    * and no single number answers it.
    */
   brightness: 1,
+
+  /**
+   * Spoken announcer, off by default.
+   *
+   * Off is the right default for three reasons and none of them is quality: an
+   * announcer is a strong taste, speech synthesis shares an output channel with
+   * screen readers, and a game that starts talking on a device someone else can
+   * hear is rude. Opt in.
+   */
+  announcer: false,
 };
 
 export const BRIGHTNESS_MIN = 0.6;
@@ -83,6 +93,7 @@ export function loadGfx() {
     merged.sensitivity = clampSensitivity(merged.sensitivity);
     merged.view = asView(merged.view);
     merged.brightness = clampBrightness(merged.brightness);
+    merged.announcer = !!merged.announcer;
     return merged;
   } catch {
     return { ...DEFAULTS };
@@ -100,6 +111,7 @@ export function saveGfx(gfx) {
       sensitivity: clampSensitivity(gfx.sensitivity),
       view: asView(gfx.view),
       brightness: clampBrightness(gfx.brightness),
+      announcer: !!gfx.announcer,
     }));
   } catch {
     // Private mode — settings just won't persist.

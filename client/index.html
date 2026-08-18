@@ -100,6 +100,11 @@
           </label>
           <p class="settings-hint">How far the view turns for a given swipe or mouse movement. Applies to both, and takes effect immediately — drag it mid-match until it feels right.</p>
           <label class="setting toggle">
+            <span>Spoken announcer</span>
+            <input id="gfx-announcer" type="checkbox" />
+          </label>
+          <p class="settings-hint">Calls out kills, headshots and level-ups using your device&rsquo;s own voice. Off by default &mdash; it shares a channel with screen readers, and not everyone wants their game talking.</p>
+          <label class="setting toggle">
             <span>Aim assist</span>
             <input id="gfx-assist" type="checkbox" />
           </label>
@@ -184,6 +189,16 @@
          is always visible, never covered, and closest to where the eyes already
          are without sitting on top of the crosshair. -->
     <div id="vitals" class="vitals hidden">
+      <!-- The rung, and progress to the next one. Above the health bar because
+           it is the thing that changes least often and matters most: health is
+           this second, the ladder is the whole match. -->
+      <div class="rung-row">
+        <div id="rung-badge" class="rung-badge">1</div>
+        <div class="rung-body">
+          <div id="rung-name" class="rung-name">Chick</div>
+          <div id="xp-track" class="xp-track"><div id="xp-fill" class="xp-fill"></div></div>
+        </div>
+      </div>
       <div class="vitals-hp">
         <div class="hp-track"><div id="hp-fill" class="hp-fill"></div></div>
         <div id="hp-num" class="hp-num">100</div>
@@ -225,6 +240,14 @@
 
     <div id="scoreboard" class="scoreboard"></div>
     <div id="announcer" class="announcer"></div>
+    <!-- The level-up payoff. Its own element rather than the announcer, because
+         it needs three lines (rank, perk, what the perk does) and because it
+         must never be shouted over by a killfeed line. -->
+    <div id="rung-up" class="rung-up">
+      <div id="rung-up-rank" class="rung-up-rank"></div>
+      <div id="rung-up-perk" class="rung-up-perk"></div>
+      <div id="rung-up-blurb" class="rung-up-blurb"></div>
+    </div>
 
     <div id="respawn-overlay" class="respawn-overlay hidden">
       <div class="respawn-inner">

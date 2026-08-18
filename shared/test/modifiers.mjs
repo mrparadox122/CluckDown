@@ -8,7 +8,7 @@
 
 import {
   createWorld, addPlayer, applyInput, stepWorld,
-  MODIFIERS, MODIFIER_POOL, modValue, TICK_DT, PLAYER,
+  MODIFIERS, MODIFIER_POOL, modValue, TICK_DT, PLAYER, BOMBER,
 } from '../src/index.js';
 
 const failures = [];
@@ -107,10 +107,24 @@ check('BOMBER FRENZY brings the bomber out sooner',
 check('BOMBER FRENZY spawns more of them', frenzy.tally.bomberSpawns > normal.tally.bomberSpawns,
   `${normal.tally.bomberSpawns} -> ${frenzy.tally.bomberSpawns}`);
 
-// Knockback: how far the target gets pushed off its starting spot.
+// Knockback: how far a BLAST pushes the target off its starting spot.
+//
+// Driven with an explosion rather than with gunfire, because bullets no longer
+// knock anyone back — shots are hitscan now and a hit tags you (a brief slow)
+// instead of shoving you. LOW GRAVITY's knockback multipliers still apply, but
+// only to the things that are supposed to throw you, so that is what this has
+// to measure. Shooting someone here would compare zero against zero and pass
+// or fail for no reason at all.
 function knockbackTravel(modifier) {
-  const { b } = duel(modifier, 3, { keepAlive: true });
-  return Math.abs(b.x - 2);
+  const { world: w, b } = duel(modifier, 0.2, { keepAlive: true });
+  const startX = b.x;
+  b.kx = BOMBER.blastKnockback * modValue(modifier, 'knockbackMul');
+  b.kz = 0;
+  for (let t = 0; t < 2 / TICK_DT; t++) {
+    b.hp = PLAYER.maxHp;
+    stepWorld(w, TICK_DT);
+  }
+  return Math.abs(b.x - startX);
 }
 const slide = knockbackTravel('lowGravity');
 const normalSlide = knockbackTravel('none');

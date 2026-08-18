@@ -347,6 +347,13 @@ input[type="text"]:focus { border-color: var(--hot); box-shadow: 0 0 0 3px rgba(
 .dmg-number.crit { color: var(--gold); font-size: 20px; }
 .dmg-number.heal { color: var(--good); }
 .dmg-number.burn { color: #ff8a3d; font-size: 13px; }
+/* A headshot. The biggest, hottest number the HUD ever draws — it is the one
+   outcome that should be unmistakable from peripheral vision alone. */
+.dmg-number.head {
+  color: #fff;
+  font-size: 26px;
+  text-shadow: 0 0 10px var(--hot), 0 2px 4px #000;
+}
 @keyframes floatUp {
   0% { opacity: 0; transform: translate(-50%, -50%) scale(0.6); }
   18% { opacity: 1; transform: translate(-50%, -70%) scale(1.15); }
@@ -1345,6 +1352,7 @@ input[type="text"]:focus { border-color: var(--hot); box-shadow: 0 0 0 3px rgba(
   .nameplate .np-tag { font-size: 7.5px; }
   .dmg-number { font-size: 12px; }
   .dmg-number.crit { font-size: 16px; }
+  .dmg-number.head { font-size: 21px; }
 
   .announcer { font-size: clamp(16px, 4.5vw, 26px); top: 20%; }
   .respawn-count { font-size: 46px; }
@@ -1657,4 +1665,134 @@ input[type="text"]:focus { border-color: var(--hot); box-shadow: 0 0 0 3px rgba(
   .crop { height: 10px; }
   .crop-pip { width: 3px; height: 9px; }
   .crop-hint { font-size: 8.5px; height: 10px; }
+}
+
+
+/* ======================= THE PECKING ORDER =======================
+   A rung badge, a name, and a bar to the next one.
+
+   Sits directly above the health bar. The ordering is deliberate: health is
+   about this second, the ladder is about the whole match, and the eye should
+   land on the urgent thing last on its way down to the crosshair. */
+
+.rung-row { display: flex; align-items: center; gap: 7px; }
+
+/* The number itself, and it is deliberately the loudest element in the cluster.
+   This is a status symbol before it is a readout — the same number is above
+   every other chicken's head, and it is what the whole ladder is FOR. */
+.rung-badge {
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  display: grid;
+  place-items: center;
+  font-size: 13px;
+  font-weight: 900;
+  font-variant-numeric: tabular-nums;
+  color: #06070e;
+  background: var(--muted);
+  box-shadow: 0 0 8px rgba(0, 0, 0, 0.6);
+  transition: background .25s, transform .12s;
+}
+/* Climbing pops it. A level-up has to have a MOMENT — the peak-end rule means
+   this half-second is most of what a player remembers about the whole climb. */
+.rung-badge.climbed { animation: rungPop .55s cubic-bezier(.2, 1.6, .4, 1); }
+.rung-badge.fell { animation: rungDrop .5s ease-out; }
+@keyframes rungPop {
+  0% { transform: scale(1); }
+  35% { transform: scale(1.75) rotate(-7deg); }
+  100% { transform: scale(1); }
+}
+@keyframes rungDrop {
+  0% { transform: scale(1.25); filter: saturate(0.2); }
+  100% { transform: scale(1); filter: none; }
+}
+
+.rung-body { display: flex; flex-direction: column; gap: 2px; }
+.rung-name {
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 1.4px;
+  color: var(--muted);
+  text-shadow: 0 1px 3px #000;
+}
+.xp-track {
+  width: 104px;
+  height: 4px;
+  border-radius: 3px;
+  background: rgba(6, 7, 14, 0.8);
+  border: 1px solid var(--edge);
+  overflow: hidden;
+}
+/* Never snaps backwards without being seen: the transition means a demotion
+   visibly drains rather than teleporting, which is what makes the loss land. */
+.xp-fill {
+  height: 100%;
+  width: 0;
+  border-radius: 2px;
+  background: linear-gradient(90deg, #ffcc3d, #ffe9a8);
+  transition: width .25s ease-out;
+}
+/* Topped out. The bar stops meaning anything at max rung, so it says so. */
+.xp-track.maxed .xp-fill { width: 100% !important; background: linear-gradient(90deg, #ff4df0, #ff9df5); }
+
+/* The level-up banner. Bigger than the announcer on purpose — this is the
+   payoff the whole mode is built around, and it names the perk, because an
+   unlock the player cannot name is one they will never deliberately use. */
+.rung-up {
+  position: absolute;
+  left: 50%;
+  top: 27%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  pointer-events: none;
+  opacity: 0;
+}
+.rung-up.show { animation: rungBanner 2.4s ease-out; }
+@keyframes rungBanner {
+  0% { opacity: 0; transform: translateX(-50%) scale(0.7); }
+  12% { opacity: 1; transform: translateX(-50%) scale(1.06); }
+  20% { transform: translateX(-50%) scale(1); }
+  78% { opacity: 1; }
+  100% { opacity: 0; transform: translateX(-50%) translateY(-14px); }
+}
+.rung-up-rank {
+  font-size: clamp(20px, 5vw, 34px);
+  font-weight: 900;
+  letter-spacing: 3px;
+  text-shadow: 0 2px 14px #000;
+}
+.rung-up-perk {
+  font-size: clamp(11px, 2.4vw, 15px);
+  font-weight: 800;
+  letter-spacing: 2px;
+  color: var(--ink);
+  text-shadow: 0 1px 6px #000;
+}
+.rung-up-blurb { font-size: 10.5px; color: var(--muted); letter-spacing: 1px; }
+
+/* The level on everyone else's nameplate. Small, always present, and the
+   reason the ladder is a social object rather than a private stat. */
+.np-lvl {
+  display: inline-block;
+  min-width: 15px;
+  padding: 0 3px;
+  margin-right: 4px;
+  border-radius: 4px;
+  font-size: 9px;
+  font-weight: 900;
+  font-variant-numeric: tabular-nums;
+  color: #06070e;
+  vertical-align: middle;
+}
+
+@media (max-height: 460px) {
+  .rung-badge { width: 18px; height: 18px; font-size: 11px; }
+  .rung-name { font-size: 8px; }
+  .xp-track { width: 84px; height: 3px; }
+  .np-lvl { font-size: 8px; min-width: 13px; }
 }

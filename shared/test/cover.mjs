@@ -188,7 +188,12 @@ function shoot(w, shooter, target, { pitch = 0 } = {}) {
     });
     for (const e of stepWorld(w, TICK_DT)) {
       if (e.type === 'hit' && e.target === target.id) out.hits++;
-      if (e.type === 'bulletEnd') out.ends.push(e);
+      // Where the trace stopped. It rides on the shot event now — shooting is
+      // hitscan, so the shot and its impact are decided in the same instant and
+      // there is no later "the bullet landed" message to wait for.
+      if (e.type === 'shot' && e.owner === shooter.id) {
+        out.ends.push({ x: e.hx, y: e.hy, z: e.hz, wall: e.wall, hit: e.hit });
+      }
     }
   }
   return out;
@@ -209,7 +214,7 @@ function shoot(w, shooter, target, { pitch = 0 } = {}) {
   console.log(`  through a ${box.h}u box: ${blocked.hits} hits`);
   check('cover stops a shot that would otherwise land', blocked.hits === 0,
     `${blocked.hits} hits`);
-  check('...and the bullet dies at the box, not past it',
+  check('...and the trace stops at the box, not past it',
     blocked.ends.length === 1 && Math.abs(blocked.ends[0].z - (box.z - box.d / 2)) < BULLET.radius + 0.3,
     JSON.stringify(blocked.ends[0] && { z: +blocked.ends[0].z.toFixed(2), wall: blocked.ends[0].wall }));
 

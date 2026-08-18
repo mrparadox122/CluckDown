@@ -1,5 +1,6 @@
 import {
   QUICK_CHAT, PLAYER, MODES, MULTIKILL_NAMES, MODIFIERS, TEAM_NAMES, HILL,
+  LEVELS, rungOf, xpForLevel,
 } from '@cluckdown/shared';
 
 const $ = (id) => document.getElementById(id);
@@ -351,6 +352,37 @@ export class Hud {
     }
     box.classList.remove('hidden');
 
+    // --- the rung.
+    const level = self.level ?? 1;
+    const rung = rungOf(level);
+    if (level !== this.shownLevel) {
+      const badge = $('rung-badge');
+      badge.textContent = String(level);
+      badge.style.background = rung.color;
+      $('rung-name').textContent = rung.name.toUpperCase();
+      // Animate only on a real change, and only after the first paint — a badge
+      // that pops when you join reads as a level-up that did not happen.
+      if (this.shownLevel != null) {
+        const climbed = level > this.shownLevel;
+        badge.classList.remove('climbed', 'fell');
+        void badge.offsetWidth; // restart the animation
+        badge.classList.add(climbed ? 'climbed' : 'fell');
+      }
+      this.shownLevel = level;
+    }
+
+    {
+      const track = $('xp-track') ?? $('xp-fill').parentElement;
+      const at = level >= LEVELS.max;
+      track.classList.toggle('maxed', at);
+      if (!at) {
+        const from = xpForLevel(level);
+        const to = self.nextXp || xpForLevel(level + 1);
+        const frac = Math.max(0, Math.min(1, ((self.xp ?? 0) - from) / Math.max(1, to - from)));
+        $('xp-fill').style.width = `${frac * 100}%`;
+      }
+    }
+
     const hp = Math.max(0, Math.round(self.hp));
     if (hp !== this.shownHp) {
       this.shownHp = hp;
@@ -615,6 +647,34 @@ export class Hud {
     while (container.childElementCount > max) container.firstElementChild.remove();
   }
 
+  /**
+   * The level-up payoff.
+   *
+   * Three lines, because the rank alone is a number and the number alone
+   * teaches nothing: the perk needs a NAME so the player can think about it,
+   * and a line saying what it does so they can use it deliberately. An unlock
+   * nobody can name is one nobody ever plays around.
+   *
+   * Peak-end says this half-second is most of what the whole climb is
+   * remembered as, so it is the loudest thing on screen while it runs.
+   */
+  announceRung(ev) {
+    const box = $('rung-up');
+    // No em dash in here. The display face has no glyph for one at weight 900
+    // and renders a tofu box instead — which is only visible at this size, in
+    // this one element, and looks like a broken build. The blurb below is
+    // lighter and takes them fine.
+    $('rung-up-rank').textContent = ev.level > ev.from
+      ? `LEVEL ${ev.level}  ${String(ev.name).toUpperCase()}`
+      : `DEMOTED  ${String(ev.name).toUpperCase()}`;
+    $('rung-up-rank').style.color = ev.color;
+    $('rung-up-perk').textContent = ev.perk ?? '';
+    $('rung-up-blurb').textContent = ev.blurb ?? '';
+    box.classList.remove('show');
+    void box.offsetWidth;
+    box.classList.add('show');
+  }
+
   announce(text) {
     this.announcer.textContent = text;
     this.announcer.classList.remove('show');
@@ -649,10 +709,18 @@ export class Hud {
       if (!plate) {
         plate = el('div', 'nameplate');
         plate.append(
-          el('div', 'np-name', p.name),
+          (() => {
+            // The rung, in front of the name. This one line is what makes the
+            // ladder a social object instead of a private stat: you can see who
+            // the threat in the room is, and they can see you seeing it.
+            const row = el('div', 'np-name');
+            row.append(el('span', 'np-lvl'), document.createTextNode(p.name));
+            return row;
+          })(),
           (() => { const bar = el('div', 'np-bar'); bar.append(el('div', 'np-fill')); return bar; })(),
           el('div', 'np-tag'),
         );
+        plate.querySelector('.np-name').lastChild.textContent = p.name;
         plate.querySelector('.np-name').style.color = p.color;
         this.overlay.append(plate);
         this.plates.set(p.id, plate);
@@ -687,6 +755,15 @@ export class Hud {
       plate.classList.toggle('is-self', p.id === selfId);
 
       const tag = p.rapid ? '⚡ RAPID' : p.invuln ? '🛡 SAFE' : '';
+      // Rebuilt only on change: this runs per plate per frame.
+      const lvlEl = plate.querySelector('.np-lvl');
+      const lvl = p.level ?? 1;
+      if (lvlEl && lvlEl.dataset.lvl !== String(lvl)) {
+        lvlEl.dataset.lvl = String(lvl);
+        lvlEl.textContent = String(lvl);
+        lvlEl.style.background = rungOf(lvl).color;
+      }
+
       const tagEl = plate.querySelector('.np-tag');
       if (tagEl.textContent !== tag) tagEl.textContent = tag;
     }
@@ -719,8 +796,12 @@ export class Hud {
   popDamage(screenPos, amount, kind = 'hit') {
     if (!screenPos) return;
     const node = this.dmgPool.pop() ?? el('div', 'dmg-number');
+    // A headshot gets its own class rather than inheriting `crit` from the
+    // damage threshold. They happen to overlap today, and the moment somebody
+    // tunes headDamage down they would stop — and the loudest number in the
+    // game would quietly go back to looking like every other one.
     node.className = `dmg-number${amount >= 25 ? ' crit' : ''}`
-      + (kind === 'heal' ? ' heal' : kind === 'burn' ? ' burn' : '');
+      + (kind === 'head' ? ' head' : kind === 'heal' ? ' heal' : kind === 'burn' ? ' burn' : '');
     node.textContent = kind === 'heal' ? `+${amount}` : String(amount);
     node.style.left = `${screenPos.x}px`;
     node.style.top = `${screenPos.y}px`;

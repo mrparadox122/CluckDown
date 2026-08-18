@@ -1,7 +1,7 @@
 import { MeshBuilder } from '@babylonjs/core/Meshes/meshBuilder';
 import { Vector3, Matrix, Quaternion } from '@babylonjs/core/Maths/math';
 import { emissiveMat } from './scene.js';
-import { BULLET, BOMBER, AMMO } from '@cluckdown/shared';
+import { BULLET, BOMBER } from '@cluckdown/shared';
 import { BEAK } from './view.js';
 
 const GRAVITY = -26;
@@ -23,13 +23,13 @@ export class BulletPool {
     this.scene = scene;
     this.active = new Map(); // id -> tracer
 
-    // One prototype per ammo type. Ammo is readable at a glance from the tracer
-    // colour alone, which matters more than it sounds when three people are
-    // firing at once.
+    // One tracer colour now that the ammo types are gone — power comes from the
+    // pecking order instead of from the floor. The keyed structure stays: it is
+    // what makes a per-shot tracer variant a one-line change if one ever earns
+    // its place again.
     this.protos = {};
     this.pools = {};
     const kinds = { none: '#ff2038' };
-    for (const id of Object.keys(AMMO)) kinds[id] = AMMO[id].color;
 
     for (const [id, hex] of Object.entries(kinds)) {
       const proto = MeshBuilder.CreateSphere(`bullet_${id}`, {
@@ -53,104 +53,81 @@ export class BulletPool {
   }
 
   /**
+   * Draws the streak for a shot that has ALREADY been resolved.
+   *
+   * The simulation is hitscan: by the time this runs, the game has decided what
+   * was hit and where. So this is not a simulation of a bullet, it is an
+   * animation between two known points — which is exactly how a hitscan
+   * shooter draws tracers, and why the streak can be made as fast as it likes
+   * without touching the outcome.
+   *
    * @param from optional world point to draw the tracer FROM.
    *
    * Used for your own shots in first person, where it is the tip of your beak.
-   * The authoritative bullet leaves the chicken's eye — which in first person is
-   * exactly where the camera is, so drawing the streak there made every shot
-   * appear to come out of the player's own eyeballs, dead centre of the
-   * crosshair. Starting it at the beak instead is what every shooter does with
-   * a weapon muzzle, and it is the whole reason the beak is on screen.
-   *
-   * The line is then aimed at a point BEAK.converge units down the real bullet
-   * path, so the drawn streak and the authoritative round are one line by the
-   * time anything is close enough to be hit. Same parallax trick as the
-   * third-person boom, an order of magnitude smaller.
+   * The shot itself leaves the chicken's eye — which in first person is exactly
+   * where the camera is, so drawing the streak there made every shot appear to
+   * come out of the player's own eyeballs, dead centre of the crosshair.
    */
   spawn(ev, from = null) {
-    const kind = this.pools[ev.ammo] ? ev.ammo : 'none';
-    const mesh = this.pools[kind].pop();
+    const mesh = this.pools.none.pop();
     if (!mesh) return; // pool exhausted — drop the visual rather than stutter
     mesh.setEnabled(true);
 
-    // Same spherical direction the simulation built the bullet from. Drawing
-    // this flat while the real round climbed would put the streak somewhere
-    // the damage was not, which is the one thing a tracer must never do.
-    const pitch = ev.pitch ?? 0;
-    const cp = Math.cos(pitch);
-    let dx = Math.sin(ev.aim) * cp;
-    let dy = Math.sin(pitch);
-    let dz = Math.cos(ev.aim) * cp;
-    let sx = ev.x;
-    let sy = ev.y ?? 0.85;
-    let sz = ev.z;
+    const sx = from ? from.x : ev.x;
+    const sy = from ? from.y : (ev.y ?? 0.85);
+    const sz = from ? from.z : ev.z;
+    // The endpoint the simulation already decided on. Falling back to a long
+    // shot along the aim keeps old-shaped events renderable rather than
+    // throwing, but every live event carries one.
+    const cp = Math.cos(ev.pitch ?? 0);
+    const hx = ev.hx ?? (ev.x + Math.sin(ev.aim) * cp * BULLET.range);
+    const hy = ev.hy ?? ((ev.y ?? 0.85) + Math.sin(ev.pitch ?? 0) * BULLET.range);
+    const hz = ev.hz ?? (ev.z + Math.cos(ev.aim) * cp * BULLET.range);
 
-    if (from) {
-      const tx = sx + dx * BEAK.converge;
-      const ty = sy + dy * BEAK.converge;
-      const tz = sz + dz * BEAK.converge;
-      const len = Math.hypot(tx - from.x, ty - from.y, tz - from.z) || 1;
-      dx = (tx - from.x) / len;
-      dy = (ty - from.y) / len;
-      dz = (tz - from.z) / len;
-      // Started a stride PAST the beak rather than on it — see BEAK.tracerGap.
-      // Drawn at the beak itself, a glowing 0.24-unit streak sits 0.8 units
-      // from the camera and blooms across a quarter of the screen, which is the
-      // full-screen flash this whole arrangement exists to avoid.
-      sx = from.x + dx * BEAK.tracerGap;
-      sy = from.y + dy * BEAK.tracerGap;
-      sz = from.z + dz * BEAK.tracerGap;
-    }
+    const len = Math.hypot(hx - sx, hy - sy, hz - sz) || 1;
+    const dx = (hx - sx) / len;
+    const dy = (hy - sy) / len;
+    const dz = (hz - sz) / len;
 
-    mesh.position.set(sx, sy, sz);
+    // Started a stride past the muzzle when it is your own beak — see
+    // BEAK.tracerGap. Drawn at the beak itself, a glowing streak sits 0.8 units
+    // from the camera and blooms across a quarter of the screen.
+    const gap = from ? Math.min(BEAK.tracerGap, len * 0.5) : 0;
+    mesh.position.set(sx + dx * gap, sy + dy * gap, sz + dz * gap);
     // Babylon composes mesh.rotation as yaw-pitch-roll, so a mesh stretched
     // along local +Z points at (sin y·cos x, -sin x, cos y·cos x). Hence the
     // negated pitch: rotation.x is nose-DOWN positive.
     mesh.rotation.y = Math.atan2(dx, dz);
     mesh.rotation.x = -Math.asin(Math.max(-1, Math.min(1, dy)));
-    // Stretched along travel: an elongated sphere fakes motion blur far more
-    // cheaply than a particle trail, and the glow layer turns it into a streak.
-    // Length is in world units, so the shape does not change when the tracer is
-    // made thinner or thicker.
     mesh.scaling.set(1, 1, BULLET.tracerLength / (BULLET.tracerRadius * 2));
+
     this.active.set(ev.id, {
-      mesh, kind, aim: mesh.rotation.y, pitch: -mesh.rotation.x,
-      vx: dx * BULLET.speed, vy: dy * BULLET.speed, vz: dz * BULLET.speed,
-      life: BULLET.life,
+      mesh,
+      vx: dx * BULLET.tracerSpeed,
+      vy: dy * BULLET.tracerSpeed,
+      vz: dz * BULLET.tracerSpeed,
+      // Retired on ARRIVAL rather than on a timer or on a message from the
+      // server. The distance is known, so the streak stops exactly where the
+      // shot stopped — no tracer sailing on through the wall it hit.
+      left: Math.max(0, len - gap),
     });
   }
 
-  /**
-   * Redirects a live tracer — used when a bouncy round ricochets. Without this
-   * the visual would carry straight on through the wall while the authoritative
-   * bullet went the other way.
-   */
-  redirect(id, x, y, z) {
-    const t = this.active.get(id);
-    if (!t) return;
-    // Reflect off whichever axis the impact was on, matching the simulation.
-    // Vertical velocity is untouched: the walls are vertical, so a ricochet
-    // keeps whatever climb the round already had.
-    if (Math.abs(x) > Math.abs(z)) t.vx = -t.vx; else t.vz = -t.vz;
-    t.mesh.position.set(x, y ?? 0.85, z);
-    t.aim = Math.atan2(t.vx, t.vz);
-    t.mesh.rotation.y = t.aim;
-  }
-
-  /** Retire a specific tracer — called when the server says that bullet landed. */
+  /** Retire a tracer that has reached the point the shot resolved at. */
   end(id) {
     const t = this.active.get(id);
     if (!t) return null;
     this.active.delete(id);
     t.mesh.setEnabled(false);
-    this.pools[t.kind].push(t.mesh);
+    this.pools.none.push(t.mesh);
     return t;
   }
 
   update(dt) {
     for (const [id, t] of this.active) {
-      t.life -= dt;
-      if (t.life <= 0) { this.end(id); continue; }
+      const step = BULLET.tracerSpeed * dt;
+      if (step >= t.left) { this.end(id); continue; }
+      t.left -= step;
       t.mesh.position.x += t.vx * dt;
       t.mesh.position.y += t.vy * dt;
       t.mesh.position.z += t.vz * dt;

@@ -325,6 +325,88 @@ them at full health. `CROP.feeder.combatDelay` gates *health* (never grain)
 behind three seconds without damage. The general rule is worth more than the bug:
 you recover from a fight, never through one.
 
+## The pecking order
+
+Power is **earned, not found**. Every shooting pickup — tracking, bouncy and
+fire rounds, and rapid fire — was deleted and replaced by a ladder you climb by
+killing. That swap is a design argument, not a balance one:
+
+> A pickup is luck. You walk over a thing, become stronger for ten seconds, and
+> none of it is attributable to you. It generates no story, teaches nothing, and
+> the player who lost the fight lost it to a spawn table.
+
+A ladder is the opposite on every count — legible, yours, and **public**. Every
+chicken's rung rides above its health bar, which turns a number into a social
+object: it marks the threat in the room, makes a high rung something to defend,
+and makes taking one down worth bragging about. Status visible to others is a
+far stronger motivator than private power, and it costs one line of HUD.
+
+| Rung | | Unlocks | What it buys |
+|---|---|---|---|
+| 1 | Chick | — | where everyone starts |
+| 2 | Scratcher | **Quick Crop** | peck back to full in half the time |
+| 3 | Runner | **Long Legs** | noticeably quicker on your feet |
+| 4 | Brawler | **Rapid Peck** | shots come out a third faster |
+| 5 | Ironfeather | **Second Wind** | drop below 30% and bolt, once per life |
+| 6 | Cock of the Walk | **Feeding Frenzy** | a kill refills you and sets you loose |
+
+Perks accumulate, so rung 6 still has Long Legs.
+
+**They escalate in KIND, not in size** — tempo, then mobility, then power, then
+safety, then spectacle. Five different feelings beats one feeling five times,
+and it keeps the top of the ladder from being "the same but more", which is
+where a progression stops producing anything. Note how little of it is raw
+damage: the leader is already the biggest prize in the room, and handing them
+lethality on top is how a match ends at minute two. Most of the ladder buys
+**time** — faster recovery, faster legs, an escape — which is felt instantly and
+still leaves them killable.
+
+Every unlock also has to be felt within *seconds*. "+5% movement" is invisible
+and therefore worthless as a reward however good it looks on a spreadsheet.
+Second Wind is the clearest case: it *fires*, with a sound and a colour, at the
+worst moment of a fight. A perk you notice happening is worth several you
+merely have.
+
+### The rung you kill decides the climb
+
+| | XP |
+|---|---|
+| Beat an equal | 60 (over half a rung) |
+| Beat someone **one rung up** | 100 — a whole rung, in one fight |
+| Beat someone three rungs up | 180 |
+| Beat someone one rung down | 20 |
+| Die to an equal or better | −30 |
+| Die to someone one rung down | −60 |
+| Die to someone three rungs down | −120 |
+
+The leader is simultaneously the biggest threat and the fastest route up, so the
+ladder rubber-bands itself instead of running away with whoever got the first
+kill. Dying is the mirror: losing to someone above you is nearly free, because
+being outmatched is not a mistake — being *upset* is.
+
+`test:levels` measures both ends of that: nine kills against equals reaches the
+top, while forty kills on a rung-1 punching bag stalls at rung 3.
+
+### Three guards against the death spiral
+
+Loss aversion runs about twice as strong as the pleasure of an equivalent gain,
+so a ladder that takes as freely as it gives is one people stop climbing.
+
+1. **You never fall below rung 1.** There is always a rung to stand on.
+2. **You never fall more than one rung per death**, whatever the arithmetic
+   says. A rung 5 killed by a rung 1 loses 120 XP — three rungs — and drops
+   exactly one. The player who has just lost a fight is the last one who should
+   be handed a second punishment on top.
+3. **Losing to someone above you is nearly free**, so being new is not taxed.
+
+### One ordering bug worth remembering
+
+`punchedUp` on the kill event — the flag the killfeed and the `giantSlayer`
+contract read — was computed when the event was built, which is *after* the XP
+was awarded. Beating someone one rung up promotes you level with them, so the
+flag came out false: the single kill most worth celebrating was the one that
+stopped reporting itself. It is captured before any XP moves now.
+
 ## Aim assist
 
 Aiming with a thumb on a 375px-tall screen is genuinely hard, and that was the
@@ -366,25 +448,51 @@ Two details that are load-bearing:
 Humans only. Bots already aim with deliberate error, and handing them assist on
 top would just make them snipers.
 
-## Ammo types
+## Bullet speed, and the test it made necessary
 
-Alongside health and rapid-fire, three pickups change what your rounds do. One
-ammo slot per player — a new type replaces the old rather than stacking, which
-keeps the balance surface finite. Each has its own tracer colour, so you can
-read what someone is shooting at a glance.
+Rounds travel at **52 units per second** with a **0.9s** life — about 47 units
+of reach. Raised from 30, on the report that shots felt slow.
 
-| Pickup | Effect |
-|---|---|
-| **Tracking** | Rounds steer toward a target ahead of them, at a capped turn rate so they can still be dodged sideways |
-| **Bouncy** | Rounds ricochet off walls twice. The walls are axis-aligned, so a bounce is just negating one velocity component |
-| **Fire** | Hits set the target alight — damage keeps ticking for 3s after the shot, credited to the shooter |
+The complaint is really about **lead**. At 30 a round took half a second to
+cross fifteen units, which is long enough that hitting a moving chicken meant
+aiming where it *would be* rather than where it *is* — and a centre-screen
+crosshair you have to aim somewhere other than at the target feels wrong even
+when it is working. At 52 that shot lands in under three tenths, inside the
+window where it still reads as "I pointed and it hit".
 
-Burn damage is applied in half-second chunks rather than every tick. At 60Hz,
-per-tick damage would emit sixty hit events a second and bury the kill feed in
-damage numbers.
+Still a projectile and not hitscan: the glowing tracer is most of what the game
+looks like, and an instant hit has nothing to draw. The tracer got longer with
+the speed, because a tracer is a fake motion blur and the faster the thing it
+stands in for, the longer that blur has to be.
 
-Weights live in `PICKUP_WEIGHTS`. Health stays the most common because it's the
-one every player always wants.
+Life came *down* from 1.3 in the same change. Keeping it would have put the
+reach at 68 units — wider than the largest map — and turned every sightline into
+a duel.
+
+**The knock-on that matters.** A round now covers **0.87 units per tick** at
+60Hz, against a **0.76-unit** hit radius. It outruns its own hitbox: a naive
+point test would pass clean *through* a chicken between two ticks without ever
+being inside it. The swept segment test has always handled this, but at 30 units
+per second it barely had to — a 0.5-unit step fit inside the target, so even a
+point test would mostly have worked.
+
+That failure does not look like a bug. Shots simply miss sometimes, more often
+at close range where the geometry is worst, and it reads as bad aim or bad
+netcode rather than as arithmetic. `test:combat` now fires at eight ranges from
+point blank to maximum and asserts every one connects — and asserts the
+per-tick step really does exceed the hit radius, so the check cannot quietly
+stop testing anything if the speed is ever lowered again.
+
+## Pickups
+
+**Health, and nothing else.** There used to be four more — tracking, bouncy and
+fire rounds, plus rapid fire — and all of them are gone, replaced by the pecking
+order above. See that section for why: a pickup is luck, and luck makes a poor
+reward.
+
+`PICKUP_WEIGHTS` survives as a one-row table rather than collapsing to a
+constant, because the shape is the useful part. Adding a non-combat pickup later
+is one line there and nothing anywhere else.
 
 ## Playing with friends
 
@@ -851,7 +959,7 @@ npm install -D playwright && npx playwright install chromium
 
 | Suite | Covers |
 |---|---|
-| `test:sim` | Mode win conditions, friendly fire, hill scoring and contest, the shrinking zone, every modifier's effect, aim assist, all three ammo types, and every objective system — contracts, Egg Heist, Plant & Defuse, the rotating hill, Hot Potato |
+| `test:sim` | Mode win conditions, friendly fire, hill scoring and contest, the shrinking zone, every modifier's effect, aim assist, the pecking order, and every objective system — contracts, Egg Heist, Plant & Defuse, the rotating hill, Hot Potato |
 | `smoke` | Two real clients: state sync, input acks, chat rate-limiting, **match clock drift** |
 | `test:seats` | Seat allocation and bot eviction when a human joins |
 | `test:rooms` | Room-code isolation — a stranger must not reach a private match |
@@ -863,10 +971,11 @@ npm install -D playwright && npx playwright install chromium
 | `test:stats` | Server status panel and the in-game network readout |
 | `test:tasks` | Both new modes end-to-end in a browser: nests and eggs render, the bomb is pickable, the contract strip names and counts its task, the zone marker follows a relocation |
 | `test:cover` | Map cover: every layout is mirror-symmetric with clear cardinal lanes and nothing landable, bodies and bullets are stopped by it, nothing spawns inside it, and bots steer around it rather than grinding into it |
+| `test:levels` | The pecking order: the XP asymmetry both ways, every rung unlocking something named and measurable in the sim, the top being reachable but not farmable, and the three death-spiral guards |
 | `test:crop` | Grain: the crop empties, pecking refills progressively, the feeder heals only out of combat, and none of the anti-frustration rules can be regressed |
 | `test:view` | Third-person framing, headless and instant: the shot line meets the camera ray, a target under the crosshair is hit dead centre, the boom retracts off walls, and the camera never escapes the arena |
 | `test:control` | **Knockback can never take the wheel** — see below — plus movement symmetry on every map and in every mode, and the vertical axis: jump arcs, the height ceiling, air control, and that nothing but your own jump can lift you |
-| `test:combat` | Aim assist in both axes, all three ammo types, and shooting in 3D — over a target, onto a jumping one, down out of a jump, into the floor, over a wall |
+| `test:combat` | Aim assist in both axes, the stacked fire-rate floor, **that fast rounds do not tunnel**, and shooting in 3D — over a target, onto a jumping one, down out of a jump, into the floor, over a wall |
 | `test:controls` | Desktop: camera at eye level and on the player, own body hidden, facing-relative movement, mouse look in both axes, `Space` jumps and `F` fires, the centre crosshair, the 1P/3P toggle, the sensitivity slider, world markers and the spectator orbit |
 | `test:fps-touch` | First person on an emulated phone: swipe-to-look **proportionality**, pitch and its clamp, FIRE and JUMP, jumping and firing and looking with three thumbs at once, and dragging both buttons to new homes |
 | `test:retention` | Killed-by panel, the nemesis ring, the auto-requeue countdown and its cancellation |

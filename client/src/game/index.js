@@ -9,9 +9,10 @@ import { BulletPool, DebrisPool, BlastRings, MuzzleFlash } from './fx.js';
 import { Controls } from './controls.js';
 import { asView } from './view.js';
 import { sfx } from '../audio/sfx.js';
+import { tts, SAY } from '../audio/index.js';
 import {
   PLAYER, BULLET, BOMBER, MODIFIERS, MODES, HILL, BOMB, HEIST, SEAT_COLORS,
-  GRAVITY, coverFor, cropCapacity, modValue, clampUnit, clamp,
+  GRAVITY, coverFor, cropCapacity, MULTIKILL_NAMES, modValue, clampUnit, clamp,
 } from '@cluckdown/shared';
 
 // Matches the server's simulation rate: sending slower would leave most ticks
@@ -99,6 +100,7 @@ export class Game {
     this.controls.setButtonEdit(!!gfx?.fireEdit);
     this.controls.setAssist(gfx?.assist !== false);
     this.controls.setSensitivity(gfx?.sensitivity ?? 1);
+    tts.setEnabled(!!gfx?.announcer);
     // The arena never changes size within a match — the map vote resolves
     // before the Game is built — so this is set once.
     this.controls.setArenaHalf(session.arenaSize / 2);
@@ -248,15 +250,16 @@ export class Game {
             this.beak.kick();
           }
           sfx.play(e.rapid ? 'rapidShot' : 'shot');
-          break;
-        }
-        case 'bulletEnd': {
-          this.bullets.end(e.id);
-          // Sparks fly back out of whatever the bullet hit — at the height it
-          // hit at, which is now the floor, a wall, or somebody's head.
-          this.debris.emit('red', e.x, e.y ?? 0.85, e.z, e.wall ? 4 : 6, {
-            speed: e.wall ? 5 : 7, up: 0.5, size: 0.35, life: 0.32, drag: 3.5,
-          });
+
+          // Impact sparks, at the point the trace already resolved to. There is
+          // no separate "the bullet landed" message any more — the shot event
+          // carries both ends of the line, because both were decided in the
+          // same instant.
+          if (e.hx !== undefined) {
+            this.debris.emit('red', e.hx, e.hy ?? 0.85, e.hz, e.hit ? 6 : 4, {
+              speed: e.hit ? 7 : 5, up: 0.5, size: 0.35, life: 0.32, drag: 3.5,
+            });
+          }
           break;
         }
         case 'hit': {
@@ -274,7 +277,15 @@ export class Game {
             sfx.play('hurt');
           } else if (self && e.by === self.id) {
             // Only your own hits get a hit-marker; other people's are noise.
-            sfx.play('hit');
+            sfx.play(e.head ? 'headshot' : 'hit');
+            if (e.head) {
+              this.hud.announce('HEADSHOT');
+              tts.say('Headshot', { priority: SAY.streak, key: 'headshot' });
+              // A burst at the point of impact, not at the body centre — a
+              // headshot that sprays feathers from the belly does not read as
+              // one, and reading it is the entire reward.
+              this.debris.feathers(at.x, atY + 1.55, at.z, 7);
+            }
           }
           break;
         }
@@ -297,6 +308,21 @@ export class Game {
               this.hud.announce('REVENGE!');
               sfx.play('pickupHealth');
             }
+            // Spoken, in order of how much it deserves the channel. A
+            // multikill outranks a revenge outranks a plain kill, and only one
+            // of them is ever said — see tts.js on why speech cannot queue.
+            const name = MULTIKILL_NAMES[Math.min(e.multi, MULTIKILL_NAMES.length) - 1];
+            if (e.multi > 1 && name) {
+              tts.say(name, { priority: SAY.streak, key: 'multi' });
+            } else if (e.revenge) {
+              tts.say('Revenge', { priority: SAY.streak, key: 'revenge' });
+            } else if (e.punchedUp) {
+              tts.say('Giant slayer', { priority: SAY.streak, key: 'punchUp' });
+            } else {
+              tts.say('Chicken down', { priority: SAY.kill, key: 'kill' });
+            }
+          } else if (self && e.target === self.id && e.byName) {
+            tts.say(`Killed by ${e.byName}`, { priority: SAY.kill, key: 'death' });
           }
           break;
         }
@@ -328,22 +354,7 @@ export class Game {
           this.debris.emit('red', e.x, 0.6, e.z, 12, { speed: 7, up: 1.1, size: 0.3, life: 0.6 });
           this.hud.announce('BOMBER INCOMING');
           sfx.play('bomberSpawn');
-          break;
-        }
-        case 'bounce': {
-          // Keep the tracer in step with the authoritative ricochet.
-          this.bullets.redirect(e.id, e.x, e.y, e.z);
-          this.debris.emit('white', e.x, e.y ?? 0.85, e.z, 3, {
-            speed: 4, up: 0.4, size: 0.22, life: 0.25, drag: 4,
-          });
-          sfx.play('hit');
-          break;
-        }
-        case 'ignite': {
-          this.debris.emit('gold', e.x, 1.0, e.z, 8, {
-            speed: 5, up: 1.3, size: 0.3, life: 0.6, drag: 2,
-          });
-          sfx.play('pickupRapid');
+          tts.say('Bomber incoming', { priority: SAY.event, key: 'bomber' });
           break;
         }
         case 'bounty': {
@@ -488,6 +499,52 @@ export class Game {
           sfx.play(isHeal ? 'pickupHealth' : 'pickupRapid');
           if (isHeal) this.hud.popDamage(this.projectFn(e.x, 1.8, e.z), 35, 'heal');
           if (self && e.by === self.id && !isHeal) this.hud.announce('RAPID FIRE');
+          break;
+        }
+        // --- the pecking order
+        case 'levelUp':
+        case 'levelDown': {
+          const mine = self && e.target === self.id;
+          const up = e.type === 'levelUp';
+          if (mine) {
+            // The payoff. Banner, sound, and a burst of feathers in the rung's
+            // own colour — three channels, because this half-second is what the
+            // whole climb gets remembered as.
+            this.hud.announceRung(e);
+            sfx.play(up ? 'levelUp' : 'levelDown');
+            this.rig.addShake(up ? 0.28 : 0.12);
+            tts.say(up ? `Level ${e.level}. ${e.name}` : `Demoted. ${e.name}`,
+              { priority: SAY.streak, key: 'rung' });
+          } else {
+            // Someone ELSE moved. Quieter, but not silent: knowing the room's
+            // hierarchy is shifting is most of what makes the ladder social.
+            sfx.play(up ? 'rivalUp' : 'hit');
+          }
+          this.debris.emit(up ? 'gold' : 'white', e.x, (e.y ?? 0) + 1.0, e.z, up ? 18 : 8, {
+            speed: up ? 9 : 5, up: 1.3, size: 0.3, life: up ? 0.9 : 0.5, drag: 2,
+          });
+          break;
+        }
+        case 'secondWind': {
+          // Rung 5, firing at the worst moment of a fight. Loud for its owner
+          // because it is a rescue they should feel arrive.
+          this.debris.emit('gold', e.x, (e.y ?? 0) + 0.9, e.z, 12, {
+            speed: 8, up: 1.2, size: 0.26, life: 0.6, drag: 2.4,
+          });
+          if (self && e.target === self.id) {
+            this.hud.announce('SECOND WIND');
+            sfx.play('secondWind');
+          }
+          break;
+        }
+        case 'frenzy': {
+          this.debris.emit('red', e.x, (e.y ?? 0) + 1.1, e.z, 14, {
+            speed: 10, up: 1.1, size: 0.3, life: 0.7, drag: 2,
+          });
+          if (self && e.target === self.id) {
+            this.hud.announce('FEEDING FRENZY');
+            sfx.play('frenzy');
+          }
           break;
         }
         case 'peck': {
@@ -838,7 +895,7 @@ export class Game {
           // watching would swing into place a tenth of a second after the
           // camera did.
           aim: this.controls.yaw,
-          invuln: p.invuln, rapid: p.rapid, burning: p.burning, bounty: crowned,
+          invuln: p.invuln, level: p.level, wind: p.wind, frenzy: p.frenzy, bounty: crowned,
           // Your own peck pose matters in third person, where you are watching
           // your own chicken do it.
           pecking: p.pecking, feeding: p.feeding,
@@ -1137,6 +1194,9 @@ export class Game {
     if (this.disposed) return;
     this.disposed = true;
     window.removeEventListener('resize', this.onResize);
+    // Speech outlives a page far more stubbornly than audio nodes do: an
+    // utterance already queued keeps talking after the match is gone.
+    tts.stop();
     this.beak.dispose();
     this.controls.dispose();
     for (const v of this.nests.values()) v.dispose();

@@ -3,7 +3,7 @@ import { Mesh } from '@babylonjs/core/Meshes/mesh';
 import { VertexBuffer } from '@babylonjs/core/Buffers/buffer';
 import { Color3 } from '@babylonjs/core/Maths/math';
 import { emissiveMat, litMat } from './scene.js';
-import { BOMBER, AMMO, POTATO, HEIST, BOMB } from '@cluckdown/shared';
+import { BOMBER, POTATO, HEIST, BOMB, rungOf } from '@cluckdown/shared';
 import { BEAK } from './view.js';
 
 /**
@@ -118,16 +118,22 @@ export class PlayerView {
     this.shield.isPickable = false;
     this.shield.setEnabled(false);
 
-    // Gold aura while rapid-fire is active.
+    // The rung aura. It was the rapid-fire pickup's; it now marks anyone high
+    // up the pecking order, which is a far better use of it — a ring at ground
+    // level is legible from across the arena and from any angle, and "that one
+    // is dangerous" is exactly what it should be saying.
     this.aura = MeshBuilder.CreateTorus('aura', { diameter: 2.0, thickness: 0.09, tessellation: 18 }, scene);
-    this.aura.material = emissiveMat(scene, 'auraMat', '#ffcc3d', { intensity: 1.0 });
+    this.aura.material = emissiveMat(scene, 'auraMat', '#ffcc3d', { intensity: 1.0, cache: false });
     this.aura.parent = this.root;
     this.aura.position.y = 0.12;
     this.aura.isPickable = false;
     this.aura.setEnabled(false);
 
+    // Second Wind and Feeding Frenzy both flare this. Kept from the old fire
+    // ammo, recoloured per burst: it is the only "something is happening to
+    // that chicken RIGHT NOW" shape the renderer has.
     this.flame = MeshBuilder.CreateSphere('flame', { diameter: 1.5, segments: 8 }, scene);
-    this.flame.material = emissiveMat(scene, 'flameMat', AMMO.fire.color, { intensity: 1.0, alpha: 0.5 });
+    this.flame.material = emissiveMat(scene, 'flameMat', '#ff8a3d', { intensity: 1.0, alpha: 0.5, cache: false });
     this.flame.parent = this.root;
     this.flame.position.y = 1.0;
     this.flame.isPickable = false;
@@ -242,8 +248,14 @@ export class PlayerView {
     // Fire damage keeps ticking after the shot, so it needs to be visible on
     // the victim rather than only in the damage numbers.
     if (this.flame) {
-      this.flame.setEnabled(!!target.burning);
-      if (target.burning) {
+      // A burst perk is running: Second Wind (orange) or Feeding Frenzy (pink).
+      const burst = target.frenzy ? '#ff4df0' : (target.wind ? '#ff8a3d' : null);
+      this.flame.setEnabled(!!burst);
+      if (burst) {
+        if (this.flameHex !== burst) {
+          this.flameHex = burst;
+          this.flame.material.emissiveColor.copyFrom(Color3.FromHexString(burst));
+        }
         this.flame.rotation.y += dt * 7;
         this.flame.scaling.setAll(0.9 + Math.abs(Math.sin(this.bob * 1.7)) * 0.35);
       }
@@ -265,8 +277,19 @@ export class PlayerView {
       }
     }
 
-    this.aura.setEnabled(!!target.rapid);
-    if (target.rapid) {
+    // Rung 4 and up wear the ring, tinted by rung. Below that the ladder is
+    // still readable off the nameplate — an aura on everyone is an aura on
+    // nobody.
+    const lvl = target.level ?? 1;
+    const wearsAura = lvl >= 4;
+    this.aura.setEnabled(wearsAura);
+    if (wearsAura) {
+      if (this.auraLevel !== lvl) {
+        this.auraLevel = lvl;
+        this.aura.material.emissiveColor.copyFrom(Color3.FromHexString(rungOf(lvl).color));
+      }
+    }
+    if (wearsAura) {
       this.aura.rotation.y += dt * 5;
       this.aura.position.y = 0.12 + Math.sin(this.bob * 0.6) * 0.06;
     }
@@ -340,9 +363,9 @@ export class PickupView {
   constructor(scene, pickup) {
     this.id = pickup.id;
     this.type = pickup.type;
-    // Colour comes from the ammo table, so adding a type needs no change here.
-    const COLORS = { health: '#35e07f', rapid: '#ffcc3d' };
-    for (const id of Object.keys(AMMO)) COLORS[id] = AMMO[id].color;
+    // Health is the only pickup left on the floor; the shooting power-ups were
+    // replaced by the pecking order, which you earn rather than find.
+    const COLORS = { health: '#35e07f' };
     const hex = COLORS[pickup.type] ?? '#ffffff';
 
     this.mesh = MeshBuilder.CreateBox('pickup', {

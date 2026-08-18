@@ -63,6 +63,46 @@ await until(() => {
 await page.waitForTimeout(1500);
 await page.screenshot({ path: `${OUT}/20-lit-fps.png`, timeout: 20000 });
 
+// --- the pecking order. Levels forced so the badges, the nameplate rungs and
+// the level-up banner can all be looked at without playing a whole match.
+const ladder = await until(() => {
+  const S = window.__cluckdown;
+  const w = S.session.world;
+  const me = w.players.get(S.session.selfId);
+  if (!me) return null;
+  let i = 3;
+  for (const p of w.players.values()) {
+    if (p.id === S.session.selfId) continue;
+    p.xp = (i - 1) * 100 + 40;
+    p.level = i;
+    i = Math.min(6, i + 1);
+    p.hp = 100;
+    p.alive = true;
+  }
+  me.xp = 340;   // rung 4, 40% of the way to 5
+  me.level = 4;
+  me.hp = 72;
+  const badge = document.getElementById('rung-badge');
+  if (badge.textContent !== '4') return null;
+  return {
+    badge: badge.textContent,
+    rung: document.getElementById('rung-name').textContent,
+    xpWidth: document.getElementById('xp-fill').style.width,
+    plateLevels: [...document.querySelectorAll('.np-lvl')].map((e) => e.textContent),
+  };
+}, 20000);
+console.log('ladder:', JSON.stringify(ladder));
+
+// The level-up banner, held open long enough to photograph.
+await page.evaluate(() => {
+  window.__cluckdown.game.hud.announceRung({
+    type: 'levelUp', level: 5, from: 4, name: 'Ironfeather',
+    perk: 'Second Wind', blurb: 'Drop low and bolt — once per life.', color: '#ff8a3d',
+  });
+});
+await page.waitForTimeout(400);
+await page.screenshot({ path: `${OUT}/23-ladder.png`, timeout: 20000 });
+
 const info = await page.evaluate(() => {
   const S = window.__cluckdown;
   const g = S.game;

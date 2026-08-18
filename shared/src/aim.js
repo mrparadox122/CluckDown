@@ -19,7 +19,7 @@
 // It lives in shared/ anyway because it is game tuning, not rendering, and
 // because that keeps it testable headlessly.
 
-import { AIM_ASSIST, BULLET, PLAYER } from './constants.js';
+import { AIM_ASSIST, PLAYER } from './constants.js';
 import { angleDelta } from './math.js';
 
 /**
@@ -69,11 +69,11 @@ export function pickAimTarget(self, foes, raw, locked = null) {
  * @returns the new aim angle.
  */
 export function pullAim(self, target, aim, dt, strength = AIM_ASSIST.strength) {
-  const d = Math.hypot(target.x - self.x, target.z - self.z);
-  const flight = d / BULLET.speed;
-  const tx = target.x + (target.mx ?? 0) * PLAYER.speed * flight * AIM_ASSIST.lead;
-  const tz = target.z + (target.mz ?? 0) * PLAYER.speed * flight * AIM_ASSIST.lead;
-  const want = Math.atan2(tx - self.x, tz - self.z);
+  // Straight at them, with no lead. Shots are hitscan — they resolve against
+  // where the target IS, so aiming ahead of a moving chicken now aims at empty
+  // floor. The lead this used to apply was correct for a projectile and is
+  // exactly wrong for a trace.
+  const want = Math.atan2(target.x - self.x, target.z - self.z);
 
   const k = 1 - Math.exp(-strength * 12 * dt);
   return aim + angleDelta(aim, want) * k;

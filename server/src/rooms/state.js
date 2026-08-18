@@ -27,9 +27,15 @@ defineTypes(PlayerState, {
   hp: 'uint8',
   alive: 'boolean',
   invuln: 'boolean',
-  rapid: 'boolean',
-  ammo: 'string',    // '' | tracking | bouncy | fire
-  burning: 'boolean',
+  // The pecking order. `level` is synced for EVERYONE because it rides above
+  // their health bar — it is the whole point of the ladder that it is public.
+  // `xp` and `nextXp` only ever draw your own bar, but they are two small
+  // numbers and a per-client channel would cost more than it saves.
+  level: 'uint8',
+  xp: 'uint16',
+  nextXp: 'uint16',
+  wind: 'boolean',    // Second Wind is running
+  frenzy: 'boolean',  // Feeding Frenzy is running
   // Grain. `crop` is your own ammo counter; `pecking` and `feeding` are synced
   // for EVERYONE because they are the tell — a chicken with its head down is
   // reloading, and reading that off another player is the point of making the

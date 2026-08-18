@@ -45,8 +45,31 @@ export const PLAYER = {
   respawnDelay: 3,
   spawnInvuln: 2,
   fireCooldown: 0.18,
-  rapidCooldown: 0.07,
+  /**
+   * Floor on the fire cooldown, whatever perks and modifiers multiply it by.
+   *
+   * Kept from the old rapid-fire pickup, now doing a more important job: Rapid
+   * Peck and Feeding Frenzy and TRIGGER HAPPY all multiply the same number, and
+   * three multipliers stacked without a floor is a fire rate that empties a
+   * crop before anyone can react to it.
+   */
+  minCooldown: 0.07,
   knockbackDecay: 6, // per second, exponential-ish damping
+
+  /**
+   * TAGGING. Being shot slows you briefly instead of shoving you.
+   *
+   * Bullets used to apply knockback. That is a projectile-game idea and it
+   * reads, to anyone arriving from a hitscan shooter, as the game taking the
+   * controls off you — which is the exact failure `maxKnockback` below was
+   * added to bound. A slow does the same job better: the hit lands, you are
+   * meaningfully worse off for a moment, and you never stop steering.
+   *
+   * Short, because it stacks with itself under sustained fire and a long tag
+   * turns a losing fight into a helpless one.
+   */
+  tagSlow: 0.68,
+  tagDuration: 0.35,
 
   /**
    * Ceiling on the accumulated shove, in units per second.
@@ -146,7 +169,6 @@ export const AIM_ASSIST = {
   stickyCone: 0.85,   // wider angle before an ALREADY-locked target is dropped
   range: 26,          // units; beyond this nothing is acquired
   stickyRange: 32,    // a locked target is kept until it passes this
-  lead: 0.55,         // 0..1 how much to aim ahead of a moving target
   minAimInput: 0.15,  // stick deflection below this counts as "not aiming"
 
   /**
@@ -270,10 +292,70 @@ export const CROP = {
 
 export const BULLET = {
   radius: 0.16,
-  speed: 30,
+
   damage: 11,
-  life: 1.3, // seconds -> ~39 unit range
-  knockback: 3.5,
+
+  /**
+   * How far a shot reaches, in units. It gets there instantly — see traceShot.
+   *
+   * Raising the old projectile speed was the wrong fix for "shooting feels
+   * unsatisfying", twice over: first from 30 to 52, and it still felt wrong,
+   * because travel time is not a tuning knob. A player trained on CS or
+   * Valorant does not lead a target — they put the dot on it and click — so any
+   * flight time at all makes the game feel like it is disagreeing with them.
+   *
+   * 46 keeps roughly the reach the projectile had, which was already tuned
+   * against the map sizes.
+   */
+  range: 46,
+
+  /**
+   * HEADSHOTS.
+   *
+   * The skill expression hitscan was missing. With every shot doing the same
+   * eleven damage wherever it lands, aim carefully and aim vaguely pay exactly
+   * the same — which is the other half of why shooting felt unsatisfying to
+   * anyone arriving from CS or Valorant. There, where you put the dot is the
+   * whole game.
+   *
+   * 52 against 100 health means two clean headshots kill, versus ten body
+   * shots. That gap is deliberately enormous: a five-to-one payoff is what
+   * makes going for the head a real decision under pressure rather than a small
+   * bonus you take when convenient.
+   *
+   * `headFrom` is measured up from the chicken's FEET, so it travels with a
+   * jumping target and stays correct at any height.
+   *
+   * It has to sit ABOVE eye height (1.15), and that is the whole subtlety. The
+   * first attempt used 1.05 — the underside of the head box the renderer
+   * builds — which looks right and is badly wrong: two chickens stand at the
+   * same height, so a shot fired dead level leaves one eye at 1.15 and arrives
+   * at the other at 1.15, inside the head. Every flat shot was a free headshot,
+   * time-to-kill collapsed to two rounds, and aim assist — which pulls to 0.99,
+   * below the line — was actively making your shots WORSE. A test caught it
+   * because DOUBLE DAMAGE started reporting 100 damage a hit.
+   *
+   * At 1.28 a level shot lands in the neck and body, and the head has to be
+   * aimed at. The margin is small on purpose: about 0.7 degrees at duelling
+   * range, which is a few pixels of crosshair placement. That is the skill —
+   * it is the same one CS players spend years on, and it is exactly what was
+   * missing from a game where every shot did the same damage wherever it hit.
+   *
+   * Aim assist deliberately does NOT reach here: it pulls to 0.55 of the body
+   * (0.99), well under the line. Assist gets you body shots; heads are earned.
+   */
+  headDamage: 52,
+  headFrom: 1.28,
+
+  /**
+   * How fast the TRACER is drawn, in units per second, and nothing else.
+   *
+   * The shot itself has already been resolved by the time this is used. This is
+   * purely how quickly the streak crosses the gap to a decision that has
+   * already been made — fast enough to read as instant, slow enough to be a
+   * visible line rather than a single frame nobody sees.
+   */
+  tracerSpeed: 190,
 
   /**
    * The tracer you can SEE, which is deliberately NOT `radius` above.
@@ -288,7 +370,15 @@ export const BULLET = {
    * to change how hard the game is.
    */
   tracerRadius: 0.12,
-  tracerLength: 1.0, // world units, nose to tail — the streak, not the round
+  /**
+   * World units, nose to tail — the streak, not the round.
+   *
+   * Lengthened with the speed. A tracer is a fake motion blur, and the faster
+   * the thing it is standing in for, the longer that blur should be: at 52 a
+   * one-unit streak covers less than its own length per frame on a 60Hz
+   * display and reads as a dot rather than as gunfire.
+   */
+  tracerLength: 1.6,
 };
 
 export const BOMBER = {
@@ -313,51 +403,185 @@ export const BOMBER = {
   killReward: 'health', // ...and drops a pickup where it died
 };
 
-// ------------------------------------------------------------- AMMO TYPES
+// ------------------------------------------------------------- THE PECKING ORDER
 //
-// One ammo slot per player: picking a new type replaces the old one rather than
-// stacking, which keeps the combinations (and the balance surface) finite.
-export const AMMO = {
-  tracking: {
-    id: 'tracking',
-    label: 'Tracking',
-    blurb: 'Rounds bend toward whoever you fired at.',
-    duration: 10,
-    turnRate: 5.0,   // radians per second the round may steer
-    range: 24,       // it only tracks a target within this
-    cone: 1.1,       // and only one roughly ahead of it
-    color: '#c77dff',
+// Power is EARNED, not found. Every shooting pickup — tracking, bouncy and fire
+// rounds, and rapid fire — was deleted and replaced by this, and that swap is
+// the whole design argument:
+//
+// A pickup is luck. You walk over a thing and become stronger for ten seconds,
+// and nothing about that is attributable to you. It generates no story, teaches
+// nothing, and the player who lost the fight lost it to a spawn table. A ladder
+// you climb by killing is the opposite on every count — it is legible, it is
+// yours, and it is public.
+//
+// PUBLIC is the important word. Everyone's level rides above their health bar,
+// which turns a number into a social object: it marks the threat in the room,
+// it makes a high level something to defend, and it makes taking one down worth
+// bragging about. Status visible to others is a far stronger motivator than
+// private power, and it costs one line of HUD.
+//
+// THE RUNG YOU KILL DECIDES THE CLIMB. Beating someone above you is worth
+// multiples of beating someone below, so the leader is also the fastest route
+// up — the ladder rubber-bands itself instead of running away with whoever got
+// the first kill. Dying is the mirror: losing to someone below you costs far
+// more than losing to someone above, because being outmatched is not a mistake
+// and being upset is.
+//
+// GUARDED AGAINST THE DEATH SPIRAL, deliberately and in three places. Loss
+// aversion is roughly twice as strong as the pleasure of an equivalent gain,
+// so a ladder that takes as freely as it gives is a ladder people quit. Hence:
+// you never fall below rung 1, you never fall more than one rung per death, and
+// dying to someone above you is nearly free.
+export const LEVELS = {
+  max: 6,
+  /** XP per rung. Flat, because a curve makes the top unreachable in four minutes. */
+  step: 100,
+
+  kill: {
+    /** Beating an equal. Well over half a rung, so any kill feels like progress. */
+    base: 60,
+    /**
+     * Per rung of difference, added when they are above you and subtracted when
+     * below. Killing one rung up is a whole level in a single fight — the
+     * biggest single dopamine hit the mode has, and it is aimed squarely at
+     * whoever is winning.
+     */
+    perRung: 40,
+    /** Clamped, so farming the bottom of the table is never a strategy. */
+    maxRungs: 3,
+    floor: 10,
   },
-  bouncy: {
-    id: 'bouncy',
-    label: 'Bouncy',
-    blurb: 'Rounds ricochet off the walls.',
-    duration: 12,
-    bounces: 2,
-    color: '#8ecae6',
+
+  death: {
+    /** Dying to an equal or to someone above you. Cheap on purpose. */
+    base: 30,
+    /** Extra per rung the killer was BELOW you. Being upset is what costs. */
+    perRung: 30,
+    maxRungs: 3,
   },
-  fire: {
-    id: 'fire',
-    label: 'Fire',
-    blurb: 'Hits set chickens alight. Damage keeps ticking.',
-    duration: 10,
-    burnDuration: 3,  // seconds the target keeps burning
-    burnDps: 9,       // damage per second while alight
-    burnTick: 0.5,    // applied in chunks this often, so it reads as ticks
-    color: '#ff8a3d',
-  },
+
+  /**
+   * The rungs, and what each one gives you.
+   *
+   * Every unlock has to be felt within seconds of getting it, or the level-up
+   * is a number with no referent. "+5% movement" is invisible and therefore
+   * worthless as a reward however good it is on a spreadsheet.
+   *
+   * They also escalate in KIND rather than in size — tempo, then mobility, then
+   * power, then safety, then spectacle. Five different feelings beats one
+   * feeling five times, and it keeps the top of the ladder from being simply
+   * "the same but more", which is where a progression stops producing dopamine.
+   *
+   * Note how little of it is raw damage. The leader is already the biggest prize
+   * in the room; handing them lethality on top is how a match ends at minute
+   * two. Most of the ladder buys TIME — faster recovery, faster legs, an escape
+   * — which is felt immediately and still leaves them killable.
+   */
+  rungs: [
+    {
+      level: 1,
+      name: 'Chick',
+      perk: null,
+      blurb: 'Everyone starts here.',
+      color: '#9aa6c4',
+    },
+    {
+      level: 2,
+      name: 'Scratcher',
+      perk: 'Quick Crop',
+      blurb: 'Peck back to full in half the time.',
+      // Tempo. It shortens the most helpless moment in the game, which is the
+      // single most welcome thing you can hand someone this early.
+      peckRateMul: 1.9,
+      color: '#5ee08a',
+    },
+    {
+      level: 3,
+      name: 'Runner',
+      perk: 'Long Legs',
+      blurb: 'You are noticeably quicker on your feet.',
+      // Mobility. Felt in the first step, and visible to everyone else too.
+      speedMul: 1.16,
+      color: '#5fd1ff',
+    },
+    {
+      level: 4,
+      name: 'Brawler',
+      perk: 'Rapid Peck',
+      blurb: 'Your shots come out a third faster.',
+      // Power, and the only rung that is straightforwardly lethality. By now
+      // you are a visible threat carrying a number everyone wants.
+      fireCooldownMul: 0.72,
+      color: '#ffcc3d',
+    },
+    {
+      level: 5,
+      name: 'Ironfeather',
+      perk: 'Second Wind',
+      blurb: 'Drop low and bolt — once per life.',
+      // Safety, and reactive rather than passive: it FIRES, with a sound and a
+      // colour, at the worst moment of a fight. A perk you notice happening is
+      // worth several you merely have.
+      secondWind: { at: 0.3, seconds: 2.2, speedMul: 1.55 },
+      color: '#ff8a3d',
+    },
+    {
+      level: 6,
+      name: 'Cock of the Walk',
+      perk: 'Feeding Frenzy',
+      blurb: 'A kill refills you and sets you loose.',
+      // Spectacle. It rewards the thing the top of the ladder should reward —
+      // stringing kills together — and it is the only perk that can chain, so
+      // the ceiling of the mode is a highlight rather than a stat.
+      frenzy: { seconds: 3.2, fireCooldownMul: 0.75, speedMul: 1.2 },
+      color: '#ff4df0',
+    },
+  ],
 };
 
-export const AMMO_LIST = ['tracking', 'bouncy', 'fire'];
+/** The rung definition for a level, clamped into range. */
+export function rungOf(level) {
+  const i = Math.max(1, Math.min(LEVELS.max, level | 0)) - 1;
+  return LEVELS.rungs[i];
+}
 
-// Weighted pickup table. Health stays common because it is the one every player
-// always wants; the ammo types are the treat.
+/** Level from total XP. */
+export function levelFromXp(xp) {
+  return Math.max(1, Math.min(LEVELS.max, Math.floor(Math.max(0, xp) / LEVELS.step) + 1));
+}
+
+/** XP at which a level begins. */
+export function xpForLevel(level) {
+  return (Math.max(1, level) - 1) * LEVELS.step;
+}
+
+/**
+ * A perk value for a player at `level`, or `fallback`.
+ *
+ * Perks are cumulative: reaching rung 4 keeps rungs 2 and 3. So this walks down
+ * the ladder rather than reading one entry — a player at 6 still has Long Legs.
+ */
+export function perkValue(level, key, fallback = 1) {
+  let out = fallback;
+  for (const rung of LEVELS.rungs) {
+    if (rung.level > level) break;
+    if (rung[key] !== undefined) out = rung[key];
+  }
+  return out;
+}
+
+/** Does this level have the named perk at all? */
+export function hasPerk(level, key) {
+  return perkValue(level, key, undefined) !== undefined;
+}
+
+// Weighted pickup table. Health only, now that power comes from the ladder
+// rather than from the floor — see THE PECKING ORDER above. Kept as a table
+// rather than collapsed to a constant because the shape is the useful part:
+// adding a non-combat pickup later is one line here and nothing anywhere else.
 export const PICKUP_WEIGHTS = [
-  ['health', 42],
-  ['rapid', 16],
-  ['tracking', 14],
-  ['bouncy', 14],
-  ['fire', 14],
+  ['health', 100],
 ];
 
 /** Deterministic weighted pick, driven by the world RNG. */
@@ -376,7 +600,6 @@ export const PICKUP = {
   interval: 7,
   maxAlive: 3,
   health: { heal: 35 },
-  rapid: { duration: 8 }, // gold pickup: rapid fire
 };
 
 export const SCORE = {
@@ -969,17 +1192,20 @@ export const CONTRACTS = {
     target: 3,
     onEvent: (e, p) => (e.type === 'pickupTaken' && e.by === p.id ? 1 : 0),
   },
-  arsonist: {
-    id: 'arsonist',
-    label: 'Set 2 chickens alight',
+  // Both of these replaced ammo-type contracts (set alight, ricochet) when the
+  // shooting pickups were removed. They point at the ladder instead, which is
+  // where the interesting decisions moved to.
+  climber: {
+    id: 'climber',
+    label: 'Climb 2 rungs',
     target: 2,
-    onEvent: (e, p) => (e.type === 'ignite' && e.by === p.id ? 1 : 0),
+    onEvent: (e, p) => (e.type === 'levelUp' && e.target === p.id ? 1 : 0),
   },
-  trickshot: {
-    id: 'trickshot',
-    label: 'Ricochet 3 rounds',
-    target: 3,
-    onEvent: (e, p) => (e.type === 'bounce' && e.owner === p.id ? 1 : 0),
+  giantSlayer: {
+    id: 'giantSlayer',
+    label: 'Beat someone above you',
+    target: 1,
+    onEvent: (e, p) => (e.type === 'kill' && e.by === p.id && e.punchedUp ? 1 : 0),
   },
   regicide: {
     id: 'regicide',
