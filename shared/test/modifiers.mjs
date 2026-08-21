@@ -26,8 +26,11 @@ const check = (l, c, d = '') => {
  */
 function duel(modifier, seconds = 3, { keepAlive = false } = {}) {
   const world = createWorld({ mode: 'casual', seed: 12345, modifier });
-  const a = addPlayer(world, { id: 'a', name: 'A', seat: 0 });
-  const b = addPlayer(world, { id: 'b', name: 'B', seat: 1 });
+  // Scout is the BASELINE GUN: damage 1x, fire rate 1x, no falloff and no
+  // spread penalty. Roles change all four, so a test measuring the gun has to say
+  // which gun — otherwise it silently measures whichever role sorts first.
+  const a = addPlayer(world, { id: 'a', name: 'A', seat: 0, role: 'scout' });
+  const b = addPlayer(world, { id: 'b', name: 'B', seat: 1, role: 'scout' });
 
   world.phase = 'live';
   world.time = 2;

@@ -4,8 +4,9 @@ import {
 } from './scene.js';
 import {
   PlayerView, BomberView, PickupView, PotatoView, NestView, LooseEggView, BombView, BeakView,
+  PadView,
 } from './entities.js';
-import { BulletPool, DebrisPool, BlastRings, MuzzleFlash } from './fx.js';
+import { BulletPool, DebrisPool, BlastRings, MuzzleFlash, RoleRings } from './fx.js';
 import { Controls } from './controls.js';
 import { asView, lookBasis, rayOrigin, convergeDistance } from './view.js';
 import { assistOn } from '../graphics.js';
@@ -14,7 +15,7 @@ import { tts, SAY } from '../audio/index.js';
 import {
   PLAYER, BULLET, BOMBER, MODIFIERS, MODES, HILL, BOMB, HEIST, SEAT_COLORS,
   GRAVITY, coverFor, cropCapacity, MULTIKILL_NAMES, modValue, clampUnit, clamp,
-  spreadPixels, TEAM_COLORS, PING, pingDef,
+  spreadPixels, TEAM_COLORS, PING, pingDef, roleDef, ROLE_LIST,
 } from '@cluckdown/shared';
 
 // Matches the server's simulation rate: sending slower would leave most ticks
@@ -82,7 +83,10 @@ export class Game {
     this.bullets = new BulletPool(this.scene, this.glow);
     this.debris = new DebrisPool(this.scene, this.glow, 90, modValue(this.modifier, 'debrisGravityMul'));
     this.blasts = new BlastRings(this.scene, this.glow);
+    this.rings = new RoleRings(this.scene, this.glow);
     this.muzzle = new MuzzleFlash(this.scene, this.glow);
+    // Engineer pads, keyed by id like every other transient world object.
+    this.pads = new Map();
 
     // Your own beak, in first person. See BEAK in view.js.
     this.beak = new BeakView(this.scene, this.camera);
@@ -201,6 +205,10 @@ export class Game {
     this.session.on('chat', (m) => this.hud.addChat(m));
     // Only ever arrives for your own side — see ArenaRoom.handlePing.
     this.session.on('ping', (m) => this.addPing(m));
+    // Refusals arrive here too, with role null. Nothing to do but redraw — the
+    // picker reads the roster, and going quiet on a refusal is the exact dead
+    // time this feature was told not to add.
+    this.session.on('role', () => this.hud.repaintRolePicker());
   }
 
   /**
@@ -222,6 +230,16 @@ export class Game {
       this.session.sendPing?.(intent, at.x, at.z);
     };
 
+    // One button, whatever the role decides it does. The simulation refuses it
+    // when there is no charge, no heading, or no ability at all.
+    this.controls.onAbility = () => this.session.sendAbility?.();
+    // 1-6 while the picker is up. Ignored otherwise: a number key that swaps
+    // your role mid-fight is a number key somebody presses mid-fight.
+    this.controls.onRolePick = (i) => {
+      if (!this.hud.pickerUp) return;
+      const role = ROLE_LIST[i];
+      if (role) this.hud.pickRole(role);
+    };
     this.controls.onPingOpen = open;
     this.controls.onPingDrag = (dx, dy) => this.hud.movePingWheel(dx, dy);
     this.controls.onPingClose = () => close(this.hud.closePingWheel());
@@ -632,6 +650,64 @@ export class Game {
           }
           break;
         }
+        // --- role abilities
+        case 'dash': {
+          this.debris.emit('white', e.x, (e.y ?? 0) + 0.35, e.z, 7, {
+            speed: 5, up: 0.3, size: 0.2, life: 0.3, drag: 4,
+          });
+          if (self && e.target === self.id) sfx.play('dash');
+          break;
+        }
+        case 'pulse': {
+          // The ring is drawn whether or not it caught anyone: a Medic has to
+          // be able to SEE their own radius, or they cannot learn where to
+          // stand, which is the entire skill of the role.
+          this.rings.ring(e.x, e.y ?? 0, e.z, e.radius, roleDef('medic').color);
+          if (self && e.target === self.id) sfx.play('pulse');
+          break;
+        }
+        case 'healed': {
+          this.debris.emit('green', e.x, (e.y ?? 0) + 1.0, e.z, 4, {
+            speed: 3, up: 1.2, size: 0.17, life: 0.4, drag: 3,
+          });
+          if (self && e.target === self.id) {
+            this.hud.popDamage(this.projectFn(e.x, (e.y ?? 0) + 1.9, e.z), e.heal, 'heal');
+            sfx.play('healed');
+          }
+          break;
+        }
+        case 'sweep': {
+          this.rings.ring(e.x, e.y ?? 0, e.z, Math.min(e.range, 22), roleDef('scout').color);
+          // Only your own side hears it. An enemy who learned that a sweep had
+          // just happened would know to break line of sight, which is exactly
+          // the information the Scout was buying.
+          if (self && e.team === self.team) {
+            sfx.play('sweep');
+            if (e.target === self.id) this.hud.announce(`SWEEP — ${e.found} SPOTTED`);
+          }
+          break;
+        }
+        case 'bulwark': {
+          this.debris.emit('white', e.x, (e.y ?? 0) + 0.9, e.z, 14, {
+            speed: 6, up: 0.9, size: 0.32, life: 0.7, drag: 2.6,
+          });
+          if (self && e.target === self.id) {
+            this.hud.announce('BULWARK');
+            sfx.play('bulwark');
+          }
+          break;
+        }
+        case 'pad': {
+          this.debris.emit('gold', e.x, 0.3, e.z, 8, {
+            speed: 3.4, up: 0.6, size: 0.2, life: 0.4, drag: 3.5,
+          });
+          if (self && (e.team === self.team || e.target === self.id)) sfx.play('pad');
+          break;
+        }
+        case 'role': {
+          if (self && e.target === self.id) this.hud.setRole(e.role);
+          break;
+        }
         case 'frenzy': {
           this.debris.emit('red', e.x, (e.y ?? 0) + 1.1, e.z, 14, {
             speed: 10, up: 1.1, size: 0.3, life: 0.7, drag: 2,
@@ -746,7 +822,9 @@ export class Game {
     this.bullets.update(dt);
     this.debris.update(dt);
     this.blasts.update(dt);
+    this.rings.update(dt);
     this.muzzle.update(dt);
+    this.syncPads(dt);
     // First person only: in third person you can already see the whole chicken,
     // and a beak floating in front of the camera would be a second one.
     this.beak.setVisible(this.view === 'fps' && (!self || self.alive));
@@ -800,6 +878,12 @@ export class Game {
       players,
     });
     this.hud.setVitals(self, cropCapacity(this.modifier));
+    this.hud.setRole(self?.role ?? null);
+    this.hud.setAbility(self);
+    // Scout vision. Held as seconds left rather than a flag so the edge glow
+    // can be driven off the same number that decides who is drawn through walls.
+    const revealLeft = this.session.revealLeft ?? 0;
+    this.hud.setSweep(revealLeft);
     this.hud.setContract(self?.contract ?? null);
     this.hud.setActionPrompt(this.actionPrompt(self));
     this.hud.setMarkers(
@@ -847,6 +931,10 @@ export class Game {
     const dead = self && !self.alive;
     this.hud.setRespawn(dead ? self.respawnIn : 0);
     this.hud.setKilledBy(dead ? this.killedBy : null);
+    // THE PICKER, and where it is allowed to appear: while dead, and during
+    // warmup before the first spawn. Never over a live fight — a menu you can
+    // open mid-duel is a menu somebody opens mid-duel.
+    this.syncRolePicker(self, dead);
 
     // Refresh at 4Hz — this is a diagnostic, and rebuilding its DOM every
     // frame would itself cost frames on the devices most likely to need it.
@@ -982,6 +1070,7 @@ export class Game {
 
   syncPlayers(dt, players, self) {
     const seen = new Set();
+    const reveal = this.session.revealLeft ?? 0;
 
     for (const p of players) {
       seen.add(p.id);
@@ -1004,6 +1093,11 @@ export class Game {
       const crowned = this.session.bounty === p.id;
       // Whoever killed you last is outlined, so a grudge has somewhere to go.
       const nemesis = !!self && !p.isSelf && self.nemesis === p.id;
+      // Lit up by our Scout. Decided per FRAME from our own side's clock, never
+      // read off a flag on the enemy — see revealedTo: a revealed player must
+      // not be told they have been spotted.
+      const spotted = reveal > 0 && !!self && self.team !== null
+        && p.team !== null && p.team !== self.team;
       const target = isSelf && this.pred.has
         ? {
           x: this.pred.x, y: this.pred.y, z: this.pred.z,
@@ -1017,9 +1111,9 @@ export class Game {
           // Your own peck pose matters in third person, where you are watching
           // your own chicken do it.
           pecking: p.pecking, feeding: p.feeding,
-          nemesis: false,
+          nemesis: false, spotted: false,
         }
-        : { ...p, bounty: crowned, nemesis };
+        : { ...p, bounty: crowned, nemesis, spotted };
 
       const moving = isSelf
         ? Math.hypot(this.controls.input.mx, this.controls.input.mz) > 0.1
@@ -1110,6 +1204,53 @@ export class Game {
       if (seen.has(id)) continue;
       view.dispose();
       this.looseEggs.delete(id);
+    }
+  }
+
+  /**
+   * Shows the picker while dead or in warmup, and never over a live fight.
+   *
+   * THE WHOLE RULE OF THIS SCREEN is that it costs nothing. The three-second
+   * respawn keeps counting behind it, the current role is already selected, and
+   * a player who never looks at it comes back in what they were playing. It is
+   * only ever a decision when a team-mate has taken their role — and that is
+   * the one case worth saying out loud, which is what `forced` is for.
+   */
+  syncRolePicker(self, dead) {
+    const warmup = this.session.phase === 'warmup';
+    const visible = !!self && (dead || warmup);
+    if (!visible) {
+      this.hud.setRolePicker({ visible: false });
+      return;
+    }
+    this.hud.setRolePicker({
+      visible: true,
+      mine: self.role ?? null,
+      taken: this.session.takenRoles ?? [],
+      level: self.level ?? 1,
+      teamed: !!MODES[this.session.mode]?.teams,
+    });
+  }
+
+  /** Engineer feeders, built and torn down like every other transient object. */
+  syncPads(dt) {
+    const seen = new Set();
+    for (const pad of this.session.pads ?? []) {
+      seen.add(pad.id);
+      let view = this.pads.get(pad.id);
+      if (!view) {
+        // Team colour, so at a glance you know whether the pad you are running
+        // to is one you can actually eat off.
+        const color = pad.team >= 0 ? TEAM_COLORS[pad.team] : roleDef('engineer').color;
+        view = new PadView(this.scene, pad, color);
+        this.pads.set(pad.id, view);
+      }
+      view.sync(pad, dt);
+    }
+    for (const [id, view] of this.pads) {
+      if (seen.has(id)) continue;
+      view.dispose();
+      this.pads.delete(id);
     }
   }
 
@@ -1342,6 +1483,7 @@ export class Game {
     this.controls.dispose();
     for (const v of this.nests.values()) v.dispose();
     for (const v of this.looseEggs.values()) v.dispose();
+    for (const v of this.pads.values()) v.dispose();
     this.bombView?.dispose();
     sfx.stopFuse();
     this.engine.stopRenderLoop();

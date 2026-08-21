@@ -1,5 +1,5 @@
 import { MeshBuilder } from '@babylonjs/core/Meshes/meshBuilder';
-import { Vector3, Matrix, Quaternion } from '@babylonjs/core/Maths/math';
+import { Vector3, Color3, Matrix, Quaternion } from '@babylonjs/core/Maths/math';
 import { emissiveMat } from './scene.js';
 import { BULLET, BOMBER } from '@cluckdown/shared';
 import { BEAK } from './view.js';
@@ -314,6 +314,60 @@ export class BlastRings {
       if (r.life <= 0) { r.m.setEnabled(false); continue; }
       const t = 1 - r.life / r.maxLife;
       r.m.scaling.setAll(0.2 + t * r.radius);
+      r.m.visibility = 1 - t;
+    }
+  }
+}
+
+/**
+ * Expanding rings for role abilities — a Medic pulse, a Scout sweep.
+ *
+ * Its own class rather than a colour parameter on BlastRings, because that one
+ * shares a single material across all four rings on purpose: fading through
+ * mesh.visibility is what keeps a blast to one material. These need to be
+ * different colours at the same time (a Medic and a Scout can fire in the same
+ * second), so each ring owns its material and the pool is kept small.
+ *
+ * They also expand FLAT and stay flat, unlike a blast: the ring is describing a
+ * radius on the floor, which is a thing the player is meant to read a position
+ * off rather than a thing that happened to them.
+ */
+export class RoleRings {
+  constructor(scene, glow, max = 5) {
+    this.rings = [];
+    for (let i = 0; i < max; i++) {
+      const m = MeshBuilder.CreateTorus(`roleRing${i}`, { diameter: 2, thickness: 0.16, tessellation: 32 }, scene);
+      // cache:false — the colour is rewritten per ring on every use, and a
+      // shared material would repaint whoever else was holding it.
+      m.material = emissiveMat(scene, `roleRingMat${i}`, '#5ee08a', {
+        intensity: 0.9, alpha: 0.7, cache: false,
+      });
+      m.isPickable = false;
+      m.setEnabled(false);
+      glow?.addIncludedOnlyMesh(m);
+      this.rings.push({ m, life: 0 });
+    }
+    this.cursor = 0;
+  }
+
+  ring(x, y, z, radius, color = '#5ee08a') {
+    const r = this.rings[this.cursor++ % this.rings.length];
+    r.m.setEnabled(true);
+    r.m.position.set(x, (y ?? 0) + 0.12, z);
+    r.m.scaling.setAll(0.1);
+    r.m.material.emissiveColor = Color3.FromHexString(color);
+    r.life = 0.5;
+    r.maxLife = 0.5;
+    r.radius = Math.max(1, radius);
+  }
+
+  update(dt) {
+    for (const r of this.rings) {
+      if (r.life <= 0) continue;
+      r.life -= dt;
+      if (r.life <= 0) { r.m.setEnabled(false); continue; }
+      const t = 1 - r.life / r.maxLife;
+      r.m.scaling.set(0.1 + t * r.radius, 1, 0.1 + t * r.radius);
       r.m.visibility = 1 - t;
     }
   }

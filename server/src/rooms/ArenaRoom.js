@@ -4,10 +4,10 @@ import {
   stepBots, initBot, botName,
   MODES, TICK_HZ, TICK_DT, PATCH_MS, MAX_CATCHUP, QUICK_CHAT, PLAYER, cleanRoomCode,
   hillProgress, castVote, voteTally, beginMatch, MAP_VOTE, contractInfo, BOMB,
-  placePing, PING, seatOrder,
+  placePing, PING, seatOrder, setRole, useAbility, assignBotRole, abilityMax,
 } from '@cluckdown/shared';
 import {
-  ArenaState, PlayerState, PickupState, MapChoiceState, NestState, EggState,
+  ArenaState, PlayerState, PickupState, MapChoiceState, NestState, EggState, PadState,
 } from './state.js';
 import { ratingDeltas } from '../rating.js';
 import { roomOpened, roomClosed, roomPopulation } from '../stats.js';
@@ -83,6 +83,22 @@ export class ArenaRoom extends Room {
 
     this.onMessage('chat', (client, msg) => this.handleChat(client, msg));
 
+    // Role pick. The simulation decides whether it lands now or on respawn —
+    // see setRole — and refuses one a team-mate is holding, so the room does
+    // not need a second copy of the uniqueness rule to keep in step.
+    this.onMessage('role', (client, msg) => {
+      const got = setRole(this.world, client.sessionId, msg?.role ?? msg);
+      // Answered either way. A picker that goes quiet on a refusal leaves the
+      // player staring at a screen wondering whether their tap registered,
+      // which is the exact dead time this feature was told not to add.
+      client.send('role', { role: got, taken: this.takenRoles(client.sessionId) });
+    });
+
+    // One button, whatever the role decides it does. The simulation refuses it
+    // when there is no charge, no heading, or no ability — nothing to check
+    // here that would not be a second copy of that.
+    this.onMessage('ability', (client) => useAbility(this.world, client.sessionId));
+
     // 'mark', NOT 'ping' — 'ping' is already the RTT probe below, and Colyseus
     // keeps one handler per message name, so the second registration silently
     // replaces the first. A team marker and a latency probe sharing a name is
@@ -134,7 +150,12 @@ export class ArenaRoom extends Room {
     const seat = this.takeSeat(client.sessionId);
 
     const name = sanitizeName(options?.name);
-    const p = addPlayer(this.world, { id: client.sessionId, name, seat: seat >= 0 ? seat : 0 });
+    // The role they were playing last match, if their side still has it free.
+    // Arriving already in the role you were playing is the difference between a
+    // pick screen and a toll gate.
+    const p = addPlayer(this.world, {
+      id: client.sessionId, name, seat: seat >= 0 ? seat : 0, role: options?.role,
+    });
     this.ratingsById.set(client.sessionId, clampRating(options?.rating));
 
     const ps = new PlayerState();
@@ -152,6 +173,7 @@ export class ArenaRoom extends Room {
         clock: this.world.clock,
         map: this.world.map,
         seat: p.seat,
+        role: p.role,
       });
     }
 
@@ -268,6 +290,9 @@ export class ArenaRoom extends Room {
       this.seats[seat] = id;
       const p = addPlayer(this.world, { id, name: botName(), seat, isBot: true });
       initBot(p, this.cfg.ranked ? 'hard' : 'normal');
+      // Random rather than first-free, so a bot-filled roost is a different
+      // shape every match instead of the same four in the same order.
+      assignBotRole(this.world, p);
       const ps = new PlayerState();
       this.syncPlayer(ps, p);
       this.state.players.set(id, ps);
@@ -508,6 +533,8 @@ export class ArenaRoom extends Room {
         deaths: p.deaths,
         score: p.score,
         damage: Math.round(p.damageDealt),
+        healed: Math.round(p.healGiven ?? 0),
+        role: p.role,
         bot: p.isBot,
       }));
 
@@ -554,6 +581,14 @@ export class ArenaRoom extends Room {
     ps.nextXp = Math.max(0, Math.min(65535, Math.round(xpForLevel(p.level + 1))));
     ps.wind = p.windUntil > this.world.time;
     ps.frenzy = p.frenzyUntil > this.world.time;
+    ps.role = p.role ?? '';
+    ps.abilityCharges = Math.max(0, Math.min(255, p.abilityCharges | 0));
+    ps.abilityIn = p.abilityCharges >= abilityMax(p)
+      ? 0
+      : Math.max(0, p.abilityAt - this.world.time);
+    ps.bulwark = p.bulwarkUntil > this.world.time;
+    ps.dashing = p.dashUntil > this.world.time;
+    ps.healGiven = Math.max(0, Math.min(65535, Math.round(p.healGiven ?? 0)));
     ps.crop = Math.max(0, Math.min(255, Math.floor(p.crop)));
     ps.pecking = !!p.pecking;
     ps.feeding = !!p.feeding;
@@ -607,8 +642,14 @@ export class ArenaRoom extends Room {
       s.hillMoveAt = Math.max(0, this.world.hill.moveAt);
     }
 
+    // Sweeps, as seconds remaining rather than an absolute time — clients have
+    // no shared clock with the server, and this is a countdown either way.
+    s.revealBlue = Math.max(0, (this.world.reveal?.[0] ?? 0) - this.world.time);
+    s.revealRed = Math.max(0, (this.world.reveal?.[1] ?? 0) - this.world.time);
+
     this.syncNests();
     this.syncEggs();
+    this.syncPads();
     this.syncBomb();
 
     for (const [id, p] of this.world.players) {
@@ -676,6 +717,39 @@ export class ArenaRoom extends Room {
       ns.x = nests[i].x;
       ns.z = nests[i].z;
     }
+  }
+
+  syncPads() {
+    const live = new Set();
+    for (const pad of this.world.pads) {
+      const key = String(pad.id);
+      live.add(key);
+      let ps = this.state.pads.get(key);
+      if (!ps) {
+        ps = new PadState();
+        ps.x = pad.x;
+        ps.z = pad.z;
+        ps.team = pad.team ?? -1;
+        ps.radius = pad.radius;
+        this.state.pads.set(key, ps);
+      }
+      ps.until = Math.max(0, pad.until - this.world.time);
+    }
+    for (const key of [...this.state.pads.keys()]) {
+      if (!live.has(key)) this.state.pads.delete(key);
+    }
+  }
+
+  /** Roles this player's side has spoken for, so the picker can grey them out. */
+  takenRoles(exceptId) {
+    const me = this.world.players.get(exceptId);
+    if (!me || me.team === null) return [];
+    const out = [];
+    for (const o of this.world.players.values()) {
+      if (o.id === exceptId || o.team !== me.team || !o.role) continue;
+      out.push(o.role);
+    }
+    return out;
   }
 
   syncEggs() {

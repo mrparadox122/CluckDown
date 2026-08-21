@@ -1,7 +1,7 @@
 import './style.css';
 import {
   MODE_LIST, MODES, makeRoomCode, cleanRoomCode, MAPS, MAP_VOTE,
-  TEAM_NAMES, TEAM_COLORS,
+  TEAM_NAMES, TEAM_COLORS, roleDef, ROLES, ROLE_LIST,
 } from '@cluckdown/shared';
 import { findMatch, wakeServer, fetchServerStats, fetchRooms, joinRoomById, LocalSession } from './net.js';
 import { loadProfile, saveProfile, rankLabel, applyResult } from './profile.js';
@@ -159,7 +159,9 @@ async function startOnline(code = '') {
   matchAbort = new AbortController();
 
   try {
-    const s = await findMatch({ mode, name, rating: profile.rating, code, signal: matchAbort.signal });
+    const s = await findMatch({
+      mode, name, rating: profile.rating, role: profile.role, code, signal: matchAbort.signal,
+    });
     if (matchAbort.signal.aborted) { s.leave(); return; }
     if (s.phase === 'lobby') runLobby(s, () => launch(s));
     else launch(s);
@@ -181,7 +183,7 @@ function startOffline() {
   const name = currentName();
   profile.name = name;
   saveProfile(profile);
-  const local = new LocalSession({ mode: profile.mode, name });
+  const local = new LocalSession({ mode: profile.mode, name, role: profile.role });
   // The offline lobby needs the sim ticking to advance, and nothing is driving
   // it until the Game's render loop exists — so pump it here for the vote.
   const pump = setInterval(() => local.update(0.05), 50);
@@ -203,6 +205,7 @@ function runLobby(newSession, onDone) {
 
   const grid = $('map-choices');
   let built = false;
+  const roles = buildLobbyRoles();
 
   const render = () => {
     const choices = session.mapChoices;
@@ -254,6 +257,8 @@ function runLobby(newSession, onDone) {
       badge.dataset.n = String(n);
     }
 
+    roles();
+
     const left = Math.max(0, MAP_VOTE.seconds - session.lobbyTime);
     $('lobby-bar').style.transform = `scaleX(${left / MAP_VOTE.seconds})`;
     $('lobby-status').textContent = myVote
@@ -272,10 +277,75 @@ function runLobby(newSession, onDone) {
   render();
 }
 
+/**
+ * The first role pick, in the lobby.
+ *
+ * Built once and returned as a repaint function the lobby poll calls, because
+ * the roster moves underneath it: a team-mate joining and taking the Medic has
+ * to grey it out while you are looking at it.
+ *
+ * Same rule as the in-match picker — your last role is already chosen and doing
+ * nothing is a valid answer. This screen exists because warmup is 1.5 seconds
+ * and the lobby is several, so the pick is free here and expensive anywhere
+ * else.
+ */
+function buildLobbyRoles() {
+  const wrap = $('lobby-roles');
+  const note = $('lobby-role-note');
+  const buttons = new Map();
+  const teamed = !!MODES[profile.mode]?.teams;
+
+  wrap.replaceChildren(...ROLE_LIST.map((id) => {
+    const def = roleDef(id);
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'lobby-role-btn';
+    btn.style.color = def.color;
+    const icon = document.createElement('i');
+    icon.textContent = def.icon;
+    btn.append(icon, document.createTextNode(def.name));
+    btn.addEventListener('click', () => {
+      if (btn.disabled) return;
+      profile.role = id;
+      saveProfile(profile);
+      sfx.play('uiClick');
+      session?.sendRole?.(id);
+      paint();
+    });
+    buttons.set(id, btn);
+    return btn;
+  }));
+
+  let shown = null;
+  const paint = () => {
+    const taken = session?.takenRoles ?? [];
+    const mine = session?.role ?? profile.role;
+    const key = `${mine}|${taken.join(',')}`;
+    if (shown === key) return;
+    shown = key;
+    for (const [id, btn] of buttons) {
+      // Team-only roles are simply not on offer in a 1v1 — see freeRoles.
+      const blocked = (!teamed && !!ROLES[id].teamOnly) || (taken.includes(id) && id !== mine);
+      btn.classList.toggle('picked', id === mine);
+      btn.classList.toggle('taken', blocked);
+      btn.disabled = blocked;
+    }
+    note.textContent = mine ? `— ${roleDef(mine).what.toLowerCase()}` : '';
+  };
+  paint();
+  return paint;
+}
+
 function launch(newSession) {
   session = newSession;
 
-  hud ??= new Hud({ onChat: (msg) => session?.sendChat(msg) });
+  hud ??= new Hud({
+    onChat: (msg) => session?.sendChat(msg),
+    // The role is remembered across matches, which is the whole reason the
+    // picker can default to it and let a player respawn by doing nothing.
+    onRole: (role) => { profile.role = role; saveProfile(profile); session?.sendRole(role); },
+    onAbility: () => session?.sendAbility(),
+  });
   hud.reset();
 
   show(null);
@@ -437,8 +507,17 @@ function showResults(result) {
     dot.style.background = r.shade ?? r.color;
     nameCell.append(dot, document.createTextNode(r.name + (r.bot ? ' 🤖' : '')));
 
-    tr.append(place, nameCell);
-    for (const value of [r.kills, r.deaths, r.damage, r.score]) {
+    // The role, and the healing it did. A Medic finishes a good match near the
+    // bottom on kills and damage, so a scoreboard with no HEAL column tells the
+    // player who kept the roost alive that they were the worst chicken there.
+    const roleCell = document.createElement('td');
+    if (r.role) {
+      roleCell.textContent = `${roleDef(r.role).icon} ${roleDef(r.role).name}`;
+      roleCell.style.color = roleDef(r.role).color;
+    }
+
+    tr.append(place, nameCell, roleCell);
+    for (const value of [r.kills, r.deaths, r.damage, r.healed ?? 0, r.score]) {
       const td = document.createElement('td');
       td.textContent = String(value);
       tr.append(td);

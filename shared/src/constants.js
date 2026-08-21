@@ -660,81 +660,30 @@ export const LEVELS = {
   },
 
   /**
-   * The rungs, and what each one gives you.
+   * The rungs: the PUBLIC half of the ladder.
    *
-   * Every unlock has to be felt within seconds of getting it, or the level-up
-   * is a number with no referent. "+5% movement" is invisible and therefore
-   * worthless as a reward however good it is on a spreadsheet.
+   * A name and a colour, and nothing else. Every chicken's rung rides above its
+   * health bar, which is what turns a number into a social object — it marks
+   * the threat in the room and makes taking one down worth bragging about.
+   * That job is unchanged and this table still does it.
    *
-   * They also escalate in KIND rather than in size — tempo, then mobility, then
-   * power, then safety, then spectacle. Five different feelings beats one
-   * feeling five times, and it keeps the top of the ladder from being simply
-   * "the same but more", which is where a progression stops producing dopamine.
+   * WHAT A RUNG GIVES YOU NOW COMES FROM YOUR ROLE. Everyone used to unlock the
+   * same five perks — Quick Crop, Long Legs, Rapid Peck, Second Wind, Feeding
+   * Frenzy — which meant a Medic and a Sniper climbed the identical ladder and
+   * the pick stopped mattering the moment the match started. The tiers in
+   * shared/src/roles.js replace them, one list per role, and all five classics
+   * survive in there on whichever ladder they fit.
    *
-   * Note how little of it is raw damage. The leader is already the biggest prize
-   * in the room; handing them lethality on top is how a match ends at minute
-   * two. Most of the ladder buys TIME — faster recovery, faster legs, an escape
-   * — which is felt immediately and still leaves them killable.
+   * The rules that made this ladder work are untouched: the XP curve, the
+   * climb/fall asymmetry, and all three death-spiral guards.
    */
   rungs: [
-    {
-      level: 1,
-      name: 'Chick',
-      perk: null,
-      blurb: 'Everyone starts here.',
-      color: '#9aa6c4',
-    },
-    {
-      level: 2,
-      name: 'Scratcher',
-      perk: 'Quick Crop',
-      blurb: 'Peck back to full in half the time.',
-      // Tempo. It shortens the most helpless moment in the game, which is the
-      // single most welcome thing you can hand someone this early.
-      peckRateMul: 1.9,
-      color: '#5ee08a',
-    },
-    {
-      level: 3,
-      name: 'Runner',
-      perk: 'Long Legs',
-      blurb: 'You are noticeably quicker on your feet.',
-      // Mobility. Felt in the first step, and visible to everyone else too.
-      speedMul: 1.16,
-      color: '#5fd1ff',
-    },
-    {
-      level: 4,
-      name: 'Brawler',
-      perk: 'Rapid Peck',
-      blurb: 'Your shots come out a third faster.',
-      // Power, and the only rung that is straightforwardly lethality. By now
-      // you are a visible threat carrying a number everyone wants.
-      fireCooldownMul: 0.72,
-      color: '#ffcc3d',
-    },
-    {
-      level: 5,
-      name: 'Ironfeather',
-      perk: 'Second Wind',
-      blurb: 'Drop low and bolt — once per life.',
-      // Safety, and reactive rather than passive: it FIRES, with a sound and a
-      // colour, at the worst moment of a fight. A perk you notice happening is
-      // worth several you merely have.
-      secondWind: { at: 0.3, seconds: 2.2, speedMul: 1.55 },
-      color: '#ff8a3d',
-    },
-    {
-      level: 6,
-      name: 'Cock of the Walk',
-      perk: 'Feeding Frenzy',
-      blurb: 'A kill refills you and sets you loose.',
-      // Spectacle. It rewards the thing the top of the ladder should reward —
-      // stringing kills together — and it is the only perk that can chain, so
-      // the ceiling of the mode is a highlight rather than a stat.
-      frenzy: { seconds: 3.2, fireCooldownMul: 0.75, speedMul: 1.2 },
-      color: '#ff4df0',
-    },
+    { level: 1, name: 'Chick', color: '#9aa6c4' },
+    { level: 2, name: 'Scratcher', color: '#5ee08a' },
+    { level: 3, name: 'Runner', color: '#5fd1ff' },
+    { level: 4, name: 'Brawler', color: '#ffcc3d' },
+    { level: 5, name: 'Ironfeather', color: '#ff8a3d' },
+    { level: 6, name: 'Cock of the Walk', color: '#ff4df0' },
   ],
 };
 
@@ -752,26 +701,6 @@ export function levelFromXp(xp) {
 /** XP at which a level begins. */
 export function xpForLevel(level) {
   return (Math.max(1, level) - 1) * LEVELS.step;
-}
-
-/**
- * A perk value for a player at `level`, or `fallback`.
- *
- * Perks are cumulative: reaching rung 4 keeps rungs 2 and 3. So this walks down
- * the ladder rather than reading one entry — a player at 6 still has Long Legs.
- */
-export function perkValue(level, key, fallback = 1) {
-  let out = fallback;
-  for (const rung of LEVELS.rungs) {
-    if (rung.level > level) break;
-    if (rung[key] !== undefined) out = rung[key];
-  }
-  return out;
-}
-
-/** Does this level have the named perk at all? */
-export function hasPerk(level, key) {
-  return perkValue(level, key, undefined) !== undefined;
 }
 
 // Weighted pickup table. Health only, now that power comes from the ladder

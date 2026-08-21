@@ -26,7 +26,7 @@
 import {
   createWorld, addPlayer, applyInput, stepWorld, beginMatch,
   killXp, deathXp, LEVELS, PLAYER, CROP, TICK_DT,
-  levelFromXp, xpForLevel, rungOf, perkValue, cropCapacity,
+  levelFromXp, xpForLevel, rungOf, cropCapacity,
   PICKUP_WEIGHTS,
 } from '../src/index.js';
 
@@ -46,8 +46,11 @@ function live() {
   // happened to be long enough for that, and it started failing the moment the
   // time-to-kill retune made the same 40 kills take half as many seconds.
   w.bomberSpawnAt = Infinity;
-  const a = addPlayer(w, { id: 'a', name: 'A', seat: 0 });
-  const b = addPlayer(w, { id: 'b', name: 'B', seat: 1 });
+  // Scout on both sides. This file is about XP, and a Bruiser at 180 HP or a
+  // Sniper at 60 changes how many rounds a kill takes — which changes nothing
+  // about the ladder and everything about how long these runs take.
+  const a = addPlayer(w, { id: 'a', name: 'A', seat: 0, role: 'scout' });
+  const b = addPlayer(w, { id: 'b', name: 'B', seat: 1, role: 'scout' });
   beginMatch(w, 'coop');
   for (let t = 0; t < 300 && w.phase !== 'live'; t++) stepWorld(w, TICK_DT);
   a.x = 0; a.z = 0; a.invulnUntil = 0;
@@ -240,132 +243,18 @@ console.log('\n--- falling, and the guards that stop it spiralling ---');
     `${before - g.a.xp}xp`);
 }
 
-// -------------------------------------------------------------- the perks
-console.log('\n--- what the rungs actually give you ---');
+// -------------------------------------------------------------- the rungs
+console.log('\n--- the rungs are identity, the perks come from your role ---');
 {
-  // Every rung above the first has to hand over something NAMED. A level-up
-  // with nothing behind it is a number, and a number is not a reward.
-  for (const rung of LEVELS.rungs) {
-    if (rung.level === 1) continue;
-    check(`rung ${rung.level} (${rung.name}) unlocks something named`,
-      !!rung.perk && !!rung.blurb, rung.perk ?? 'nothing');
-  }
+  // The ladder used to hand everybody the same five perks. It hands out a name
+  // and a colour now, and what the rung BOUGHT you lives in the role's tier
+  // list — see shared/test/roles.mjs, which asserts every one of them.
+  check('every rung is named', LEVELS.rungs.every((r) => !!r.name));
   check('every rung has its own colour',
     new Set(LEVELS.rungs.map((r) => r.color)).size === LEVELS.rungs.length);
-
-  // Perks are cumulative — reaching 4 keeps 2 and 3, or the ladder would be a
-  // series of sidegrades and climbing would sometimes be a downgrade.
-  check('perks accumulate rather than replace',
-    perkValue(LEVELS.max, 'peckRateMul') > 1 && perkValue(LEVELS.max, 'speedMul') > 1,
-    `peck ${perkValue(LEVELS.max, 'peckRateMul')}, speed ${perkValue(LEVELS.max, 'speedMul')}`);
-  check('rung 1 has none of them',
-    perkValue(1, 'peckRateMul') === 1 && perkValue(1, 'speedMul') === 1
-    && perkValue(1, 'fireCooldownMul') === 1);
-}
-
-// Each of the three passive perks has to be measurable in the simulation, not
-// just present in a table.
-{
-  const walk = (level) => {
-    const g = live();
-    setLevel(g.a, level);
-    g.a.x = 0; g.a.z = 0;
-    for (let t = 0; t < 1 / TICK_DT; t++) {
-      g.a.hp = PLAYER.maxHp;
-      applyInput(g.w, 'a', { mx: 1, mz: 0, seq: t });
-      stepWorld(g.w, TICK_DT);
-    }
-    return g.a.x;
-  };
-  const slow = walk(1);
-  const fast = walk(3);
-  console.log(`  one second of running: ${slow.toFixed(2)}u at rung 1, ${fast.toFixed(2)}u at rung 3`);
-  check('Long Legs is actually faster', fast > slow * 1.1, `${slow.toFixed(2)} -> ${fast.toFixed(2)}`);
-
-  const peck = (level) => {
-    const g = live();
-    setLevel(g.a, level);
-    g.a.crop = 0;
-    for (let t = 0; t < 0.75 / TICK_DT; t++) {
-      g.a.hp = PLAYER.maxHp;
-      applyInput(g.w, 'a', { mx: 0, mz: 0, seq: t });
-      stepWorld(g.w, TICK_DT);
-    }
-    return g.a.crop;
-  };
-  const slowPeck = peck(1);
-  const fastPeck = peck(2);
-  console.log(`  0.75s of pecking: ${slowPeck} grain at rung 1, ${fastPeck} at rung 2`);
-  check('Quick Crop really is quicker', fastPeck > slowPeck * 1.4, `${slowPeck} -> ${fastPeck}`);
-
-  const rate = (level) => {
-    const g = live();
-    setLevel(g.a, level);
-    let shots = 0;
-    for (let t = 0; t < 1 / TICK_DT; t++) {
-      g.a.crop = 999; g.a.dry = false;
-      applyInput(g.w, 'a', { mx: 0, mz: 0, ax: 0, az: 1, shoot: true, seq: t });
-      for (const e of stepWorld(g.w, TICK_DT)) if (e.type === 'shot' && e.owner === 'a') shots++;
-    }
-    return shots;
-  };
-  const slowFire = rate(1);
-  const fastFire = rate(4);
-  console.log(`  one second of held fire: ${slowFire} shots at rung 1, ${fastFire} at rung 4`);
-  check('Rapid Peck really is faster', fastFire > slowFire, `${slowFire} -> ${fastFire}`);
-}
-
-// Second Wind: fires once, at the threshold, and not again until you respawn.
-{
-  const g = live();
-  setLevel(g.a, 5);
-  const wind = perkValue(5, 'secondWind', null);
-
-  g.a.hp = PLAYER.maxHp;
-  applyInput(g.w, 'a', { mx: 0, mz: 0, seq: 1 });
-  stepWorld(g.w, TICK_DT);
-  check('Second Wind does not fire at full health', g.a.windUntil === 0);
-
-  g.a.hp = PLAYER.maxHp * wind.at - 1;
-  let fired = 0;
-  for (let t = 0; t < 0.5 / TICK_DT; t++) {
-    g.a.hp = Math.max(1, PLAYER.maxHp * wind.at - 1);
-    applyInput(g.w, 'a', { mx: 0, mz: 0, seq: 10 + t });
-    for (const e of stepWorld(g.w, TICK_DT)) if (e.type === 'secondWind') fired++;
-  }
-  console.log(`  dropped below ${(wind.at * 100).toFixed(0)}%: fired ${fired} time(s)`);
-  check('Second Wind fires when you drop low', fired === 1, `${fired}`);
-  check('...exactly once, not every tick while hurt', fired === 1, `${fired}`);
-
-  // ...and a fresh life is a fresh chance.
-  g.a.alive = false;
-  g.a.hp = 0;
-  g.a.respawnAt = 0;
-  stepWorld(g.w, TICK_DT);
-  check('respawning re-arms it', g.a.alive && g.a.windUsed === false);
-}
-
-// Feeding Frenzy: the only perk that chains, which is what makes the top rung a
-// highlight rather than a bigger number.
-{
-  const g = live();
-  setLevel(g.a, LEVELS.max);
-  g.a.crop = 1;
-  const events = killWith(g, g.a, g.b);
-  console.log(`  killed at the top rung: crop ${g.a.crop}/${cropCapacity('none')}, frenzy for ${(g.a.frenzyUntil - g.w.time).toFixed(1)}s`);
-  check('a kill at the top rung refills you outright',
-    g.a.crop === cropCapacity(g.w.modifier), `${g.a.crop}`);
-  check('...and sets a timer running', g.a.frenzyUntil > g.w.time);
-  check('...and says so', events.some((e) => e.type === 'frenzy' && e.target === 'a'));
-
-  // Lower rungs get the ordinary refund and nothing else.
-  const h = live();
-  setLevel(h.a, 3);
-  h.a.crop = 1;
-  killWith(h, h.a, h.b);
-  // Only the timer is checked: killWith force-feeds the crop to keep the
-  // shooter firing, so the crop afterwards says nothing about the perk.
-  check('lower rungs get no frenzy', h.a.frenzyUntil === 0, `until ${h.a.frenzyUntil}`);
+  check('no rung carries a perk of its own any more',
+    LEVELS.rungs.every((r) => r.perk === undefined),
+    LEVELS.rungs.map((r) => r.perk ?? '-').join(', '));
 }
 
 // -------------------------------------------------------------- bookkeeping

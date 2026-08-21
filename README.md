@@ -70,6 +70,7 @@ A handful of files are worth knowing by name:
 | `shared/src/constants.js` | every tunable, with the reasoning beside it — the file you edit to change how the game feels |
 | `shared/src/aim.js` | aim assist. Game tuning, so it lives here; it runs on the client |
 | `shared/src/accuracy.js` | recoil and the movement cone. Same reason, opposite split: the client applies the recoil, the server rolls the spread |
+| `shared/src/roles.js` | the six roles and their six-tier ladders. A tuning table with helpers under it — the numbers at the top are the ones to move |
 | `client/src/game/look.js` | where you are looking. **One** number for the camera and the shot |
 | `shared/src/sim.js` → `spawnPoints` / `feederFor` | team lines and the shared rally pad — the geometry 4v4 turns on |
 | `client/src/game/view.js` | the third-person boom, and the geometry that keeps its crosshair honest |
@@ -589,7 +590,8 @@ kill. Dying is the mirror: losing to someone above you is nearly free, because
 being outmatched is not a mistake — being *upset* is.
 
 `test:levels` measures both ends of that: nine kills against equals reaches the
-top, while forty kills on a rung-1 punching bag stalls at rung 3.
+top, while forty kills on a rung-1 punching bag stalls at rung 3. What each rung
+BUYS you now depends on your role — see **Roles** below, and `test:roles`.
 
 ### Three guards against the death spiral
 
@@ -610,6 +612,189 @@ contract read — was computed when the event was built, which is *after* the XP
 was awarded. Beating someone one rung up promotes you level with them, so the
 flag came out false: the single kill most worth celebrating was the one that
 stopped reporting itself. It is captured before any XP moves now.
+
+## Roles
+
+Four a side is what made roles worth having, and roles are what make four a side
+mean something. **Six roles, four slots** — so the last player to pick still has
+three left to choose between. Fewer than five and the fourth pick is not a
+decision, it is an allocation.
+
+**Unique per team.** One Medic, one Sniper. That single rule is what turns a
+pick into a *composition* instead of four people all choosing the strongest
+thing.
+
+| Role | What you're for | HP | Speed | Damage | Signature |
+|---|---|---|---|---|---|
+| **Runner** `»` | gets there first | 75 | ×1.30 | ×0.70, ×1.4 fire rate | **Dash** |
+| **Scout** `◈` | says where they are | 80 | ×1.05 | normal | **Sweep** — reveals through walls |
+| **Bruiser** `▲` | takes the ground | 180 | ×0.75 | normal close, ×0.35 far | **Bulwark** |
+| **Medic** `✚` | keeps them alive | 100 | ×0.85 | ×0.70 | **Pulse** — heals the roost |
+| **Sniper** `◎` | deletes one chicken | 60 | ×0.95 | ×3.25, 1.3s re-chamber | the rifle itself |
+| **Engineer** `⬢` | holds the ground | 100 | ×1.00 | normal | **Field Feeder** |
+
+Medic and Scout are **not offered in 1v1**: there is no roost to heal or to tell
+anything, so both would be nothing but a stat penalty wearing a job title.
+
+### Time to kill, measured
+
+Against an ordinary 100 HP chicken, stationary, point blank — first round that
+lands to the one that kills. `test:roles` prints this table every run.
+
+| Role | Damage | Shots | Body | Head |
+|---|---|---|---|---|
+| Runner | 15.4 | 7 | **500ms** | 250ms |
+| Scout | 22 | 5 | **467ms** | 233ms |
+| Bruiser | 22 | 5 | **467ms** | 233ms |
+| Engineer | 22 | 5 | **467ms** | 233ms |
+| Medic | 15.4 | 7 | **700ms** | 350ms |
+| Sniper | 71.5 | 2 | **1317ms** | **0ms** |
+
+Three roles sit on the baseline gun Phase 1 tuned. The Medic is deliberately
+outside it — 700ms is what "low personal power" costs, and it is the price of
+being the chicken that keeps three others upright. The Sniper is outside it in
+the other direction, and the whole point of it is the 0ms.
+
+The Runner shipped at ×0.70 rather than the ×0.60 it was sketched with. At 0.60
+the arithmetic came out at eight shots and a damage-per-*second* **below** the
+ordinary gun (1.4 × 0.6 = 0.84) — so a role called Runner would have had the
+slowest kill in the game bar the Sniper, while also being the second softest.
+That is not a trade, it is just worse. At 0.70 its DPS lands on the baseline:
+seven quick rounds instead of five ordinary ones.
+
+### The Sniper, and why 1.2 had to come first
+
+> A hitscan one-shot-kill with no travel time and no accuracy cost would win an
+> eight-player match on its own. There is nothing to dodge, nothing to hear
+> coming, and no window in which the target gets a decision.
+
+Three things make it fair, and all three have to stay:
+
+1. **Full accuracy only while stationary.** `spreadMul` 3.4 puts a moving
+   Sniper's cone at ~17°, which is a wall-hitting device. This *is* the balance,
+   and it is why the movement cone had to exist before the role could.
+   `SPREAD.still` is exactly zero, so 3.4 × 0 is still zero — a *stopped* Sniper
+   is pinpoint, not nearly pinpoint.
+2. **The re-chamber.** 1.3s is thirteen ordinary shots. Miss, and the fight is
+   theirs.
+3. **60 HP.** Three ordinary body shots — 200ms — and the Sniper is gone.
+
+A headshot does 130 and kills every role outright **except the Bruiser**, who
+survives one. That exception is not an accident: it is what makes the Bruiser
+the answer to a Sniper, and it is most of why 180 HP is worth having.
+
+### The picker is not a toll gate
+
+Respawn is three seconds, and time-to-action was already a known problem here.
+So the picker runs *inside* the wait it was going to cost:
+
+* the countdown never stops
+* your last role is already selected, and it is remembered across matches
+* **doing nothing respawns you on time, in what you were already playing**
+* it is only ever a decision when a team-mate took your role — and that is the
+  one case that says so
+
+Picking while **alive** is a request, not a swap: changing your max health in the
+middle of a fight that is already happening is not something to do to somebody.
+It queues and lands on the next respawn, at the new role's full health.
+
+On desktop the cards are also **1-6**, and that is not a nicety. A locked pointer
+cannot click a HUD button, so a mouse player would otherwise have to press Esc,
+click, and re-enter the game — three actions inside a three-second respawn.
+
+### The ladder runs through the role now
+
+`LEVELS` still owns the XP curve, the climb/fall asymmetry and all three
+death-spiral guards. **None of that changed.** What changed is where a rung's
+perk comes from.
+
+Everyone used to unlock the same five — Quick Crop, Long Legs, Rapid Peck, Second
+Wind, Feeding Frenzy — which meant a Medic and a Sniper climbed an identical
+ladder and the pick stopped mattering the moment the match started. Each role
+has its own `tiers[1..6]` now, and all five classics survive on whichever ladder
+they fit: Quick Crop went to the Medic (the role standing still most), Long Legs
+to the Scout, Rapid Peck to the Engineer, Second Wind to the Runner, Feeding
+Frenzy to the Bruiser.
+
+**One player level, applied to whichever role you currently hold.** Levels are
+deliberately *not* per-role — a four-minute match would never reach an
+interesting tier on any of them.
+
+The rungs kept their names and colours, because that half of the ladder was
+never about power: it rides above every chicken's health bar and marks the
+threat in the room. The level-up banner now reads `RUNNER · DOUBLE DASH`, so the
+perk says which ladder it came off.
+
+### Abilities, and which ones have a button
+
+Two of six do. Time-to-action is a known problem and a phone HUD has room for
+about one more thumb target, so **everything that could be passive is passive**:
+
+| | Button | When |
+|---|---|---|
+| Runner **Dash** | yes | charges, not a flat cooldown — Double Dash is only different from a shorter cooldown if the second charge can be *held* |
+| Engineer **Feeder** | yes | where the fight is |
+| Medic **Pulse** | no | on a rhythm. A heal you have to remember is dead time in a fight |
+| Scout **Sweep** | no | on a cooldown, but it will not *spend* itself on an empty corridor |
+| Bruiser **Bulwark** | no | fires once per life at the threshold, like Second Wind |
+| Sniper | no | the rifle is the ability |
+
+**The dash never steers you.** `PLAYER.maxKnockback` exists because knockback
+that moved a player against their input was a real, reported bug, and a dash is
+the single most obvious place to reintroduce it. So the dash is a *multiplier on
+the player's own movement vector*, and it refuses to fire without one: hold a
+direction, or nothing happens. There is no scripted lunge anywhere in it, and
+`test:roles` asserts both halves — a standstill dash is refused, and a dash with
+a heading moves you 6 units forward and 0.000 units sideways.
+
+**The Medic cannot heal itself**, and that one rule is the whole balance of the
+role. A self-healing Medic is simply the most survivable duellist in the match;
+this one is the weakest chicken on the field standing behind the strongest.
+There is no out-of-combat gate on the pulse, unlike the feeder — healing under
+fire is exactly what a Medic is *for*, and the counterplay is that they are slow,
+soft, and standing next to people you are already shooting at.
+
+**A sweep is asked from the viewer's side, never stored on the target.** A
+`revealed` flag on the enemy would have to ride in synced state, and synced state
+goes to everyone — which would hand the revealed player the news that they had
+been spotted. The whole value of the information is that they do not know.
+
+### What roles rewrote underneath
+
+Two things the simulation was previously allowed to assume, and both are silent
+when they break:
+
+* **`PLAYER.maxHp` was everybody's health.** It is a role stat now, so every
+  place that clamped, healed or thresholded against the constant is a place a
+  Bruiser quietly caps at 100. Health bars — yours *and* every nameplate — are
+  drawn against `maxHp`, which is why `role` is synced for every player and not
+  just your own side: a client cannot draw an enemy health bar without it.
+* **`LEVELS.rungs` handed out the perks.** A tier that names nothing is a
+  level-up that gives nothing, and the banner would still fire saying "LEVEL 4"
+  and no more. `test:roles` walks all six ladders and fails on any silent tier.
+
+Max health is `uint8` on the wire. The top Bruiser tier is 215; 256 would arrive
+as 0, which is a chicken that is permanently dead and a bug nobody would think
+to look for in a tier table. That is asserted too.
+
+### Bots pick roles, and play them
+
+Bots draw a **random** free role rather than the first one — `addPlayer` resolves
+an unspecified role to the first untaken, so four bots filling a side would
+otherwise be Runner, Scout, Bruiser, Medic in that order every single match.
+
+They play them through a filter over the plan they already had, rather than six
+copies of the AI. `range` does most of the work on its own: a Sniper bot holding
+24 units and a Bruiser bot holding 5 look like completely different opponents
+running the same three hundred lines.
+
+* a **Sniper** bot stops before it fires — otherwise it sprays a 17° cone all
+  match and reads as broken rather than as outgunned
+* a **Medic** bot leaves the fight to stand inside its own pulse radius of
+  whichever team-mate is worst off
+* a **Runner** bot dashes when it is committing to a distance — chasing someone
+  down, or peeling out of a fight it is losing
+* an **Engineer** bot drops its pad where its team already is
 
 ## Aim assist
 
@@ -1365,7 +1550,8 @@ npm install -D playwright && npx playwright install chromium
 | `test:stats` | Server status panel and the in-game network readout |
 | `test:tasks` | Both new modes end-to-end in a browser: nests and eggs render, the bomb is pickable, the contract strip names and counts its task, the zone marker follows a relocation |
 | `test:cover` | Map cover: every layout is mirror-symmetric with clear cardinal lanes and nothing landable, bodies and bullets are stopped by it, nothing spawns inside it, and bots steer around it rather than grinding into it |
-| `test:levels` | The pecking order: the XP asymmetry both ways, every rung unlocking something named and measurable in the sim, the top being reachable but not farmable, and the three death-spiral guards |
+| `test:levels` | The pecking order: the XP asymmetry both ways, the top being reachable but not farmable, the three death-spiral guards, and that a rung is now identity only — the perks are `test:roles`' problem |
+| `test:roles` | Roles: six for four slots and unique per team, every tier naming something, the picker never costing a respawn, time-to-kill per role (printed, not just asserted), **a Sniper that can only shoot standing still**, a Medic that cannot heal itself, **a dash that refuses to fire without a heading**, Bruiser falloff and Bulwark, sweeps that never reach the side being revealed, Engineer pads, and bots picking and playing roles |
 | `test:crop` | Grain: the crop empties, pecking refills progressively, the feeder heals only out of combat, and none of the anti-frustration rules can be regressed |
 | `test:view` | Third-person framing, headless and instant: the shot line meets the camera ray, a target under the crosshair is hit dead centre, the boom retracts off walls, and the camera never escapes the arena |
 | `test:aim` | **The camera and the bullet are the same line** — see below — plus recoil: that it is deterministic, that a tap resets to pixel-exact, that a spray climbs and caps, that compensating by hand is not punished afterwards, and that the reticle's cone and the simulation's cone never disagree |
@@ -1740,9 +1926,12 @@ bugs. Don't "clean them up" without checking:
   to 12.3% because they run and gun constantly, which is exactly the archetype
   the cone is there to tax. Their kill rate is unchanged (10.3 to 10.1 a minute,
   inside the noise) because the faster gun paid for the worse aim. If they ever
-  need it back, `DIFFICULTY[*].aimError` in `bots.js` is the knob — but a bot that learns to
-  stop before firing is the better answer, and it is Phase 3 work. The first pass at "make them dumber" landed at 1–4 kills, which is not
-  dumb, it is absent — dumb has to mean *bad decisions*, not *cannot shoot*.
+  need it back, `DIFFICULTY[*].aimError` in `bots.js` is the knob. A bot that
+  learns to stop before firing was the better answer, and roles delivered
+  exactly one of them: a Sniper bot now stops before it shoots, because it has
+  to. Extending that to every role is the obvious next step. The first pass at
+  "make them dumber" landed at 1–4 kills, which is not dumb, it is absent — dumb
+  has to mean *bad decisions*, not *cannot shoot*.
 - Last Chicken rounds are short — one life each resolves fast, and four-a-side
   only partly helps (a round now ends when a whole side is down, which is later
   than the first death but earlier than seven of them). Best-of-N rounds would
@@ -1755,8 +1944,17 @@ bugs. Don't "clean them up" without checking:
   in particular are the kind of thing only real matches settle.
 - Bots do not ping. They play four-a-side correctly — same team assignment,
   same shared feeder, and friendly fire is off so they cannot shoot each other —
-  but the marker system is human-only, which means a lobby of bots is a silent
-  one. Phase 3 role bots are the natural place to fix that.
+  and they now pick and play roles, but the marker system is still human-only,
+  so a lobby of bots is a silent one. A Scout bot that pinged what its own sweep
+  found would be the single best version of this.
+- **Roles have not been played by humans either.** Every rule is under test and
+  the time-to-kill table is measured, but the numbers that decide whether a role
+  is *fun* — pulse radius, dash distance, sweep cadence — are first guesses.
+  Three of them are the ones to watch: the Bruiser at 180 HP takes 800ms to kill
+  with the ordinary gun, which is twice anything else and may simply be too long
+  to fight; the Medic at 700ms may be too weak to enjoy holding; and a level-6
+  Sniper re-chambers in 0.7s, which is two guaranteed kills in a second and a
+  half if it is left alone. All three live in `shared/src/roles.js`.
 - Ranked is a team mode with an individual placement rating. See the note under
   Modes: defensible, but undecided.
 - `HEIST.eggsPerNest` went 4 → 8 when four nests became two. That keeps the
@@ -1776,11 +1974,14 @@ Ordered roughly by value per unit of work:
   variants (fast / heavy / splitter), egg-laying mines.
 - **Arena obstacles** — destructible cover and a few layouts. The biggest
   gameplay change available, and the biggest job: bots need avoidance too.
-- **Roles** — a unique-per-team pick with one signature ability each, and the
-  pecking order rungs handing out that role's perks instead of the same five
-  for everybody. Four a side is the thing that makes roles mean anything, so
-  this is the natural next step; the constraint that matters is that the picker
-  must not add dead time to a three-second respawn.
+- **Persistent progression** — the pecking order resets every match and `rating`
+  sits invisibly in localStorage, so nothing pulls a player into match 2. A
+  visible account level, role mastery and unlock milestones. Cosmetic or
+  lateral only: it must never affect match balance.
+- **Reload, honestly** — pecking is a 1.5s stand-still, and standing still is
+  now also what accuracy costs, so a dry player pays twice for the same second.
+  Worse for a Sniper, who has to stand still to shoot as well. A faster reload
+  with pecking kept as the ran-dry penalty is the shape; see CROP.capacity.
 
 ## Contributing
 

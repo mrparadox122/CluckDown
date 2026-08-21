@@ -28,8 +28,11 @@ const CAP = cropCapacity('none');
 
 function live(modifier = 'none') {
   const w = createWorld({ mode: 'casual', seed: 21, modifier });
-  const p = addPlayer(w, { id: 'a', name: 'A', seat: 0 });
-  addPlayer(w, { id: 'b', name: 'B', seat: 1 });
+  // Scout is the BASELINE GUN: damage 1x, fire rate 1x, no falloff and no
+  // spread penalty. Roles change all four, so a test measuring the gun has to say
+  // which gun — otherwise it silently measures whichever role sorts first.
+  const p = addPlayer(w, { id: 'a', name: 'A', seat: 0, role: 'scout' });
+  addPlayer(w, { id: 'b', name: 'B', seat: 1, role: 'scout' });
   beginMatch(w, 'coop');
   for (let t = 0; t < 300 && w.phase !== 'live'; t++) stepWorld(w, TICK_DT);
   // Off the feeder, or every test here is a feeder test.

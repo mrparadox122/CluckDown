@@ -10,9 +10,10 @@ import { Client } from 'colyseus.js';
 import {
   createWorld, addPlayer, applyInput, stepWorld,
   stepBots, initBot, botName, xpForLevel,
-  MODES, TEAM_COLORS, teamShade, TICK_DT, MAX_CATCHUP, QUICK_CHAT, cleanRoomCode,
+  MODES, TEAM_COLORS, teamShade, TICK_DT, MAX_CATCHUP, QUICK_CHAT, cleanRoomCode, PLAYER,
   hillProgress, castVote, voteTally, beginMatch, MAP_VOTE, MAPS, contractInfo, BOMB,
-  placePing, PING,
+  placePing, PING, setRole, useAbility, assignBotRole,
+  maxHpOf, abilityMax, freeRoles, ROLE_LIST,
 } from '@cluckdown/shared';
 
 const DEFAULT_ENDPOINT = import.meta.env.VITE_SERVER_URL
@@ -27,6 +28,7 @@ class BaseSession {
   constructor() {
     this.handlers = {
       fx: [], feed: [], chat: [], matchEnd: [], error: [], joinedInProgress: [], ping: [],
+      role: [],
     };
   }
 
@@ -74,6 +76,9 @@ export class OnlineSession extends BaseSession {
     // Dropped into a match already running — the client shows a heads-up so
     // the clock reading 0:47 is not a mystery.
     room.onMessage('joinedInProgress', (m) => this.emit('joinedInProgress', m));
+    // The server answers every pick, accepted or refused, so the picker never
+    // sits there wondering whether the tap landed.
+    room.onMessage('role', (m) => this.emit('role', m));
     room.onError((code, message) => this.emit('error', { code, message }));
 
     // Round-trip timing. The server echoes our own timestamp back, so this is a
@@ -199,6 +204,19 @@ export class OnlineSession extends BaseSession {
         invuln: p.invuln,
         crop: p.crop ?? 0, pecking: !!p.pecking, feeding: !!p.feeding, dry: !!p.dry,
         level: p.level ?? 1, xp: p.xp ?? 0, nextXp: p.nextXp ?? 0,
+        // Max health, damage and fire rate are pure functions of (role, level),
+        // and the client has both — so they are worked out here rather than
+        // taking up room on the wire.
+        role: p.role || null,
+        // Guarded on `role` rather than trusting the fallback: an unset role
+        // resolves to the Runner, and a 100 HP chicken drawn against 75 shows
+        // an overflowing bar for whatever tick the first patch lands on.
+        maxHp: p.role ? maxHpOf({ role: p.role, level: p.level ?? 1 }) : PLAYER.maxHp,
+        abilityCharges: p.abilityCharges ?? 0,
+        abilityMax: abilityMax({ role: p.role, level: p.level ?? 1 }),
+        abilityIn: p.abilityIn ?? 0,
+        bulwark: !!p.bulwark, dashing: !!p.dashing,
+        healed: p.healGiven ?? 0,
         wind: !!p.wind, frenzy: !!p.frenzy,
         kills: p.kills, deaths: p.deaths, score: p.score,
         respawnIn: p.respawnIn,
@@ -235,9 +253,41 @@ export class OnlineSession extends BaseSession {
     return { x: b.x, z: b.z, aim: b.aim, hp: b.hp, state: b.phase, fuse: b.fuse };
   }
 
+  /** Deployed feeders. Visible to everyone — see PadState for why. */
+  get pads() {
+    const out = [];
+    this.room.state?.pads?.forEach((q, id) => {
+      out.push({ id, x: q.x, z: q.z, team: q.team, radius: q.radius, until: q.until });
+    });
+    return out;
+  }
+
+  /** Seconds of Scout reveal left for my side, 0 when nothing is lit. */
+  get revealLeft() {
+    const me = this.room.state?.players?.get(this.selfId);
+    if (!me || me.team < 0) return 0;
+    return (me.team === 0 ? this.room.state?.revealBlue : this.room.state?.revealRed) ?? 0;
+  }
+
+  /** Roles my side has already spoken for. The picker greys these out. */
+  get takenRoles() {
+    const me = this.room.state?.players?.get(this.selfId);
+    if (!me || me.team < 0) return [];
+    const out = [];
+    this.room.state.players.forEach((p, id) => {
+      if (id === this.selfId || p.team !== me.team || !p.role) return;
+      out.push(p.role);
+    });
+    return out;
+  }
+
+  get role() { return this.room.state?.players?.get(this.selfId)?.role || null; }
+
   sendInput(input) { this.room.send('input', input); }
   sendChat(msg) { this.room.send('chat', msg); }
   sendPing(intent, x, z) { this.room.send('mark', { intent, x, z }); }
+  sendRole(role) { this.room.send('role', { role }); }
+  sendAbility() { this.room.send('ability', {}); }
 
   update() { /* server drives the sim */ }
 
@@ -269,7 +319,7 @@ export class OnlineSession extends BaseSession {
 // ----------------------------------------------------------------- offline
 
 export class LocalSession extends BaseSession {
-  constructor({ mode = 'casual', name = 'You' } = {}) {
+  constructor({ mode = 'casual', name = 'You', role = null } = {}) {
     super();
     this.offline = true;
     this.selfId = 'you';
@@ -281,11 +331,14 @@ export class LocalSession extends BaseSession {
     const forced = import.meta.env.DEV ? window.__forceMod : undefined;
     this.world = createWorld({ mode, modifier: forced });
     this.modifier = this.world.modifier;
-    addPlayer(this.world, { id: this.selfId, name, seat: 0 });
+    // You go in first, so the role you were playing last match is claimed
+    // before any bot can take it off you.
+    addPlayer(this.world, { id: this.selfId, name, seat: 0, role });
 
     for (let seat = 1; seat < cfg.maxPlayers; seat++) {
       const p = addPlayer(this.world, { id: `bot${seat}`, name: botName(), seat, isBot: true });
       initBot(p, cfg.ranked ? 'hard' : 'normal');
+      assignBotRole(this.world, p);
     }
 
     this.acc = 0;
@@ -358,6 +411,14 @@ export class LocalSession extends BaseSession {
       invuln: p.invulnUntil > this.world.time,
       crop: Math.floor(p.crop), pecking: p.pecking, feeding: p.feeding, dry: p.dry,
       level: p.level, xp: p.xp, nextXp: xpForLevel(p.level + 1),
+      role: p.role,
+      maxHp: maxHpOf(p),
+      abilityCharges: p.abilityCharges,
+      abilityMax: abilityMax(p),
+      abilityIn: p.abilityCharges >= abilityMax(p) ? 0 : Math.max(0, p.abilityAt - this.world.time),
+      bulwark: p.bulwarkUntil > this.world.time,
+      dashing: p.dashUntil > this.world.time,
+      healed: p.healGiven,
       wind: p.windUntil > this.world.time, frenzy: p.frenzyUntil > this.world.time,
       kills: p.kills, deaths: p.deaths, score: p.score,
       respawnIn: p.alive ? 0 : Math.max(0, p.respawnAt - this.world.time),
@@ -379,6 +440,34 @@ export class LocalSession extends BaseSession {
     const b = this.world.bomber;
     return b && b.alive ? { x: b.x, z: b.z, aim: b.aim, hp: b.hp, state: b.state, fuse: b.fuse } : null;
   }
+
+  get pads() {
+    return this.world.pads.map((q) => ({
+      id: String(q.id), x: q.x, z: q.z, team: q.team ?? -1,
+      radius: q.radius, until: Math.max(0, q.until - this.world.time),
+    }));
+  }
+
+  get revealLeft() {
+    const me = this.world.players.get(this.selfId);
+    if (!me || me.team === null) return 0;
+    return Math.max(0, (this.world.reveal[me.team] ?? 0) - this.world.time);
+  }
+
+  get takenRoles() {
+    const me = this.world.players.get(this.selfId);
+    if (!me || me.team === null) return [];
+    return ROLE_LIST.filter((id) => !freeRoles(this.world, me.team, this.selfId).includes(id));
+  }
+
+  get role() { return this.world.players.get(this.selfId)?.role ?? null; }
+
+  sendRole(role) {
+    const got = setRole(this.world, this.selfId, role);
+    this.emit('role', { role: got, taken: this.takenRoles });
+  }
+
+  sendAbility() { useAbility(this.world, this.selfId); }
 
   sendInput(input) { applyInput(this.world, this.selfId, input); }
 
@@ -481,7 +570,8 @@ export class LocalSession extends BaseSession {
         place: i + 1, id: p.id, name: p.name, color: p.color, shade: p.shade, seat: p.seat,
         team: p.team ?? -1,
         kills: p.kills, deaths: p.deaths, score: p.score,
-        damage: Math.round(p.damageDealt), bot: p.isBot,
+        damage: Math.round(p.damageDealt), healed: Math.round(p.healGiven ?? 0),
+        role: p.role, bot: p.isBot,
       }));
     this.emit('matchEnd', {
       reason: ev.reason, winner: ev.winner, ranking,
@@ -505,9 +595,15 @@ export class LocalSession extends BaseSession {
  *             code, so a code of '' queues publicly and a real code only ever
  *             meets other people who typed the same one.
  */
-export async function findMatch({ mode, name, rating, code = '', endpoint = DEFAULT_ENDPOINT, signal }) {
+export async function findMatch({
+  mode, name, rating, role = null, code = '', endpoint = DEFAULT_ENDPOINT, signal,
+}) {
   const client = new Client(endpoint);
-  const room = await client.joinOrCreate('arena', { mode, name, rating, code: cleanRoomCode(code) });
+  // `role` is what they were playing last match. Sent at join so a player who
+  // never opens the picker is already in the role they know.
+  const room = await client.joinOrCreate('arena', {
+    mode, name, rating, role, code: cleanRoomCode(code),
+  });
 
   // joinOrCreate resolves as soon as the seat is confirmed — the first state
   // patch arrives a tick later. Building the scene before then means reading

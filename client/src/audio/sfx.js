@@ -27,6 +27,10 @@ const THROTTLE = {
   rivalUp: 0.5,
   peck: 0.16,
   fed: 0.3,
+  // A Medic pulses every two seconds and heals up to three team-mates each
+  // time, so both ends of it need the same treatment the feeder got.
+  pulse: 0.4,
+  healed: 0.3,
   dryFire: 0.25,
 };
 
@@ -237,6 +241,45 @@ export class Sfx {
       case 'secondWind':
         this.noise({ freq: 700, to: 2600, dur: 0.22, gain: 0.09, type: 'bandpass', q: 1.4 });
         this.tone({ freq: 330, to: 880, type: 'sine', dur: 0.24, gain: 0.08 });
+        break;
+
+      // --- role abilities. Each one has to be identifiable with your eyes on
+      // the fight, so they occupy four different registers rather than four
+      // variations of the same chirp.
+
+      // Dash: a short whoosh, gone before you have finished moving.
+      case 'dash':
+        this.noise({ freq: 400, to: 2200, dur: 0.16, gain: 0.075, type: 'bandpass', q: 0.9 });
+        break;
+
+      // Medic pulse: soft, round, and quiet enough to happen every two seconds
+      // for four minutes without anyone wanting it to stop.
+      case 'pulse':
+        this.tone({ freq: 520, to: 780, type: 'sine', dur: 0.16, gain: 0.05 });
+        break;
+
+      // Being healed by someone else. Higher than the pulse that caused it, so
+      // the Medic and the patient hear different things.
+      case 'healed':
+        this.tone({ freq: 780, to: 1040, type: 'sine', dur: 0.12, gain: 0.06 });
+        break;
+
+      // Scout sweep: a radar ping that sounds like information arriving.
+      case 'sweep':
+        this.tone({ freq: 1400, to: 900, type: 'sine', dur: 0.13, gain: 0.06 });
+        this.tone({ freq: 2100, type: 'sine', dur: 0.06, gain: 0.035, delay: 0.1 });
+        break;
+
+      // Bulwark: heavy and low. It is armour arriving, not a rescue.
+      case 'bulwark':
+        this.tone({ freq: 120, to: 260, type: 'square', dur: 0.26, gain: 0.085 });
+        this.noise({ freq: 900, dur: 0.09, gain: 0.05, type: 'lowpass' });
+        break;
+
+      // Engineer pad hitting the floor: a thunk and a small mechanical click.
+      case 'pad':
+        this.tone({ freq: 170, to: 90, type: 'triangle', dur: 0.14, gain: 0.08 });
+        this.noise({ freq: 1800, dur: 0.05, gain: 0.045, type: 'bandpass', q: 3, delay: 0.06 });
         break;
 
       // Feeding Frenzy: low, wide and greedy.

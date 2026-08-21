@@ -2,8 +2,9 @@
 // produces, so the sim can't tell them apart — which also means they work as
 // offline practice opponents on the client with zero extra code.
 
-import { applyInput, feederFor, feederRadius } from './sim.js';
+import { applyInput, feederFor, feederRadius, setRole, useAbility } from './sim.js';
 import { PLAYER, BOMBER, PICKUP, HILL, HEIST, BOMB, CROP, cropCapacity } from './constants.js';
+import { ROLE_LIST, roleDef, perkOf, maxHpOf, freeRoles } from './roles.js';
 import { norm, len, dist2, clamp, angleDelta, segBoxEntry } from './math.js';
 
 const BOT_NAMES = [
@@ -42,12 +43,55 @@ const DIFFICULTY = {
   hard: { think: 0.17, aimError: 0.11, range: 9, fireArc: 0.2, dodge: 0.85 },
 };
 
+/**
+ * How a bot plays the role it drew.
+ *
+ * `range` overrides the difficulty's preferred distance, and it is most of the
+ * behaviour on its own: a Sniper that holds 26 units and a Bruiser that holds 5
+ * look like completely different opponents while running the same three
+ * hundred lines underneath.
+ *
+ *   hold      the distance it tries to keep, in units
+ *   still     it must stop moving before it will pull the trigger
+ *   nurse     it sticks near hurt team-mates rather than near the fight
+ *   ability   it presses the button, and roughly when
+ */
+const ROLE_PLAY = {
+  // Stops to shoot, because the rifle is only a rifle standing still. Without
+  // this a Sniper bot fires into a 17-degree cone all match and reads as
+  // broken rather than as outgunned.
+  sniper: { hold: 24, still: true },
+  bruiser: { hold: 5.5 },
+  runner: { hold: 8, ability: 'closing' },
+  medic: { hold: 13, nurse: true },
+  engineer: { hold: 10, ability: 'holding' },
+  scout: { hold: 11 },
+};
+
 // How long a bot waits between hops, in seconds. Not a tactic — a bot that
 // never leaves the floor reads as scenery the moment the human next to it
 // discovers the jump button, and "the other chickens are inert" is the kind of
 // thing that makes a practice match feel like a menu.
 const JUMP_MIN = 1.8;
 const JUMP_SPREAD = 3.4;
+
+/**
+ * Hands a bot a role, respecting team uniqueness.
+ *
+ * Random rather than first-free, and that is the point: `addPlayer` already
+ * resolves an unspecified role to the first one nobody has taken, so four bots
+ * filling a side would deterministically be Runner, Scout, Bruiser, Medic in
+ * that order, every single match. A roost that is a different shape each time
+ * is most of what makes filling with bots feel like a lobby.
+ *
+ * Uses global Math.random like the rest of this file — a bot's composition is
+ * flavour, not simulation, and nothing reproducible depends on it.
+ */
+export function assignBotRole(world, p) {
+  const free = freeRoles(world, p.team, p.id);
+  if (!free.length) return p.role;
+  return setRole(world, p.id, free[Math.floor(Math.random() * free.length)]) ?? p.role;
+}
 
 export function initBot(p, difficulty = 'normal') {
   p.bot = {
@@ -67,6 +111,10 @@ export function initBot(p, difficulty = 'normal') {
     retreatFor: 0,
     refilling: false,
     wasDry: false,
+    // Roughly a human's finger: a bot that pressed its ability the exact tick
+    // it came off cooldown would out-react everyone in the room at the one
+    // thing that is supposed to be a decision.
+    abilityAt: 0,
   };
 }
 
@@ -185,6 +233,7 @@ export function stepBots(world, dt) {
     // ~0.64s hop, so a bot never re-triggers on landing and pogos on the spot.
     let input = decide(world, p, b);
     input = feedErrand(world, p, b, input) ?? input;
+    input = rolePlay(world, p, b, input);
     [input.mx, input.mz] = steerAroundCover(world, p, input.mx, input.mz);
     input.pitch = aimPitch(world, p, b);
     if (b.jumpAt <= 0) {
@@ -193,6 +242,10 @@ export function stepBots(world, dt) {
     }
 
     applyInput(world, p.id, input);
+    // After the input lands, because the dash reads the movement vector it is
+    // about to multiply — pressing the button before the stick moved would be
+    // refused by useAbility every time.
+    pressAbility(world, p, b);
   }
 }
 
@@ -297,8 +350,11 @@ function decide(world, p, b) {
   shoot = aimedAt(p, lx, lz, b.cfg.fireArc) && canSee(world, p, foe);
 
   // Hold preferred range, strafing perpendicular so they're not a free target.
+  // The role gets the last word on what that range is — it is the single
+  // biggest thing that makes a Sniper bot and a Bruiser bot different to fight.
   const [tx, tz] = norm(foe.x - p.x, foe.z - p.z);
-  const closing = d > b.cfg.range ? 1 : d < b.cfg.range - 3 ? -1 : 0;
+  const want = ROLE_PLAY[p.role]?.hold ?? b.cfg.range;
+  const closing = d > want ? 1 : d < want - 3 ? -1 : 0;
   const perpX = -tz * b.strafe * b.cfg.dodge;
   const perpZ = tx * b.strafe * b.cfg.dodge;
   mx = tx * closing + perpX;
@@ -507,6 +563,84 @@ function feedErrand(world, p, b, input) {
     if (clear) return { ...input, mx: 0, mz: 0, shoot: false };
   }
   return null;
+}
+
+/**
+ * The last word on a bot's input, after the errands have had theirs.
+ *
+ * Deliberately a FILTER rather than another branch in decide(): every role
+ * still wants to fight, take the hill and bank the eggs, and rewriting those
+ * six times over is how a bot AI stops being maintainable. This adjusts what
+ * the plan produced — where to stand, and whether to pull the trigger.
+ */
+function rolePlay(world, p, b, input) {
+  const play = ROLE_PLAY[p.role];
+  if (!play) return input;
+  let out = input;
+
+  // STANDS TO SHOOT. A Sniper firing on the move is firing into a wall, so the
+  // bot has to make the same decision a player does: stop, then fire.
+  if (play.still && out.shoot) {
+    out = { ...out, mx: 0, mz: 0 };
+  }
+
+  // NURSES. A Medic's whole value is being inside its own pulse radius when a
+  // team-mate is hurt, so a hurt one outranks the fight it was walking to.
+  if (play.nurse) {
+    const patient = hurtMate(world, p);
+    if (patient) {
+      const radius = perkOf(p, 'pulse', {}).radius ?? 5;
+      const d = Math.sqrt(dist2(p.x, p.z, patient.x, patient.z));
+      // Inside the radius it holds its ground and keeps covering; outside it
+      // walks in. Standing exactly on them would just make one target of two.
+      if (d > radius * 0.7) {
+        const [tx, tz] = norm(patient.x - p.x, patient.z - p.z);
+        out = { ...out, mx: tx, mz: tz };
+      }
+    }
+  }
+  return out;
+}
+
+/** The team-mate most worth standing next to. */
+function hurtMate(world, p) {
+  let best = null;
+  let worst = 0.85; // full-health team-mates do not need a Medic
+  for (const o of world.players.values()) {
+    if (o.id === p.id || !o.alive || o.team === null || o.team !== p.team) continue;
+    const frac = o.hp / maxHpOf(o);
+    if (frac >= worst) continue;
+    worst = frac;
+    best = o;
+  }
+  return best;
+}
+
+/**
+ * The ability button, for the two roles that have one.
+ *
+ * `closing` (Runner) dashes when it is committing to a distance — chasing
+ * someone down or peeling away from a fight it is losing. `holding` (Engineer)
+ * drops a pad where its team already is, which is the only place a pad is worth
+ * anything.
+ */
+function pressAbility(world, p, b) {
+  const play = ROLE_PLAY[p.role];
+  if (!play?.ability || world.time < b.abilityAt) return;
+  const foe = nearestFoe(world, p);
+
+  if (play.ability === 'closing') {
+    if (!foe) return;
+    const d = Math.sqrt(dist2(p.x, p.z, foe.x, foe.z));
+    const committing = d > (play.hold ?? 8) + 4 || p.hp < maxHpOf(p) * 0.35;
+    if (!committing) return;
+  } else if (play.ability === 'holding') {
+    // Not in the open on its own, and not while sprinting somewhere else.
+    if (len(p.input.mx, p.input.mz) > 0.4) return;
+    if (foe && dist2(p.x, p.z, foe.x, foe.z) > 22 * 22) return;
+  }
+
+  if (useAbility(world, p.id)) b.abilityAt = world.time + 0.6;
 }
 
 // Was a second copy of the spawn corners, which silently stopped matching the

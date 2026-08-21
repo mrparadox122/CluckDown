@@ -10,12 +10,16 @@ import {
   MULTIKILL_WINDOW, SEAT_COLORS, MODIFIER_POOL, modValue,
   TEAM_COLORS, teamForSeat, teamShade, spawnLayout, feederPoints, HILL, SHRINK, rollPickup,
   PING, pingDef,
-  LEVELS, levelFromXp, xpForLevel, perkValue, rungOf,
+  LEVELS, levelFromXp, xpForLevel, rungOf,
   MAPS, DEFAULT_MAP, pickMapCandidates, BOUNTY, POTATO,
   CONTRACT, CONTRACTS, CONTRACT_LIST, HEIST, BOMB, REVENGE, GRAVITY, WALL_HEIGHT,
   coverFor, CROP, cropCapacity, SPREAD,
 } from './constants.js';
 import { nextSpread, coneDeviate } from './accuracy.js';
+import {
+  ROLES, ROLE_LIST, DEFAULT_ROLE, roleDef, roleTier, roleValue, perkOf,
+  maxHpOf, roleDamage, freeRoles, resolveRole,
+} from './roles.js';
 import {
   clamp, clampUnit, norm, len, dist2, segHitsCapsule, mulberry32, angleDelta,
   segBoxEntry, pushOutBox, insideAny,
@@ -86,6 +90,16 @@ export function createWorld({ mode = 'casual', seed = (Math.random() * 1e9) | 0,
     nests: cfg.heist || cfg.bomb
       ? [0, 1].map((team) => ({ team, eggs: cfg.heist ? HEIST.eggsPerNest : 0, x: 0, z: 0 }))
       : null,
+
+    // Roles. Two pieces of world-level state come out of them:
+    //
+    //   reveal  per TEAM, the time until a Scout's sweep expires. Team-level
+    //           rather than per-player because a sweep is information the whole
+    //           roost gets — one number a side, not one per pair of eyes.
+    //   pads    Engineer feeders on the floor. They behave exactly like the
+    //           team rally pad in stepCrop; they just move.
+    reveal: [0, 0],
+    pads: [],
 
     // Team pings, held for PING.life then dropped. They never enter synced
     // state: the server sends each one only to the pinger's own team, so an
@@ -206,7 +220,7 @@ function spawnChoices(world, p) {
   return pts;
 }
 
-export function addPlayer(world, { id, name, seat, isBot = false }) {
+export function addPlayer(world, { id, name, seat, isBot = false, role = null }) {
   const seatIdx = seat ?? world.players.size;
   const sp = spawnFor(world, seatIdx);
   const team = world.cfg.teams ? teamForSeat(seatIdx) : null;
@@ -227,7 +241,7 @@ export function addPlayer(world, { id, name, seat, isBot = false }) {
     kx: 0, kz: 0, // knockback velocity
     aim: Math.atan2(-sp.x, -sp.z), // face the middle
     pitch: 0, // vertical look, and therefore the vertical half of every shot
-    hp: PLAYER.maxHp,
+    hp: PLAYER.maxHp, // overwritten below, once the role is known
     alive: true,
     respawnAt: 0,
     invulnUntil: PLAYER.spawnInvuln,
@@ -237,9 +251,24 @@ export function addPlayer(world, { id, name, seat, isBot = false }) {
     // disagree after a demotion.
     xp: 0,
     level: 1,
-    windUntil: 0,   // Second Wind, rung 5
+    windUntil: 0,   // Second Wind
     windUsed: false,
-    frenzyUntil: 0, // Feeding Frenzy, rung 6
+    frenzyUntil: 0, // Feeding Frenzy
+
+    // ROLES. `role` is what you are playing now; `wantRole` is what you asked
+    // for while dead and takes effect on respawn. Two fields rather than one
+    // because a role that changed mid-life would swap your max health under a
+    // fight that was already happening.
+    role: null,
+    wantRole: null,
+    abilityAt: 0,      // next time the active ability may be used
+    abilityCharges: 0, // dash charges in hand
+    dashUntil: 0,      // Runner burst
+    pulseAt: 0,        // Medic
+    sweepAt: 0,        // Scout
+    bulwarkUntil: 0,   // Bruiser
+    bulwarkUsed: false,
+    healGiven: 0,      // health handed to team-mates, for the scoreboard
 
     // Grain. See CROP: the crop is the magazine, pecking is the reload, and
     // standing on your own feeder is the shortcut that costs you a walk.
@@ -278,7 +307,79 @@ export function addPlayer(world, { id, name, seat, isBot = false }) {
     connected: true,
   };
   world.players.set(id, p);
+  // Resolved AFTER the player is in the map, so uniqueness sees the team as it
+  // actually is. Max health is a role stat, so it can only be set once the role
+  // is known — a Bruiser joining at 100 HP would be a Bruiser who is not one.
+  p.role = resolveRole(world, p, role);
+  p.hp = maxHpOf(p);
+  armAbilities(world, p);
   return p;
+}
+
+/**
+ * Picks a role, or asks for one.
+ *
+ * ALIVE, it is a request: taking a new role would change your max health and
+ * your gun in the middle of a fight that is already happening, so it is queued
+ * and applied on the next respawn. DEAD (or before the whistle) it lands
+ * immediately, which is the case the picker actually cares about.
+ *
+ * Refuses silently when a team-mate already holds it. The client never offers a
+ * taken role, so a request for one is a stale screen or a hand-rolled client —
+ * neither is worth an error path.
+ *
+ * @returns the role now in effect, or null if the request was refused.
+ */
+export function setRole(world, id, wanted) {
+  const p = world.players.get(id);
+  if (!p) return null;
+  const want = String(wanted ?? '');
+  if (!ROLES[want]) return null;
+  if (!freeRoles(world, p.team, p.id).includes(want)) return null;
+
+  p.wantRole = want;
+  // Between lives, or before the match starts: no fight to interrupt.
+  if (!p.alive || world.phase === 'lobby' || world.phase === 'warmup') applyRole(world, p);
+  // The role that is now in effect, or the one queued for the next respawn —
+  // either way, the answer to "what am I going to be", which is the question
+  // the picker asked.
+  return p.wantRole ?? p.role;
+}
+
+/** Commits a queued role. Called on respawn and by setRole when it is safe. */
+function applyRole(world, p) {
+  const next = resolveRole(world, p, p.wantRole);
+  const changed = next !== p.role;
+  p.role = next;
+  p.wantRole = null;
+  // Health is a role stat, so a swap re-bases it rather than carrying a number
+  // that belonged to a different chicken.
+  p.hp = Math.min(p.hp, maxHpOf(p));
+  if (changed) {
+    p.hp = maxHpOf(p);
+    emit(world, { type: 'role', target: p.id, role: p.role, level: p.level });
+  }
+  armAbilities(world, p);
+  return p.role;
+}
+
+/**
+ * Puts the role's ability back to its starting state.
+ *
+ * Run on spawn, on respawn and on a swap. The passive timers get a HEAD START
+ * of one interval rather than firing on tick one: a Medic pulse the instant
+ * they spawn behind their own line heals nobody and then leaves the team
+ * without one for three seconds, which is the worst of both.
+ */
+function armAbilities(world, p) {
+  const now = world.time;
+  p.abilityCharges = abilityMax(p);
+  p.abilityAt = now;
+  p.dashUntil = 0;
+  p.bulwarkUntil = 0;
+  p.bulwarkUsed = false;
+  p.pulseAt = now + (perkOf(p, 'pulse', {}).every ?? 0);
+  p.sweepAt = now + (perkOf(p, 'sweep', {}).every ?? 0);
 }
 
 export function removePlayer(world, id) {
@@ -406,6 +507,7 @@ export function stepWorld(world, dt) {
   stepPotato(world, dt);
   stepHeist(world, dt);
   stepBomb(world, dt);
+  stepPads(world);
   stepPings(world);
   checkSurvival(world);
 
@@ -434,16 +536,19 @@ function stepPlayers(world, dt) {
 
     const inp = p.input;
     let moveScale = world.phase === 'live' ? 1 : 0.35;
-    // The ladder's mobility perks. Long Legs is permanent from rung 3; Second
-    // Wind and Feeding Frenzy are bursts, and they multiply — a level 6 who
-    // just took a kill and then dropped low is briefly very hard to catch,
-    // which is exactly the highlight the top of the ladder is for.
-    moveScale *= perkValue(p.level, 'speedMul');
+    // Legs, from the role and from whatever its ladder has added to them. A
+    // Runner is quick before any of this; a Runner who just dropped low and is
+    // mid-dash is briefly uncatchable, which is what the top of a ladder is for.
+    moveScale *= perkOf(p, 'speedMul');
     // Tagged: hit by a bullet in the last moment. A slow rather than a shove —
     // see fire(). It expires on its own and never fights your input.
     if (world.time < p.taggedUntil) moveScale *= PLAYER.tagSlow;
-    if (world.time < p.windUntil) moveScale *= perkValue(p.level, 'secondWind', {}).speedMul ?? 1;
-    if (world.time < p.frenzyUntil) moveScale *= perkValue(p.level, 'frenzy', {}).speedMul ?? 1;
+    if (world.time < p.windUntil) moveScale *= perkOf(p, 'secondWind', {}).speedMul ?? 1;
+    if (world.time < p.frenzyUntil) moveScale *= perkOf(p, 'frenzy', {}).speedMul ?? 1;
+    // THE DASH IS A MULTIPLIER, NOT A SHOVE. It scales the vector the player is
+    // already asking for, so it can only ever make them faster along a heading
+    // they chose — see PLAYER.maxKnockback for the bug that rule comes from.
+    if (world.time < p.dashUntil) moveScale *= perkOf(p, 'dash', {}).mul ?? 1;
     // Carrying is the cost that balances stealing: a full load makes you slow
     // and obvious, so hoarding is punished without needing a hard cap.
     if (p.carrying > 0) moveScale *= 1 - Math.min(HEIST.maxCarrySlow, HEIST.carrySlow * p.carrying);
@@ -506,6 +611,10 @@ function stepPlayers(world, dt) {
     applyAim(p);
     stepCrop(world, p, dt);
     stepSecondWind(world, p);
+    stepBulwark(world, p);
+    stepPulse(world, p);
+    stepSweep(world, p);
+    stepAbilityCharge(world, p);
     stepPotatoBurn(world, p, dt);
     // Stepped here rather than inside fire(), because the cone has to keep
     // settling while you are NOT shooting — that quarter second of stillness
@@ -571,12 +680,223 @@ function stepPotatoBurn(world, p, dt) {
  * it becoming a permanent aura for anyone who simply plays hurt.
  */
 function stepSecondWind(world, p) {
-  const wind = perkValue(p.level, 'secondWind', null);
+  const wind = perkOf(p, 'secondWind', null);
   if (!wind || p.windUsed) return;
-  if (p.hp > PLAYER.maxHp * wind.at) return;
+  if (p.hp > maxHpOf(p) * wind.at) return;
   p.windUsed = true;
   p.windUntil = world.time + wind.seconds;
   emit(world, { type: 'secondWind', target: p.id, x: p.x, y: p.y, z: p.z });
+}
+
+// ------------------------------------------------------------- role abilities
+
+/**
+ * Bruiser: Bulwark. Once per life, the moment health crosses the line.
+ *
+ * The same shape as Second Wind and for the same reason — a perk that FIRES,
+ * with a moment and a sound, beats one you merely have. Where Second Wind is an
+ * escape, this is permission to stay: the last third of a Bruiser's health is
+ * the part that makes a push work.
+ */
+function stepBulwark(world, p) {
+  const bw = perkOf(p, 'bulwark', null);
+  if (!bw || p.bulwarkUsed) return;
+  if (p.hp > maxHpOf(p) * bw.at) return;
+  p.bulwarkUsed = true;
+  p.bulwarkUntil = world.time + bw.seconds;
+  emit(world, { type: 'bulwark', target: p.id, x: p.x, y: p.y, z: p.z });
+}
+
+/**
+ * Medic: the pulse.
+ *
+ * On a timer rather than on a button. A support you have to aim is a support
+ * nobody plays with a thumb, and a heal you have to remember is dead time in a
+ * fight — the Medic's job is to be standing in the right place, and that is a
+ * positioning decision, which is the interesting one.
+ *
+ * NEVER HEALS ITSELF, and that one rule is the whole balance of the role. A
+ * self-healing Medic is just the most survivable duellist in the match; this
+ * one is the weakest chicken on the field standing behind the strongest.
+ *
+ * Out-of-combat gating is deliberately absent — unlike the feeder, which has
+ * CROP.feeder.combatDelay for it. Healing under fire is exactly what a Medic is
+ * for; the counterplay is that they are slow, soft, and standing near people
+ * you are already shooting at.
+ */
+function stepPulse(world, p) {
+  const pulse = perkOf(p, 'pulse', null);
+  if (!pulse || world.phase !== 'live' || world.time < p.pulseAt) return;
+  p.pulseAt = world.time + pulse.every;
+
+  const r2 = pulse.radius * pulse.radius;
+  let healed = 0;
+  for (const o of world.players.values()) {
+    if (o.id === p.id || !o.alive) continue;
+    if (p.team === null || o.team !== p.team) continue;
+    const cap = maxHpOf(o);
+    if (o.hp >= cap) continue;
+    if (dist2(p.x, p.z, o.x, o.z) > r2) continue;
+    const gain = Math.min(pulse.heal, cap - o.hp);
+    o.hp += gain;
+    p.healGiven += gain;
+    healed++;
+    emit(world, { type: 'healed', target: o.id, by: p.id, x: o.x, y: o.y, z: o.z, heal: gain });
+  }
+  // The ring is drawn whether or not it caught anyone: a Medic has to be able
+  // to see their own radius to learn where to stand.
+  emit(world, {
+    type: 'pulse', target: p.id, x: p.x, y: p.y, z: p.z,
+    radius: pulse.radius, healed,
+  });
+}
+
+/**
+ * Scout: the sweep.
+ *
+ * Automatic on a cooldown, but it will not SPEND itself on an empty corridor —
+ * a reveal that lights up nobody has burned nine seconds and told the team
+ * nothing. So the timer comes due and then waits for something to reveal.
+ *
+ * The result is one number per team (`world.reveal`), not a flag per enemy.
+ * Reveal is information the whole roost gets at once, and keeping it team-level
+ * means the client filter is "is my side's reveal live", which cannot leak the
+ * way a per-player flag in synced state would.
+ */
+function stepSweep(world, p) {
+  const sweep = perkOf(p, 'sweep', null);
+  if (!sweep || world.phase !== 'live' || world.time < p.sweepAt) return;
+  if (p.team === null) return;
+
+  const r2 = sweep.range * sweep.range;
+  let found = 0;
+  for (const o of world.players.values()) {
+    if (!o.alive || o.team === p.team) continue;
+    if (dist2(p.x, p.z, o.x, o.z) <= r2) found++;
+  }
+  if (!found) return; // hold the charge until there is something to find
+
+  p.sweepAt = world.time + sweep.every;
+  world.reveal[p.team] = world.time + sweep.seconds;
+  emit(world, {
+    type: 'sweep', target: p.id, team: p.team, x: p.x, y: p.y, z: p.z,
+    range: sweep.range, seconds: sweep.seconds, found,
+  });
+}
+
+/** Deployed feeders time out; nothing else about them moves. */
+function stepPads(world) {
+  if (!world.pads.length) return;
+  for (const pad of world.pads) {
+    if (pad.until > world.time) continue;
+    emit(world, { type: 'padGone', id: pad.id, x: pad.x, z: pad.z, team: pad.team });
+  }
+  world.pads = world.pads.filter((pad) => pad.until > world.time);
+}
+
+/**
+ * The one button a role can have: dash (Runner) or drop a feeder (Engineer).
+ *
+ * Four of the six roles deliberately have nothing here. Time-to-action is a
+ * known problem on this game and a mobile HUD has room for about one more
+ * button, so the abilities that could be passive are passive — the button
+ * exists for the two where WHEN is the whole decision.
+ *
+ * Both are spent from the same pair of numbers: `abilityCharges` in hand, and
+ * `abilityAt` for when the next one lands. A pad is simply a one-charge dash
+ * with a longer cooldown, so the HUD only ever has one thing to draw.
+ */
+export const abilityMax = (p) => (
+  roleDef(p?.role).ability === 'dash' ? (perkOf(p, 'dash', {}).charges ?? 0)
+    : roleDef(p?.role).ability === 'pad' ? 1 : 0
+);
+
+export const abilityCooldown = (p) => (
+  roleDef(p?.role).ability === 'dash' ? (perkOf(p, 'dash', {}).cooldown ?? 0)
+    : roleDef(p?.role).ability === 'pad' ? (perkOf(p, 'pad', {}).cooldown ?? 0) : 0
+);
+
+/**
+ * Charges come back one at a time, on their own clock.
+ *
+ * A charge-based cooldown rather than a flat one, because the Runner's ladder
+ * buys CHARGES — Double Dash is only a different thing from a shorter cooldown
+ * if the second one can be held. Full means the clock idles, so the first dash
+ * of a life is always instant.
+ */
+function stepAbilityCharge(world, p) {
+  const max = abilityMax(p);
+  if (max <= 0) return;
+  if (p.abilityCharges >= max) {
+    p.abilityCharges = max;
+    p.abilityAt = world.time;
+    return;
+  }
+  if (world.time < p.abilityAt) return;
+  p.abilityCharges++;
+  p.abilityAt = world.time + abilityCooldown(p);
+}
+
+/** Spends a charge and starts the clock if it was not already running. */
+function spendCharge(world, p) {
+  const wasFull = p.abilityCharges >= abilityMax(p);
+  p.abilityCharges = Math.max(0, p.abilityCharges - 1);
+  if (wasFull) p.abilityAt = world.time + abilityCooldown(p);
+}
+
+/** @returns the ability that fired, or null if it could not. */
+export function useAbility(world, id) {
+  const p = world.players.get(id);
+  if (!p || !p.alive || world.phase !== 'live') return null;
+  const kind = roleDef(p.role).ability;
+
+  if (kind === 'dash') {
+    const dash = perkOf(p, 'dash', null);
+    if (!dash || p.abilityCharges <= 0) return null;
+    // REFUSED WITHOUT A HEADING. The dash multiplies the player's own movement
+    // vector, so a dash from a standstill would have to invent a direction —
+    // and inventing a direction is exactly the thing this game does not do to
+    // players. Hold a stick, then dash.
+    if (len(p.input.mx, p.input.mz) < 0.2) return null;
+    spendCharge(world, p);
+    p.dashUntil = world.time + dash.seconds;
+    emit(world, { type: 'dash', target: p.id, x: p.x, y: p.y, z: p.z });
+    return 'dash';
+  }
+
+  if (kind === 'pad') {
+    const cfg = perkOf(p, 'pad', null);
+    if (!cfg || p.abilityCharges <= 0) return null;
+    // Oldest goes when you are at your cap, so the newest pad is always the one
+    // where you are actually fighting — same rule as pings.
+    const mine = world.pads.filter((q) => q.by === p.id);
+    while (mine.length >= (cfg.max ?? 1)) {
+      const drop = mine.shift();
+      world.pads.splice(world.pads.indexOf(drop), 1);
+      emit(world, { type: 'padGone', id: drop.id, x: drop.x, z: drop.z, team: drop.team });
+    }
+    const pad = {
+      id: nextId(world), by: p.id, team: p.team,
+      x: p.x, z: p.z,
+      radius: cfg.radius, refill: cfg.refill, heal: cfg.heal,
+      until: world.time + cfg.seconds,
+    };
+    world.pads.push(pad);
+    spendCharge(world, p);
+    emit(world, { type: 'pad', target: p.id, ...pad });
+    return 'pad';
+  }
+  return null;
+}
+
+/** Pads on the floor this player is allowed to stand on. Team-mates only. */
+function padUnder(world, p) {
+  for (const pad of world.pads) {
+    if (pad.team !== null && pad.team !== p.team) continue;
+    if (pad.team === null && pad.by !== p.id) continue;
+    if (dist2(p.x, p.z, pad.x, pad.z) <= pad.radius * pad.radius) return pad;
+  }
+  return null;
 }
 
 /** Soft circle separation so chickens can't occupy the same tile. */
@@ -610,13 +930,15 @@ function fire(world, p) {
   // the constant for why nursing a crop at zero cannot be allowed to work.
   if (p.crop <= 0) p.dry = true;
 
-  // Rapid Peck (rung 4), Feeding Frenzy (rung 6) and TRIGGER HAPPY all multiply
-  // the same number, so the floor is doing real work — three stacked
-  // multipliers without one is a fire rate nobody can react to.
+  // The role, its ladder, TRIGGER HAPPY and Feeding Frenzy all multiply the
+  // same number, so the floor is doing real work — stacked multipliers without
+  // one is a fire rate nobody can react to. The CEILING is the Sniper's whole
+  // premise, which is why the floor is a max() and not a clamp: 13x has to be
+  // allowed to be 1.3 seconds.
   let cooldown = PLAYER.fireCooldown
     * modValue(world.modifier, 'fireCooldownMul')
-    * perkValue(p.level, 'fireCooldownMul');
-  if (world.time < p.frenzyUntil) cooldown *= perkValue(p.level, 'frenzy', {}).fireCooldownMul ?? 1;
+    * perkOf(p, 'fireCooldownMul');
+  if (world.time < p.frenzyUntil) cooldown *= perkOf(p, 'frenzy', {}).fireCooldownMul ?? 1;
   p.nextShotAt = world.time + Math.max(PLAYER.minCooldown, cooldown);
   // Spherical direction: yaw and pitch together. This is the line that makes
   // the crosshair honest — the shot leaves along exactly the vector the camera
@@ -630,7 +952,13 @@ function fire(world, p) {
   //
   // Rolled from the world RNG on the authoritative side. Inaccuracy a client
   // computes for itself is inaccuracy a client can decline.
-  const { dx, dy, dz } = coneDeviate(p.aim, p.pitch, p.spread ?? SPREAD.still, world.rng);
+  //
+  // `spreadMul` is the Sniper's balance and nothing else's: at 3.4 a moving
+  // Sniper is firing into a 17-degree cone, so the one-shot rifle is only a
+  // rifle when they have stopped. Standing still it is 3.4 x 0 = 0, so first
+  // shot accuracy stays exact for every role.
+  const cone = (p.spread ?? SPREAD.still) * perkOf(p, 'spreadMul', 1);
+  const { dx, dy, dz } = coneDeviate(p.aim, p.pitch, cone, world.rng);
   const muzzle = PLAYER.radius + BULLET.radius + 0.25;
   const id = nextId(world);
   const bx = p.x + dx * muzzle;
@@ -641,10 +969,13 @@ function fire(world, p) {
   const shot = traceShot(world, p, bx, by, bz, dx, dy, dz);
 
   if (shot.hit === 'bomber') {
-    damageBomber(world, BULLET.damage, p.id, dx, dz);
+    damageBomber(world, roleDamage(p, false, Math.sqrt(dist2(p.x, p.z, shot.x, shot.z))), p.id, dx, dz);
   } else if (shot.hit === 'player') {
     const t = shot.target;
-    const damage = shot.head ? BULLET.headDamage : BULLET.damage;
+    // Distance is measured to where the round LANDED, not to where the target
+    // is standing — they are the same thing for a hit, and using the impact
+    // means the Bruiser's falloff needs no special case for a jumping target.
+    const damage = roleDamage(p, shot.head, Math.sqrt(dist2(p.x, p.z, shot.x, shot.z)));
     // TAGGING, not shoving.
     //
     // Bullets used to knock you across the floor. That is a projectile-game
@@ -671,7 +1002,7 @@ function fire(world, p) {
     // fallback that draws a different line from the one that was resolved is a
     // fallback that lies about where you shot.
     aim: Math.atan2(dx, dz), pitch: Math.asin(clamp(dy, -1, 1)),
-    owner: p.id,
+    owner: p.id, role: p.role,
     rapid: world.time < p.frenzyUntil, crop: p.crop,
   });
 }
@@ -699,20 +1030,27 @@ function stepCrop(world, p, dt) {
   p.feeding = false;
   if (world.phase !== 'live') return;
 
-  // --- the feeder: your team's rally pad, or your own corner in a duel.
-  const pad = feederFor(world, p.team ?? p.seat);
+  // --- the feeder: your team's rally pad, an Engineer's dropped one, or your
+  // own corner in a duel. A deployed pad is the same mechanic with its own
+  // numbers and a place it can be moved to, which is the Engineer's whole role.
+  const home = feederFor(world, p.team ?? p.seat);
   const fr = feederRadius(world);
-  if (dist2(p.x, p.z, pad.x, pad.z) <= fr * fr) {
+  const dropped = padUnder(world, p);
+  const onHome = dist2(p.x, p.z, home.x, home.z) <= fr * fr;
+  if (onHome || dropped) {
     p.feeding = true;
+    const refill = onHome ? CROP.feeder.refill : dropped.refill;
+    const heal = onHome ? CROP.feeder.heal : dropped.heal;
+    const hpCap = maxHpOf(p);
     // Grain always, health only out of combat — see CROP.feeder.combatDelay.
-    p.crop = Math.min(cap, p.crop + CROP.feeder.refill * dt);
+    p.crop = Math.min(cap, p.crop + refill * dt);
     const settled = world.time - (p.lastHurtAt ?? -99) >= CROP.feeder.combatDelay;
-    if (p.hp < PLAYER.maxHp && settled) {
+    if (p.hp < hpCap && settled) {
       // Chunked like the burn tick, and for the same reason: sixty heal events
       // a second would bury everything else in the feed.
-      p.healAcc += CROP.feeder.heal * dt;
+      p.healAcc += heal * dt;
       if (p.healAcc >= 4) {
-        const gain = Math.min(Math.floor(p.healAcc), PLAYER.maxHp - p.hp);
+        const gain = Math.min(Math.floor(p.healAcc), hpCap - p.hp);
         p.healAcc -= Math.floor(p.healAcc);
         p.hp += gain;
         if (gain > 0) emit(world, { type: 'fed', target: p.id, x: p.x, z: p.z, heal: gain });
@@ -748,7 +1086,7 @@ function stepCrop(world, p, dt) {
     // the one the first unlock shortens, which is deliberate.
     p.peckAcc += CROP.peckRate
       * modValue(world.modifier, 'peckRateMul')
-      * perkValue(p.level, 'peckRateMul') * dt;
+      * perkOf(p, 'peckRateMul') * dt;
     if (p.peckAcc >= 1) {
       const grain = Math.min(Math.floor(p.peckAcc), cap - p.crop);
       p.peckAcc -= Math.floor(p.peckAcc);
@@ -875,12 +1213,21 @@ function awardXp(world, p, amount, reason, floor = 0) {
   p.level = levelFromXp(p.xp);
   if (p.level === was) return;
 
+  // A rung is a name and a colour; what it BOUGHT you comes from your role.
   const rung = rungOf(p.level);
+  const tier = roleTier(p.role, p.level);
+  // Roles change max health as they climb, so a promotion has to hand over the
+  // difference — a Bruiser reaching Tougher and staying on 180 has been given
+  // a number and nothing else. A demotion clamps, so hp can never exceed it.
+  const cap = maxHpOf(p);
+  if (p.level > was) p.hp = Math.min(cap, p.hp + Math.max(0, cap - maxHpOf({ role: p.role, level: was })));
+  p.hp = Math.min(p.hp, cap);
   emit(world, {
     type: p.level > was ? 'levelUp' : 'levelDown',
     target: p.id, x: p.x, y: p.y, z: p.z,
     level: p.level, from: was,
-    name: rung.name, perk: rung.perk, blurb: rung.blurb, color: rung.color,
+    name: rung.name, color: rung.color,
+    role: p.role, perk: tier.perk, blurb: tier.blurb,
     reason,
   });
 }
@@ -916,7 +1263,14 @@ export function deathXp(victimLevel, killerLevel) {
 
 export function damagePlayer(world, target, amount, byId, kind) {
   if (!target.alive || world.time < target.invulnUntil || world.phase === 'over') return;
-  const dealt = Math.min(amount, target.hp);
+  // Bulwark, while it is up. Applied here rather than in fire() so it covers
+  // blasts, the zone and the cursed egg too — "harder to kill" should not have
+  // a list of exceptions nobody can predict.
+  let incoming = amount;
+  if (world.time < target.bulwarkUntil) {
+    incoming *= 1 - (perkOf(target, 'bulwark', {}).resist ?? 0);
+  }
+  const dealt = Math.min(incoming, target.hp);
   target.hp -= dealt;
   // Starts the feeder's regen lockout. Anything that hurts counts, including
   // the zone and your own cursed egg — "am I in combat" is really "is something
@@ -971,7 +1325,7 @@ function killPlayer(world, target, byId, kind) {
     // Feeding Frenzy, rung 6: a kill fills you outright and sets you loose.
     // The only perk that chains, which is what makes the top of the ladder a
     // highlight rather than a bigger number.
-    const frenzy = perkValue(killer.level, 'frenzy', null);
+    const frenzy = perkOf(killer, 'frenzy', null);
     if (frenzy) {
       killer.crop = cropCapacity(world.modifier);
       killer.dry = false;
@@ -1084,11 +1438,16 @@ function respawn(world, p) {
   p.vy = 0;
   p.pitch = 0;
   p.input = { ...p.input, pitch: 0, jump: false };
-  p.hp = PLAYER.maxHp;
+  // The queued role lands HERE, which is the entire UX rule of the picker: it
+  // takes effect between lives, so choosing costs nothing and choosing nothing
+  // costs nothing either. applyRole also re-arms the abilities and re-bases
+  // health, so a swap to Bruiser comes back at 180 and not at 100.
+  applyRole(world, p);
+  p.hp = maxHpOf(p);
   p.crop = cropCapacity(world.modifier);
   p.dry = false;
   // Second Wind is once per LIFE, not once per match — it is an escape from a
-  // fight, and a fresh life is a fresh fight.
+  // fight, and a fresh life is a fresh fight. Bulwark is the same bargain.
   p.windUsed = false;
   p.windUntil = 0;
   p.frenzyUntil = 0;
@@ -1880,14 +2239,14 @@ function stepPickups(world, dt) {
       if (!p.alive) continue;
       const rr = PLAYER.radius + PICKUP.radius;
       if (dist2(p.x, p.z, pk.x, pk.z) > rr * rr) continue;
-      if (pk.type === 'health' && p.hp >= PLAYER.maxHp) continue; // don't waste it
+      if (pk.type === 'health' && p.hp >= maxHpOf(p)) continue; // don't waste it
       taken = p;
       break;
     }
     if (!taken) { keep.push(pk); continue; }
 
     if (pk.type === 'health') {
-      taken.hp = Math.min(PLAYER.maxHp, taken.hp + PICKUP.health.heal);
+      taken.hp = Math.min(maxHpOf(taken), taken.hp + PICKUP.health.heal);
     }
     emit(world, { type: 'pickupTaken', x: pk.x, z: pk.z, kind: pk.type, id: pk.id, by: taken.id });
   }
@@ -1951,6 +2310,27 @@ function stepPings(world) {
   world.pings = world.pings.filter((q) => q.until > world.time);
 }
 
+/**
+ * Is this player currently lit up by a Scout sweep, as seen by `viewer`?
+ *
+ * Asked from the VIEWER's side, never stored on the target. A "revealed" flag
+ * on the enemy would have to ride in synced state, and synced state goes to
+ * everyone — which would hand the revealed player the news that they had been
+ * spotted. The whole value of the information is that they do not know.
+ */
+export function revealedTo(world, target, viewer) {
+  if (!viewer || !target || !target.alive) return false;
+  if (viewer.team === null || target.team === viewer.team) return false;
+  return world.time < (world.reveal?.[viewer.team] ?? 0);
+}
+
+/** Deployed feeders this player may see and use. Team-mates only. */
+export function padsFor(world, id) {
+  const p = world.players.get(id);
+  if (!p) return [];
+  return world.pads.filter((q) => (p.team === null ? q.by === id : q.team === p.team));
+}
+
 /** Markers this player is allowed to see. Team-mates only, always. */
 export function pingsFor(world, id) {
   const p = world.players.get(id);
@@ -1976,6 +2356,11 @@ export function snapshot(world) {
     bomb: world.bomb ? { ...world.bomb } : null,
     potato: world.potato ? { x: world.potato.x, z: world.potato.z, holder: world.potato.holder, fuse: world.potato.fuse } : null,
     teamScores: world.teamScores ? [...world.teamScores] : null,
+    // Roles put two things in the snapshot: whose sweep is live, and what is
+    // on the floor. Both are per-team, and both are filtered before they reach
+    // a client — see revealedTo and padsFor.
+    reveal: [...world.reveal],
+    pads: world.pads.map((q) => ({ ...q })),
     hill: world.hill
       ? { holder: world.hill.holder, contested: world.hill.contested,
         x: world.hill.x, z: world.hill.z, moveAt: world.hill.moveAt }
@@ -1990,7 +2375,15 @@ export function snapshot(world) {
       // The ladder. `level` is what everyone sees above your head; `xp` and
       // `nextXp` are what draws your own bar.
       level: p.level, xp: p.xp, nextXp: xpForLevel(p.level + 1),
+      // Roles. `maxHp` rides along because it is a role stat now: a health bar
+      // drawn against a hardcoded 100 would show a Bruiser permanently
+      // overflowing and a Sniper permanently nearly dead.
+      role: p.role, maxHp: maxHpOf(p),
+      ability: roleDef(p.role).ability,
+      abilityCharges: p.abilityCharges, abilityMax: abilityMax(p),
+      abilityIn: p.abilityCharges >= abilityMax(p) ? 0 : Math.max(0, p.abilityAt - world.time),
       wind: p.windUntil > world.time, frenzy: p.frenzyUntil > world.time,
+      bulwark: p.bulwarkUntil > world.time, dashing: p.dashUntil > world.time,
       respawnIn: p.alive ? 0 : Math.max(0, p.respawnAt - world.time),
       kx: p.kx, kz: p.kz,
       nemesis: world.time < p.nemesisUntil ? p.nemesis : null,

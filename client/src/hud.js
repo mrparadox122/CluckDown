@@ -1,6 +1,7 @@
 import {
   QUICK_CHAT, PLAYER, MODES, MULTIKILL_NAMES, MODIFIERS, TEAM_NAMES, TEAM_COLORS, HILL,
   LEVELS, rungOf, xpForLevel, PINGS, pingDef, pingWedge, pingAngle,
+  ROLES, ROLE_LIST, roleDef, roleTier,
 } from '@cluckdown/shared';
 
 const $ = (id) => document.getElementById(id);
@@ -27,7 +28,7 @@ function el2(tag, cls, text) {
 }
 
 export class Hud {
-  constructor({ onChat, onPing }) {
+  constructor({ onChat, onPing, onRole, onAbility }) {
     this.root = $('hud');
     this.overlay = $('world-overlay');
     this.killfeed = $('killfeed');
@@ -42,6 +43,12 @@ export class Hud {
     this.modePill = $('mode-pill');
     this.respawnOverlay = $('respawn-overlay');
     this.respawnCount = $('respawn-count');
+    this.rolePicker = $('role-picker');
+    this.roleChip = $('role-chip');
+    this.abilityBtn = $('ability-btn');
+    this.sweepFlash = $('sweep-flash');
+    this.onRole = onRole;
+    this.onAbility = onAbility;
     this.touchHint = $('touch-hint');
     this.netStatsEl = $('netstats');
     this.objectiveEl = $('objective');
@@ -65,6 +72,8 @@ export class Hud {
     this.buildQuickChat();
     this.buildPingWheel();
     this.bindChatInput();
+    this.buildRolePicker();
+    this.bindAbility();
   }
 
   show() {
@@ -82,7 +91,10 @@ export class Hud {
     for (const p of this.plates.values()) p.remove();
     this.plates.clear();
     if (this.fuseRing) { this.fuseRing.remove(); this.fuseRing = null; }
+    this.respawnLeft = 0;
+    this.pickerUp = false;
     this.respawnOverlay.classList.add('hidden');
+    this.respawnOverlay.classList.remove('picking');
     this.touchHint.style.opacity = '';
     this.netStatsEl.replaceChildren();
     this.objectiveEl.classList.add('hidden');
@@ -91,6 +103,13 @@ export class Hud {
     this.promptEl.classList.add('hidden');
     this.promptShown = null;
     this.setKilledBy(null);
+    this.pickerShown = null;
+    this.shownRole = null;
+    this.shownAbility = null;
+    this.rolePicker.classList.add('hidden');
+    this.roleChip.classList.add('hidden');
+    this.abilityBtn.classList.add('hidden');
+    this.sweepFlash.classList.remove('on');
     this.closePingWheel();
     this.clearMarkers();
     this.roomChip.classList.add('hidden');
@@ -438,10 +457,17 @@ export class Hud {
     }
 
     const hp = Math.max(0, Math.round(self.hp));
-    if (hp !== this.shownHp) {
+    const cap = Math.max(1, self.maxHp ?? PLAYER.maxHp);
+    // Keyed on the CAP as well: swapping role at a respawn can leave the number
+    // identical while the bar it is drawn against has changed underneath it.
+    if (hp !== this.shownHp || cap !== this.shownMaxHp) {
       this.shownHp = hp;
+      this.shownMaxHp = cap;
       const fill = $('hp-fill');
-      const frac = hp / PLAYER.maxHp;
+      // Against the ROLE's max, not a hardcoded 100 — a Bruiser at 180 would
+      // otherwise show a permanently overflowing bar and a Sniper at 60 a
+      // permanently dying one.
+      const frac = hp / cap;
       fill.style.width = `${frac * 100}%`;
       fill.classList.toggle('warn', frac <= 0.55 && frac > 0.28);
       fill.classList.toggle('hurt', frac <= 0.28);
@@ -806,7 +832,11 @@ export class Hud {
       ? `LEVEL ${ev.level}  ${String(ev.name).toUpperCase()}`
       : `DEMOTED  ${String(ev.name).toUpperCase()}`;
     $('rung-up-rank').style.color = ev.color;
-    $('rung-up-perk').textContent = ev.perk ?? '';
+    // The perk comes from the ROLE's tier list now, so the banner says which
+    // ladder it came off. "RUNNER · DOUBLE DASH" is a sentence; "DOUBLE DASH"
+    // on its own is a phrase a player who just swapped role cannot place.
+    const role = ev.role ? roleDef(ev.role).name.toUpperCase() : '';
+    $('rung-up-perk').textContent = ev.perk ? (role ? `${role} · ${ev.perk}` : ev.perk) : '';
     $('rung-up-blurb').textContent = ev.blurb ?? '';
     box.classList.remove('show');
     void box.offsetWidth;
@@ -886,7 +916,7 @@ export class Hud {
       plate.style.display = '';
       plate.style.transform = `translate(${pos.x}px, ${pos.y}px) translate(-50%, -100%)`;
 
-      const ratio = Math.max(0, Math.min(1, p.hp / PLAYER.maxHp));
+      const ratio = Math.max(0, Math.min(1, p.hp / Math.max(1, p.maxHp ?? PLAYER.maxHp)));
       plate.querySelector('.np-fill').style.transform = `scaleX(${ratio})`;
       plate.classList.toggle('is-hurt', ratio <= 0.6 && ratio > 0.3);
       plate.classList.toggle('is-critical', ratio <= 0.3);
@@ -969,7 +999,13 @@ export class Hud {
       dot.style.background = p.shade ?? p.color;
       const k = el('div', 'sb-k');
       k.append(el('b', null, String(p.kills)), document.createTextNode(` / ${p.deaths}`));
-      r.append(dot, el('div', 'sb-name', p.name + (p.isBot ? ' 🤖' : '')), k);
+      // The role icon, on both sides. It is not a secret and could not be one:
+      // max health is a role stat, so every client needs every player's role
+      // just to draw their health bar the right length.
+      const icon = p.role ? el('span', 'sb-role', roleDef(p.role).icon) : null;
+      if (icon) icon.style.color = roleDef(p.role).color;
+      const name = el('div', 'sb-name', p.name + (p.isBot ? ' 🤖' : ''));
+      r.append(dot, name, ...(icon ? [icon] : []), k);
       return r;
     };
 
@@ -994,13 +1030,180 @@ export class Hud {
     this.scoreboard.replaceChildren(...out);
   }
 
-  setRespawn(seconds) {
-    if (seconds > 0) {
-      this.respawnOverlay.classList.remove('hidden');
-      this.respawnCount.textContent = String(Math.ceil(seconds));
-    } else {
-      this.respawnOverlay.classList.add('hidden');
+  // ------------------------------------------------------------------ roles
+
+  /**
+   * The picker, built once and then only re-labelled.
+   *
+   * Six cards, always all six. A taken role is drawn greyed rather than
+   * removed, because "your roost already has a Medic" is exactly the
+   * information a picker exists to give — and a list that changes length as
+   * team-mates choose is a list you have to re-read every death.
+   */
+  buildRolePicker() {
+    this.roleCards = new Map();
+    const cards = [];
+    for (const id of ROLE_LIST) {
+      const def = ROLES[id];
+      const card = el('button', 'role-card');
+      card.type = 'button';
+      card.style.color = def.color;
+      const top = el('div', 'role-card-top');
+      top.append(el('span', 'role-card-icon', def.icon), el('span', 'role-card-name', def.name));
+      const perk = el('div', 'role-card-perk');
+      card.append(top, el('div', 'role-card-what', def.what), perk, el('span', 'role-card-by'));
+      card.addEventListener('click', () => this.pickRole(id));
+      // The slot number, so the keyboard shortcut is discoverable rather than
+      // documented — a key nobody knows about is a key nobody presses.
+      top.prepend(el('span', 'role-card-key', String(cards.length + 1)));
+      this.roleCards.set(id, card);
+      cards.push(card);
     }
+    this.roleHint = el('div', 'role-hint', 'PICK ANY TIME — YOU RESPAWN IN WHAT YOU HAVE');
+    this.rolePicker.replaceChildren(...cards, this.roleHint);
+  }
+
+  /**
+   * Draws the picker for the current state of the roost.
+   *
+   * @param mine    the role in effect (or queued) for this player
+   * @param taken   roles a team-mate is holding
+   * @param level   this player's rung, so each card can name what it buys NOW
+   */
+  setRolePicker({ visible, mine, taken = [], level = 1, teamed = true }) {
+    this.pickerUp = !!visible;
+    this.syncDeathScreen();
+    if (!visible) {
+      this.rolePicker.classList.add('hidden');
+      this.pickerShown = null;
+      return;
+    }
+    this.rolePicker.classList.remove('hidden');
+    // Seeded from whatever they are actually playing, so a player who has never
+    // opened this screen is not reported as having been denied anything.
+    this.wantedRole ??= mine;
+    const forced = !!this.wantedRole && this.wantedRole !== mine && taken.includes(this.wantedRole);
+    const key = `${mine}|${taken.join(',')}|${level}|${forced}|${teamed}`;
+    if (this.pickerShown === key) return;
+    this.pickerShown = key;
+
+    for (const [id, card] of this.roleCards) {
+      // Team-only roles are not offered in a 1v1 — the simulation refuses them
+      // there too, and a card that greys out for a different reason than
+      // "somebody has it" still needs to say so.
+      const soloBlocked = !teamed && !!ROLES[id].teamOnly;
+      const isTaken = (taken.includes(id) && id !== mine) || soloBlocked;
+      card.classList.toggle('picked', id === mine);
+      card.classList.toggle('taken', isTaken);
+      card.disabled = isTaken;
+      card.querySelector('.role-card-perk').textContent = roleTier(id, level).perk;
+      card.querySelector('.role-card-by').textContent = soloBlocked ? 'TEAMS ONLY' : (isTaken ? 'TAKEN' : '');
+    }
+    this.roleHint.textContent = forced
+      ? 'YOUR ROLE WAS TAKEN — PICK ANOTHER'
+      : 'PICK ANY TIME — YOU RESPAWN IN WHAT YOU HAVE';
+  }
+
+  /**
+   * Picks a role, from a tap or from a number key.
+   *
+   * `wantedRole` is latched optimistically. Whether the pick LANDS is the
+   * server's call, but what they wanted is the client's business — and it is
+   * the only way the picker can tell "I chose this" from "mine was taken".
+   */
+  pickRole(id) {
+    if (!ROLES[id] || this.roleCards.get(id)?.disabled) return;
+    this.wantedRole = id;
+    this.onRole?.(id);
+  }
+
+  /** Forces the next setRolePicker to redraw, past its own change check. */
+  repaintRolePicker() { this.pickerShown = null; }
+
+  /** The chip in the vitals cluster: what you are. */
+  setRole(role) {
+    if (role === this.shownRole) return;
+    this.shownRole = role;
+    if (!role) { this.roleChip.classList.add('hidden'); return; }
+    const def = roleDef(role);
+    this.roleChip.classList.remove('hidden');
+    this.roleChip.style.color = def.color;
+    $('role-chip-icon').textContent = def.icon;
+    $('role-chip-name').textContent = def.name;
+  }
+
+  bindAbility() {
+    // pointerdown, not click: a thumb that presses and slides off a button
+    // never produces a click, and this is a button pressed mid-sprint.
+    this.abilityBtn.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      this.onAbility?.();
+    });
+  }
+
+  /**
+   * The ability button.
+   *
+   * Hidden outright for the four roles that have no active ability — a dead
+   * button is a thumb-sized piece of a phone screen spent saying "nothing
+   * here". Empty-but-visible is different: that is a button you WILL reach for
+   * again in two seconds, so it stays put and greys out.
+   */
+  setAbility(self) {
+    const kind = self?.role ? roleDef(self.role).ability : null;
+    const active = kind === 'dash' || kind === 'pad';
+    if (!active) {
+      if (this.shownAbility !== 'none') {
+        this.shownAbility = 'none';
+        this.abilityBtn.classList.add('hidden');
+      }
+      return;
+    }
+    this.abilityBtn.classList.remove('hidden');
+
+    const charges = self.abilityCharges ?? 0;
+    const max = Math.max(1, self.abilityMax ?? 1);
+    const key = `${kind}|${charges}|${max}`;
+    if (this.shownAbility !== key) {
+      this.shownAbility = key;
+      $('ability-label').textContent = kind === 'dash' ? 'DASH' : 'FEEDER';
+      $('ability-charges').textContent = max > 1 ? String(charges) : '';
+      this.abilityBtn.classList.toggle('empty', charges <= 0);
+    }
+    // The sweep is not cached: it moves every frame, which is the point of it.
+    const total = Math.max(0.001, ABILITY_COOL[kind] ?? 1);
+    const left = self.abilityIn ?? 0;
+    $('ability-cool').style.height = `${Math.max(0, Math.min(1, left / total)) * 100}%`;
+  }
+
+  /** Scout vision: the edges light while your side can see through walls. */
+  setSweep(secondsLeft) {
+    this.sweepFlash.classList.toggle('on', (secondsLeft ?? 0) > 0);
+  }
+
+  setRespawn(seconds) {
+    this.respawnLeft = seconds;
+    if (seconds > 0) this.respawnCount.textContent = String(Math.ceil(seconds));
+    this.syncDeathScreen();
+  }
+
+  /**
+   * One place decides whether the overlay is up, because two things want it.
+   *
+   * Death is the obvious one. The other is warmup, where the picker appears
+   * before anyone has died at all — and the picker lives INSIDE this overlay,
+   * so hiding it on `respawnIn === 0` would mean the one screen a player is
+   * meant to choose their first role on never appears.
+   *
+   * `.picking` is the warmup dress: no countdown, no "you got clucked", and a
+   * far lighter backdrop, because there is a whole arena behind it that people
+   * are already running around in.
+   */
+  syncDeathScreen() {
+    const dead = (this.respawnLeft ?? 0) > 0;
+    const show = dead || this.pickerUp;
+    this.respawnOverlay.classList.toggle('hidden', !show);
+    this.respawnOverlay.classList.toggle('picking', !dead && this.pickerUp);
   }
 
   /**
@@ -1039,6 +1242,11 @@ export class Hud {
     if (info.name) el.append(el2('span', 'kb-revenge', '⚔ MARKED FOR REVENGE'));
   }
 }
+
+// Longest cooldown each ability has at any tier, so the sweep on the button is
+// drawn against a fixed height rather than jumping every time a level-up
+// shortens it. Only the fill needs to be honest; the scale does not.
+const ABILITY_COOL = { dash: 4, pad: 16 };
 
 // How each damage source reads in the killed-by panel.
 const KILL_KINDS = {

@@ -157,6 +157,16 @@
       <h2 class="lobby-title">Vote for a map</h2>
       <p id="lobby-sub" class="tagline">Everyone picks — most votes wins</p>
       <div id="map-choices" class="map-choices"></div>
+      <!-- The FIRST role pick, and this is where it belongs. Warmup is 1.5
+           seconds, which is nowhere near long enough to read six cards — the
+           lobby is already several seconds of a player waiting with nothing to
+           do, so the pick costs nothing here and would cost a spawn anywhere
+           else. Same rule as the respawn picker: your last role is already
+           selected, and doing nothing is a valid answer. -->
+      <div class="lobby-role">
+        <div class="lobby-role-head">Your role<span id="lobby-role-note"></span></div>
+        <div id="lobby-roles" class="lobby-roles"></div>
+      </div>
       <div class="lobby-timer"><i id="lobby-bar"></i></div>
       <div id="lobby-status" class="menu-status"></div>
     </div>
@@ -217,6 +227,14 @@
       <span>PING</span>
     </button>
     <div id="ping-wheel" class="ping-wheel hidden"></div>
+    <!-- The role's ability, for the two roles that have one. Hidden entirely
+         for the other four rather than shown greyed out — a dead button is a
+         thumb-sized piece of a phone screen spent saying "nothing here". -->
+    <button id="ability-btn" class="ability-btn hidden" type="button" aria-label="Ability">
+      <span id="ability-label" class="ability-label">DASH</span>
+      <span id="ability-charges" class="ability-charges"></span>
+      <i id="ability-cool" class="ability-cool"></i>
+    </button>
     <!-- Bottom-centre strips.
          These MUST be direct children of #hud. Nested inside .hud-top they
          positioned against it instead of the viewport, and .hud-top grows with
@@ -232,6 +250,12 @@
       <!-- The rung, and progress to the next one. Above the health bar because
            it is the thing that changes least often and matters most: health is
            this second, the ladder is the whole match. -->
+      <!-- What you are. Above the rung because the rung is how far you have
+           climbed and this is which ladder you are on. -->
+      <div id="role-chip" class="role-chip hidden">
+        <span id="role-chip-icon" class="role-chip-icon"></span>
+        <span id="role-chip-name" class="role-chip-name"></span>
+      </div>
       <div class="rung-row">
         <div id="rung-badge" class="rung-badge">1</div>
         <div class="rung-body">
@@ -278,6 +302,11 @@
       </div>
     </div>
 
+    <!-- A Scout sweep is information, and information has to be felt or nobody
+         acts on it. The edge glow says "we can see them right now" without
+         costing a line of HUD. -->
+    <div id="sweep-flash" class="sweep-flash"></div>
+
     <div id="scoreboard" class="scoreboard"></div>
     <div id="announcer" class="announcer"></div>
     <!-- The level-up payoff. Its own element rather than the announcer, because
@@ -297,7 +326,14 @@
              Not knowing why you died is what makes a shooter feel unfair; "12 HP
              left" turns a frustration into a near miss. -->
         <div id="killed-by" class="killed-by hidden"></div>
-        <div class="respawn-sub">Spectating…</div>
+        <!-- THE PICKER IS NOT A GATE. Respawn is three seconds and time to
+             action is already a known problem here, so this screen never waits
+             for you: your last role is pre-selected, the countdown runs the
+             whole time, and doing nothing respawns you on time in what you
+             were already playing. It is only a decision when a team-mate has
+             taken your role out from under you. -->
+        <div id="role-picker" class="role-picker hidden"></div>
+        <div id="respawn-sub" class="respawn-sub">Spectating…</div>
       </div>
     </div>
 
@@ -311,7 +347,7 @@
       <h2 id="results-title">Match over</h2>
       <div id="podium" class="podium"></div>
       <table class="results-table">
-        <thead><tr><th>#</th><th>Chicken</th><th>K</th><th>D</th><th>DMG</th><th>Score</th></tr></thead>
+        <thead><tr><th>#</th><th>Chicken</th><th>Role</th><th>K</th><th>D</th><th>DMG</th><th>HEAL</th><th>Score</th></tr></thead>
         <tbody id="results-rows"></tbody>
       </table>
       <div id="results-rating" class="results-rating"></div>

@@ -40,6 +40,19 @@ defineTypes(PlayerState, {
   nextXp: 'uint16',
   wind: 'boolean',    // Second Wind is running
   frenzy: 'boolean',  // Feeding Frenzy is running
+  // ROLES. The id only: max health, damage, fire rate and the whole tier list
+  // are pure functions of (role, level) in shared/src/roles.js, and both sides
+  // have both numbers — so syncing the derived stats would be sending a client
+  // things it can already work out.
+  //
+  // The two ability fields are the exception, because they are STATE rather
+  // than tuning: how many charges are in hand, and how long until the next one.
+  role: 'string',
+  abilityCharges: 'uint8',
+  abilityIn: 'float32',
+  bulwark: 'boolean',  // Bruiser's brace is up
+  dashing: 'boolean',  // Runner is mid-burst
+  healGiven: 'uint16', // for the scoreboard: the Medic's version of damage
   // Grain. `crop` is your own ammo counter; `pecking` and `feeding` are synced
   // for EVERYONE because they are the tell — a chicken with its head down is
   // reloading, and reading that off another player is the point of making the
@@ -77,6 +90,22 @@ defineTypes(PlayerState, {
   contractAt: 'float32',   // seconds left
   contractGoal: 'float32',
   contractDone: 'float32', // progress toward the goal
+});
+
+/**
+ * An Engineer's deployed feeder.
+ *
+ * Synced to EVERYONE, unlike a ping. A pad is a physical object standing on the
+ * floor — an enemy can see it, walk up to it and shoot the chicken eating off
+ * it. Hiding it would remove the counterplay rather than protect information.
+ */
+export class PadState extends Schema {}
+defineTypes(PadState, {
+  x: 'float32',
+  z: 'float32',
+  team: 'int8',
+  radius: 'float32',
+  until: 'float32', // seconds left
 });
 
 /** One team's nest: home base in Egg Heist, plant site in Plant & Defuse. */
@@ -131,6 +160,7 @@ export class ArenaState extends Schema {
     this.mapChoices = new ArraySchema();
     this.nests = new ArraySchema();
     this.eggs = new MapSchema();
+    this.pads = new MapSchema();
   }
 }
 defineTypes(ArenaState, {
@@ -170,6 +200,13 @@ defineTypes(ArenaState, {
   bombFuse: 'float32',
   bombPlant: 'float32',   // 0..1 plant progress
   bombDefuse: 'float32',  // 0..1 defuse progress
+  // Scout sweeps, one clock per team: seconds of reveal left for that side.
+  // Enemy positions are already in synced state — they have to be, to draw the
+  // chickens — so a reveal is a rendering decision the client makes, not a
+  // secret. Two floats is the whole feature on the wire.
+  revealBlue: 'float32',
+  revealRed: 'float32',
+  pads: { map: PadState },
   players: { map: PlayerState },
   pickups: { map: PickupState },
   nests: [NestState],

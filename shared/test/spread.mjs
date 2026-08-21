@@ -48,8 +48,11 @@ function volley({ state = 'still', range = 12, rounds = 600 } = {}) {
   // a hit that nobody fired would be counted here as accuracy.
   world.bomberSpawnAt = Infinity;
 
-  const me = addPlayer(world, { id: 'me', name: 'me', seat: 0 });
-  const foe = addPlayer(world, { id: 'foe', name: 'foe', seat: 1 });
+  // Scout is the BASELINE GUN: damage 1x, fire rate 1x, no falloff and no
+  // spread penalty. Roles change all four, so a test measuring the gun has to say
+  // which gun — otherwise it silently measures whichever role sorts first.
+  const me = addPlayer(world, { id: 'me', name: 'me', seat: 0, role: 'scout' });
+  const foe = addPlayer(world, { id: 'foe', name: 'foe', seat: 1, role: 'scout' });
   me.invulnUntil = 0;
   foe.invulnUntil = 0;
 
@@ -210,7 +213,7 @@ console.log('\n--- the roll happens on the authority ---');
   const world = createWorld({ mode: 'casual', seed: 7 });
   world.phase = 'live';
   world.time = 2;
-  const me = addPlayer(world, { id: 'me', name: 'me', seat: 0 });
+  const me = addPlayer(world, { id: 'me', name: 'me', seat: 0, role: 'scout' });
   me.invulnUntil = 0;
   for (let t = 0; t < 30; t++) {
     me.x = 0; me.z = 0;

@@ -7,6 +7,9 @@ const DEFAULTS = {
   name: '',
   rating: 1000,
   mode: 'casual',
+  // Last role played. The picker defaults to it, which is what lets a player
+  // respawn on time by doing nothing at all.
+  role: 'runner',
   matches: 0,
   kills: 0,
   deaths: 0,

@@ -139,6 +139,21 @@ export class PlayerView {
     this.flame.isPickable = false;
     this.flame.setEnabled(false);
 
+    // SPOTTED, by a Scout sweep. A chevron above the head that draws THROUGH
+    // walls, which is the whole point of the ability.
+    //
+    // The trick is renderingGroupId, not a depth hack: Babylon clears the depth
+    // buffer between rendering groups, so anything in a later group is drawn on
+    // top of everything in an earlier one. That is one property instead of a
+    // custom material with depthFunction ALWAYS, and it survives the glow layer.
+    this.spot = MeshBuilder.CreatePolyhedron('spot', { type: 0, size: 0.19 }, scene);
+    this.spot.material = emissiveMat(scene, 'spotMat', '#c77dff', { intensity: 1.0 });
+    this.spot.parent = this.root;
+    this.spot.position.y = 2.5;
+    this.spot.renderingGroupId = 2;
+    this.spot.isPickable = false;
+    this.spot.setEnabled(false);
+
     // Bounty crown. A gold bar above the head reads instantly at this camera
     // angle, and it doubles as "shoot this one".
     this.crown = MeshBuilder.CreateBox('crown', { width: 0.62, height: 0.2, depth: 0.5 }, scene);
@@ -266,6 +281,14 @@ export class PlayerView {
       if (target.bounty) {
         this.crown.rotation.y += dt * 1.6;
         this.crown.position.y = 2.15 + Math.sin(this.bob * 0.8) * 0.06;
+      }
+    }
+
+    if (this.spot) {
+      this.spot.setEnabled(!!target.spotted);
+      if (target.spotted) {
+        this.spot.rotation.y += dt * 3;
+        this.spot.position.y = 2.5 + Math.sin(this.bob * 1.4) * 0.09;
       }
     }
 
@@ -511,6 +534,66 @@ export class NestView {
 }
 
 /** A single egg on the floor, dropped by a carrier who died. */
+/**
+ * An Engineer's deployed feeder.
+ *
+ * Drawn like the rally pad it is a portable copy of, deliberately: a player who
+ * has already learned "stand on the glowing disc to refill" needs no second
+ * lesson, and inventing a new visual language for the same mechanic is how a
+ * game ends up with two of everything.
+ *
+ * It fades out over its last two seconds rather than vanishing, so the team
+ * standing on it gets a warning instead of a surprise.
+ */
+export class PadView {
+  constructor(scene, pad, color) {
+    this.scene = scene;
+    this.t = Math.random() * 6;
+
+    this.disc = MeshBuilder.CreateCylinder(`padDisc${pad.id}`, {
+      diameter: pad.radius * 2, height: 0.06, tessellation: 24,
+    }, scene);
+    this.disc.position.set(pad.x, 0.035, pad.z);
+    this.disc.material = emissiveMat(scene, `padDiscMat${pad.id}`, color, {
+      intensity: 0.5, alpha: 0.2, cache: false,
+    });
+    this.disc.isPickable = false;
+
+    this.ring = MeshBuilder.CreateTorus(`padRing${pad.id}`, {
+      diameter: pad.radius * 2, thickness: 0.11, tessellation: 26,
+    }, scene);
+    this.ring.position.set(pad.x, 0.08, pad.z);
+    this.ring.material = emissiveMat(scene, `padRingMat${pad.id}`, color, {
+      intensity: 1.0, cache: false,
+    });
+    this.ring.isPickable = false;
+
+    // A grain hopper in the middle, so it reads as an object someone put there
+    // rather than as a decal on the floor.
+    this.post = MeshBuilder.CreateCylinder(`padPost${pad.id}`, {
+      diameterTop: 0.34, diameterBottom: 0.16, height: 0.5, tessellation: 8,
+    }, scene);
+    this.post.position.set(pad.x, 0.25, pad.z);
+    this.post.material = emissiveMat(scene, 'padPostMat', '#ffcc3d', { intensity: 0.8 });
+    this.post.isPickable = false;
+  }
+
+  sync(pad, dt) {
+    this.t += dt;
+    this.post.rotation.y = this.t * 1.4;
+    // The last two seconds blink. Losing your cover is worth a warning.
+    const fade = pad.until < 2 ? 0.35 + 0.65 * Math.abs(Math.sin(this.t * 7)) : 1;
+    this.ring.visibility = fade;
+    this.post.visibility = fade;
+  }
+
+  dispose() {
+    this.disc.dispose();
+    this.ring.dispose();
+    this.post.dispose();
+  }
+}
+
 export class LooseEggView {
   constructor(scene) {
     this.mesh = MeshBuilder.CreateSphere('looseEgg', {

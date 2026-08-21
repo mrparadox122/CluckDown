@@ -34,7 +34,10 @@ function arena({ modifier = 'none' } = {}) {
 }
 
 const add = (world, id, seat, x, z) => {
-  const p = addPlayer(world, { id, name: id, seat });
+  // Scout is the BASELINE GUN: damage 1x, fire rate 1x, no falloff and no
+  // spread penalty. Roles change all four, so a test measuring the gun has to say
+  // which gun — otherwise it silently measures whichever role sorts first.
+  const p = addPlayer(world, { id, name: id, seat, role: 'scout' });
   p.x = x; p.z = z; p.invulnUntil = 0;
   return p;
 };

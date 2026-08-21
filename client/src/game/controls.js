@@ -33,6 +33,9 @@ import { Look } from './look.js';
 // served everyone — hence the sensitivity slider in Settings.
 // Z for the team wheel: within reach of WASD, and not already spoken for.
 const PING_KEY = 'KeyZ';
+// Q for the role ability: under the left hand, next to WASD, and the key every
+// shooter and MOBA has already trained people to reach for.
+const ABILITY_KEY = 'KeyQ';
 
 const FP_MOUSE_SENS = 0.0022;
 const FP_TOUCH_SENS = 0.0052;
@@ -117,6 +120,17 @@ export class Controls {
       if (e.code === 'Space') e.preventDefault();
       // Hold to aim the wheel, tap to send the first intent — see setPingOpen.
       if (e.code === PING_KEY) { e.preventDefault(); this.setPingOpen(true); }
+      // Edge-triggered, unlike fire and jump: an ability is a decision, and
+      // `repeat` would spend every charge a Runner has on one held key.
+      if (e.code === ABILITY_KEY && !e.repeat) { e.preventDefault(); this.onAbility?.(); }
+      // 1-6 pick a role, and they exist because of pointer lock: a locked
+      // cursor cannot click a HUD button, so a mouse player choosing a role
+      // would have to press Esc, click, and re-enter the game — three actions
+      // inside a three-second respawn. A number key is one.
+      if (!e.repeat && e.code.startsWith('Digit')) {
+        const slot = Number(e.code.slice(5));
+        if (slot >= 1 && slot <= 6) { e.preventDefault(); this.onRolePick?.(slot - 1); }
+      }
     };
     this.onKeyUp = (e) => {
       this.keys.delete(e.code);

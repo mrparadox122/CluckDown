@@ -31,8 +31,11 @@ const check = (l, c, d = '') => {
 
 function live(mode = 'casual', modifier = 'none', map = 'coop') {
   const w = createWorld({ mode, seed: 3, modifier });
-  const p = addPlayer(w, { id: 'a', name: 'A', seat: 0 });
-  addPlayer(w, { id: 'b', name: 'B', seat: 1 });
+  // Scout is the BASELINE GUN: damage 1x, fire rate 1x, no falloff and no
+  // spread penalty. Roles change all four, so a test measuring the gun has to say
+  // which gun — otherwise it silently measures whichever role sorts first.
+  const p = addPlayer(w, { id: 'a', name: 'A', seat: 0, role: 'scout' });
+  addPlayer(w, { id: 'b', name: 'B', seat: 1, role: 'scout' });
   beginMatch(w, map);
   for (let t = 0; t < 2 / TICK_DT && w.phase !== 'live'; t++) stepWorld(w, TICK_DT);
   return { w, p };
