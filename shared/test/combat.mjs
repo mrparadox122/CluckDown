@@ -403,8 +403,16 @@ console.log('\nHEADSHOTS');
     `head ${BULLET.headFrom} vs eye ${PLAYER.eyeHeight}`);
   check('...and below the top of the hitbox, or it is unreachable',
     BULLET.headFrom < PLAYER.hitHeight, `${BULLET.headFrom} vs ${PLAYER.hitHeight}`);
-  check('a headshot is worth several body shots', BULLET.headDamage > BULLET.damage * 3,
-    `${BULLET.damage} vs ${BULLET.headDamage}`);
+  // Measured in SHOTS TO KILL rather than as a damage ratio, because that is
+  // what a player actually experiences and it is what survives body damage
+  // being retuned. Half the shots is the floor: below that, going for the head
+  // is a small bonus rather than the decision the fight turns on.
+  const bodyShots = Math.ceil(PLAYER.maxHp / BULLET.damage);
+  const headShots = Math.ceil(PLAYER.maxHp / BULLET.headDamage);
+  check('a headshot kills in at most half the shots of a body shot',
+    headShots * 2 <= bodyShots, `${bodyShots} body vs ${headShots} head`);
+  check('...but never in one, which would make whiffing the only outcome that matters',
+    headShots >= 2, `${headShots} head shot(s)`);
 
   const level = shoot({ at: [0, 0, 12], pitch: 0 });
   console.log(`  level shot at 12u: ${level.damage} damage, head=${level.ends[0]?.head}`);

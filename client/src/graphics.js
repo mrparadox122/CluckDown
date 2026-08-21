@@ -72,6 +72,17 @@ const DEFAULTS = {
    * hear is rude. Opt in.
    */
   announcer: false,
+
+  /**
+   * Which voice says it. Empty means "pick the best one available".
+   *
+   * Stored by NAME rather than as the voice object, because the objects come
+   * from the browser and are neither serialisable nor stable across a reload —
+   * and the same device can gain or lose voices between sessions, so the name
+   * has to be treated as a preference that might not be honoured rather than a
+   * guarantee.
+   */
+  voice: '',
 };
 
 export const BRIGHTNESS_MIN = 0.6;
@@ -94,6 +105,7 @@ export function loadGfx() {
     merged.view = asView(merged.view);
     merged.brightness = clampBrightness(merged.brightness);
     merged.announcer = !!merged.announcer;
+    merged.voice = typeof merged.voice === 'string' ? merged.voice : '';
     return merged;
   } catch {
     return { ...DEFAULTS };
@@ -112,6 +124,7 @@ export function saveGfx(gfx) {
       view: asView(gfx.view),
       brightness: clampBrightness(gfx.brightness),
       announcer: !!gfx.announcer,
+      voice: typeof gfx.voice === 'string' ? gfx.voice : '',
     }));
   } catch {
     // Private mode — settings just won't persist.

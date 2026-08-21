@@ -501,7 +501,16 @@ function bindAudio() {
 
   // Browsers refuse to start audio outside a user gesture, so the very first
   // tap or keypress anywhere is what actually boots the audio engine.
-  const unlock = () => sfx.unlock();
+  tts.setVoice(gfx.voice);
+  tts.setEnabled(!!gfx.announcer);
+
+  const unlock = () => {
+    sfx.unlock();
+    // Same gesture, same reason: the first speak() of a page is much slower
+    // than the rest, and paying that here means the first callout of the match
+    // is not the late one.
+    tts.prime();
+  };
   window.addEventListener('pointerdown', unlock, { once: true });
   window.addEventListener('keydown', unlock, { once: true });
 
@@ -635,13 +644,50 @@ function bindGraphics() {
   // toggle for something you cannot see needs to demonstrate itself, or the
   // player has no idea whether it worked.
   const announcer = $('gfx-announcer');
+  const voicePick = $('gfx-voice');
   announcer.checked = !!gfx.announcer;
   announcer.addEventListener('change', (e) => {
     gfx = { ...gfx, announcer: e.target.checked };
     saveGfx(gfx);
     sfx.play('uiClick');
     tts.setEnabled(gfx.announcer);
-    if (gfx.announcer) tts.say('Announcer on', { priority: 5, key: 'announcerTest' });
+    voicePick.disabled = !gfx.announcer;
+    if (gfx.announcer) tts.say('Announcer on', { priority: 5, key: 'announcerTest', force: true });
+  });
+
+  // Which voice. Worth exposing rather than just picking one, because the set
+  // of installed voices differs on every device and the gap between the best
+  // and the worst of them is enormous — a good neural voice sells the callout
+  // and a robotic one actively cheapens it. The list is rebuilt on the
+  // browser's own event: it is routinely empty on first paint.
+  voicePick.disabled = !gfx.announcer;
+  tts.onVoices((voices) => {
+    const chosen = voicePick.value;
+    voicePick.innerHTML = '';
+    const auto = document.createElement('option');
+    auto.value = '';
+    auto.textContent = voices.length ? 'Best available' : 'No voices found';
+    voicePick.append(auto);
+    for (const v of voices) {
+      const opt = document.createElement('option');
+      opt.value = v.name;
+      // The name alone is ambiguous across accents on most platforms.
+      opt.textContent = `${v.name} (${v.lang})`;
+      voicePick.append(opt);
+    }
+    // A saved name for a voice this device does not have falls back to auto
+    // rather than to nothing, which is why this is set from the value rather
+    // than assumed to stick.
+    voicePick.value = chosen || gfx.voice || '';
+    if (voicePick.selectedIndex < 0) voicePick.value = '';
+  });
+  voicePick.addEventListener('change', (e) => {
+    gfx = { ...gfx, voice: e.target.value };
+    saveGfx(gfx);
+    tts.setVoice(gfx.voice);
+    // Speak the sample immediately. A voice you cannot hear is not a choice,
+    // and reading a name tells nobody what it sounds like.
+    tts.say('Headshot. Double kill.', { priority: 5, key: 'voiceTest', force: true });
   });
 
   // Aim assist. Live, like the fire-button editor below — it is a feel setting

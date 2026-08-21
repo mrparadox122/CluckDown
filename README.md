@@ -448,40 +448,72 @@ Two details that are load-bearing:
 Humans only. Bots already aim with deliberate error, and handing them assist on
 top would just make them snipers.
 
-## Bullet speed, and the test it made necessary
+## Shooting: hitscan, headshots, tagging
 
-Rounds travel at **52 units per second** with a **0.9s** life — about 47 units
-of reach. Raised from 30, on the report that shots felt slow.
+A player who came from CS and Valorant said shooting felt unsatisfying and could
+not say why. Raising the projectile speed — twice, 30 to 52 — did not fix it,
+because it was never a tuning problem. It was three physical models being the
+wrong ones.
 
-The complaint is really about **lead**. At 30 a round took half a second to
-cross fifteen units, which is long enough that hitting a moving chicken meant
-aiming where it *would be* rather than where it *is* — and a centre-screen
-crosshair you have to aim somewhere other than at the target feels wrong even
-when it is working. At 52 that shot lands in under three tenths, inside the
-window where it still reads as "I pointed and it hit".
+### 1. Shots are hitscan
 
-Still a projectile and not hitscan: the glowing tracer is most of what the game
-looks like, and an instant hit has nothing to draw. The tracer got longer with
-the speed, because a tracer is a fake motion blur and the faster the thing it
-stands in for, the longer that blur has to be.
+`traceShot` resolves the whole shot on the tick it is fired. There are no
+projectiles in the simulation at all any more, and `world.bullets` is gone.
 
-Life came *down* from 1.3 in the same change. Keeping it would have put the
-reach at 68 units — wider than the largest map — and turned every sightline into
-a duel.
+The reason is **lead**. CS and Valorant are hitscan, so a player trained on them
+never leads a target — they put the dot on it and click. Here a round still took
+a couple of tenths of a second to arrive, so every shot they fired landed behind
+where they were looking and the game felt like it was arguing with them. No
+amount of extra speed closes that, because any flight time at all is a different
+model.
 
-**The knock-on that matters.** A round now covers **0.87 units per tick** at
-60Hz, against a **0.76-unit** hit radius. It outruns its own hitbox: a naive
-point test would pass clean *through* a chicken between two ticks without ever
-being inside it. The swept segment test has always handled this, but at 30 units
-per second it barely had to — a 0.5-unit step fit inside the target, so even a
-point test would mostly have worked.
+It also *simplified* things. The old per-tick stepper did four jobs in sequence —
+clip to the floor, clip to the walls, clip to cover, then look for something
+alive in what was left — forty times per shot. It now does them once. The
+`bulletEnd` event is gone too: the `shot` event carries both ends of the line,
+because both were decided in the same instant.
 
-That failure does not look like a bug. Shots simply miss sometimes, more often
-at close range where the geometry is worst, and it reads as bad aim or bad
-netcode rather than as arithmetic. `test:combat` now fires at eight ranges from
-point blank to maximum and asserts every one connects — and asserts the
-per-tick step really does exceed the hit radius, so the check cannot quietly
-stop testing anything if the speed is ever lowered again.
+The tracer is still there and still travels, at `BULLET.tracerSpeed`. It is
+decoration animating toward an endpoint that has already been decided, which is
+exactly how a hitscan game draws one — and it means the streak can be as fast as
+it likes without touching the outcome.
+
+Aim assist and the bots both **stopped leading**, in the same change. Leading was
+correct for a projectile and is precisely wrong for a trace: it aims at the floor
+next to a moving chicken.
+
+### 2. Headshots
+
+`BULLET.headDamage` is 52 against a body's 11 — two clean headshots kill, versus
+ten body shots. That five-to-one payoff is deliberately enormous, because the
+other half of "shooting feels flat" was that every shot did the same damage
+wherever it landed. Aiming carefully and aiming vaguely paid identically; in CS,
+where you put the dot is the whole game.
+
+**The line has to sit above eye height, and the first attempt got that backwards.**
+`headFrom` started at 1.05 — the underside of the head box the renderer builds,
+which looks obviously right. Two chickens stand at the same height, so a shot
+fired dead level leaves one eye at 1.15 and arrives at the other at 1.15, inside
+the head. Every flat shot was a free headshot, time-to-kill collapsed to two
+rounds, and aim assist — which pulls to 0.99, *below* the line — was quietly
+making your shots worse. A test caught it, because DOUBLE DAMAGE started
+reporting 100 damage a hit.
+
+At **1.28** a level shot lands in the neck and body, and the head has to be aimed
+at: about 0.6 of a degree at duelling range, a few pixels of crosshair placement.
+That is the skill, and assist deliberately cannot reach it.
+
+### 3. Tagging, not knockback
+
+Bullets used to shove you across the floor. That is a projectile-game idea, and
+to anyone from a hitscan shooter it reads as the game taking the controls off
+you — the exact failure `PLAYER.maxKnockback` was added to bound. Being shot now
+**tags** you: a brief slow (`tagSlow`, `tagDuration`). The hit lands, you are
+meaningfully worse off, and you never stop steering.
+
+Explosions still throw you. Being thrown by a bomb is correct; being nudged
+around by rifle fire is not. `test:control` now proves the stronger version of
+its original claim — sustained gunfire moves a standing player *zero* units.
 
 ## Pickups
 
@@ -974,8 +1006,9 @@ npm install -D playwright && npx playwright install chromium
 | `test:levels` | The pecking order: the XP asymmetry both ways, every rung unlocking something named and measurable in the sim, the top being reachable but not farmable, and the three death-spiral guards |
 | `test:crop` | Grain: the crop empties, pecking refills progressively, the feeder heals only out of combat, and none of the anti-frustration rules can be regressed |
 | `test:view` | Third-person framing, headless and instant: the shot line meets the camera ray, a target under the crosshair is hit dead centre, the boom retracts off walls, and the camera never escapes the arena |
+| `test:tts` | The announcer, headless: the voice ranking (a neural voice beats a local one), a saved voice that has vanished falling back rather than going mute, voices arriving late, and every rule about what it refuses to say |
 | `test:control` | **Knockback can never take the wheel** — see below — plus movement symmetry on every map and in every mode, and the vertical axis: jump arcs, the height ceiling, air control, and that nothing but your own jump can lift you |
-| `test:combat` | Aim assist in both axes, the stacked fire-rate floor, **that fast rounds do not tunnel**, and shooting in 3D — over a target, onto a jumping one, down out of a jump, into the floor, over a wall |
+| `test:combat` | Aim assist in both axes, **that hits land on the same tick as the shot**, headshots (including that the head line sits above eye height), tagging instead of knockback, the stacked fire-rate floor, and shooting in 3D — over a target, onto a jumping one, down out of a jump, into the floor, over a wall |
 | `test:controls` | Desktop: camera at eye level and on the player, own body hidden, facing-relative movement, mouse look in both axes, `Space` jumps and `F` fires, the centre crosshair, the 1P/3P toggle, the sensitivity slider, world markers and the spectator orbit |
 | `test:fps-touch` | First person on an emulated phone: swipe-to-look **proportionality**, pitch and its clamp, FIRE and JUMP, jumping and firing and looking with three thumbs at once, and dragging both buttons to new homes |
 | `test:retention` | Killed-by panel, the nemesis ring, the auto-requeue countdown and its cancellation |

@@ -19,7 +19,8 @@
     "test:retention": "node test/retention.mjs",
     "test:fps-touch": "node test/fps-touch.mjs",
     "test:controls": "node test/controls.mjs",
-    "test:view": "node test/view.mjs"
+    "test:view": "node test/view.mjs",
+    "test:tts": "node test/tts.mjs"
   },
   "dependencies": {
     "@babylonjs/core": "^9.21.0",

@@ -164,7 +164,7 @@ export const PLAYER = {
 export const AIM_ASSIST = {
   enabled: true,
 
-  strength: 0.8,      // 0..1 share of the angle closed per second-ish (see sim)
+  strength: 0.6,      // 0..1 share of the angle closed per second-ish (see sim)
   cone: 0.5,          // radians (~29 deg) around your aim that can acquire a target
   stickyCone: 0.85,   // wider angle before an ALREADY-locked target is dropped
   range: 26,          // units; beyond this nothing is acquired
@@ -293,7 +293,7 @@ export const CROP = {
 export const BULLET = {
   radius: 0.16,
 
-  damage: 11,
+  damage: 19,
 
   /**
    * How far a shot reaches, in units. It gets there instantly — see traceShot.
@@ -355,7 +355,7 @@ export const BULLET = {
    * already been made — fast enough to read as instant, slow enough to be a
    * visible line rather than a single frame nobody sees.
    */
-  tracerSpeed: 190,
+  tracerSpeed: 450,
 
   /**
    * The tracer you can SEE, which is deliberately NOT `radius` above.
@@ -382,7 +382,7 @@ export const BULLET = {
 };
 
 export const BOMBER = {
-  radius: 0.7,
+  radius: 1.7,
   // Taller than a player because it is drawn at 1.25 scale. Bullets travel in
   // three dimensions now, so this is what stops a shot arcing over the bomber
   // from counting as a hit on it.
@@ -392,7 +392,7 @@ export const BOMBER = {
   detectRadius: 20,
   armRadius: 3.2,
   armSpeedMul: 0.62, // it slows once armed, giving you a window to run
-  fuse: 5,
+  fuse: 1,
   blastRadius: 6.5,
   blastDamageMax: 62,
   blastDamageMin: 18,
