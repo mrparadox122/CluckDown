@@ -14,7 +14,7 @@
 //   node shared/test/crop.mjs
 
 import {
-  createWorld, addPlayer, applyInput, stepWorld, beginMatch, spawnPoints,
+  createWorld, addPlayer, applyInput, stepWorld, beginMatch, feederFor,
   CROP, PLAYER, TICK_DT, cropCapacity, MODIFIER_POOL,
 } from '../src/index.js';
 
@@ -184,7 +184,7 @@ console.log('\n--- pecking ---');
 console.log('\n--- the feeder ---');
 {
   const g = live();
-  const pad = spawnPoints(g.w)[0];
+  const pad = feederFor(g.w, 0);
   g.p.x = pad.x; g.p.z = pad.z;
   g.p.crop = 0;
   g.p.hp = 40;
@@ -205,7 +205,7 @@ console.log('\n--- the feeder ---');
 // survivable at full health.
 {
   const g = live();
-  const pad = spawnPoints(g.w)[0];
+  const pad = feederFor(g.w, 0);
   g.p.x = pad.x; g.p.z = pad.z;
   g.p.crop = 0;
   g.p.hp = 40;
@@ -231,7 +231,7 @@ console.log('\n--- the feeder ---');
 // Somebody else's feeder is not yours.
 {
   const g = live();
-  const theirs = spawnPoints(g.w)[1];
+  const theirs = feederFor(g.w, 1); // the other roost's rally pad
   g.p.x = theirs.x; g.p.z = theirs.z;
   g.p.crop = 0;
   g.p.hp = 40;

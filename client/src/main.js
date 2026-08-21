@@ -1,6 +1,7 @@
 import './style.css';
 import {
   MODE_LIST, MODES, makeRoomCode, cleanRoomCode, MAPS, MAP_VOTE,
+  TEAM_NAMES, TEAM_COLORS,
 } from '@cluckdown/shared';
 import { findMatch, wakeServer, fetchServerStats, fetchRooms, joinRoomById, LocalSession } from './net.js';
 import { loadProfile, saveProfile, rankLabel, applyResult } from './profile.js';
@@ -10,7 +11,7 @@ import { sfx } from './audio/sfx.js';
 import { tts } from './audio/index.js';
 import {
   loadGfx, saveGfx, RESOLUTIONS, SENSITIVITY_MIN, SENSITIVITY_MAX, clampSensitivity,
-  BRIGHTNESS_MIN, BRIGHTNESS_MAX, clampBrightness,
+  BRIGHTNESS_MIN, BRIGHTNESS_MAX, clampBrightness, assistMode, assistOn,
 } from './graphics.js';
 import {
   blockZoomGestures, fullscreenSupported, isFullscreen, toggleFullscreen,
@@ -381,7 +382,20 @@ function showResults(result) {
   const ranking = result.ranking ?? [];
   const me = ranking.find((r) => r.id === selfId);
 
-  $('results-title').textContent = me?.place === 1 ? '🏆 Top Chicken!' : `You placed #${me?.place ?? '-'}`;
+  // In a team game the headline is the team result. Your placement still
+  // matters, but "we won" is the sentence a 4v4 has to answer first.
+  const titleEl = $('results-title');
+  if (result.winnerTeam === 0 || result.winnerTeam === 1) {
+    const won = me?.team === result.winnerTeam;
+    titleEl.textContent = `${won ? '🏆 ' : ''}${TEAM_NAMES[result.winnerTeam]} ${won ? 'wins!' : 'takes it'}`;
+    titleEl.style.color = TEAM_COLORS[result.winnerTeam];
+  } else if (result.teams) {
+    titleEl.textContent = 'Dead heat';
+    titleEl.style.color = '';
+  } else {
+    titleEl.textContent = me?.place === 1 ? '🏆 Top Chicken!' : `You placed #${me?.place ?? '-'}`;
+    titleEl.style.color = '';
+  }
 
   // Podium: 2nd, 1st, 3rd — so first place stands in the middle.
   const podium = $('podium');
@@ -420,7 +434,7 @@ function showResults(result) {
     const nameCell = document.createElement('td');
     const dot = document.createElement('span');
     dot.className = 'rt-dot';
-    dot.style.background = r.color;
+    dot.style.background = r.shade ?? r.color;
     nameCell.append(dot, document.createTextNode(r.name + (r.bot ? ' 🤖' : '')));
 
     tr.append(place, nameCell);
@@ -692,13 +706,17 @@ function bindGraphics() {
 
   // Aim assist. Live, like the fire-button editor below — it is a feel setting
   // and the only way to judge it is to try it.
+  //
+  // Three states rather than a checkbox: 'auto' asks the device, because the
+  // same feature helps a thumb and fights a mouse. `assistOn` resolves the mode
+  // to the boolean the controls actually take — see graphics.js.
   const assist = $('gfx-assist');
-  assist.checked = gfx.assist !== false;
+  assist.value = assistMode(gfx.assist);
   assist.addEventListener('change', (e) => {
-    gfx = { ...gfx, assist: e.target.checked };
+    gfx = { ...gfx, assist: assistMode(e.target.value) };
     saveGfx(gfx);
     sfx.play('uiClick');
-    game?.setAssist(gfx.assist);
+    game?.setAssist(assistOn(gfx.assist));
   });
 
   // Thumb-button layout editing. Also live: the whole point is to drag them

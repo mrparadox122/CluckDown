@@ -18,7 +18,7 @@ import '@babylonjs/core/Meshes/thinInstanceMesh';
 
 import { hardwareScaling } from '../graphics.js';
 import {
-  MAPS, DEFAULT_MAP, HILL, PLAYER, WALL_HEIGHT, coverFor, clamp,
+  MAPS, DEFAULT_MAP, HILL, PLAYER, WALL_HEIGHT, coverFor, clamp, feederPoints, CROP,
 } from '@cluckdown/shared';
 import { asView, tppCamera } from './view.js';
 
@@ -36,8 +36,17 @@ const FPS_EYE = PLAYER.eyeHeight;
 const FPS_FOV = 1.15;      // ~66 degrees
 const FPS_NEAR = 0.12;     // your own muzzle would clip against anything larger
 const FPS_YAW_LERP = 22;   // high: looking around must feel instant
-const FPS_RECOIL_KICK = 0.035;   // radians per shot
-const FPS_RECOIL_RECOVER = 9;    // per second
+
+// There is no recoil constant here any more, and that absence is load-bearing.
+//
+// The rig used to hold its own kick and render `pitch + this.recoil`, while the
+// input struct went out along the un-kicked `pitch`. The crosshair is nailed to
+// screen centre, so it rode the climbing camera and the bullets did not — up to
+// 0.12 radians of divergence under sustained fire, which is 1.4 units at
+// duelling range: a whole chicken above where rounds landed. Recoil is real
+// now and lives in the look angle itself (client/src/game/look.js), so the
+// camera and the shot are the same number and cannot come apart. Anything that
+// wants to move the view must move the aim, or it is drawing a lie.
 
 // Spectator orbit, used while dead. With no top-down view left, this is the
 // only overhead shot anyone ever gets.
@@ -177,7 +186,7 @@ export function litMat(scene, name, hex, { emissive = 0.06, spec = 0.05, cache =
  * The arena: a floor of individual cubes (thin-instanced, so all 1600 of them
  * cost one draw call) plus four walls with the grey top trim from the mockup.
  */
-export function buildArena(scene, size, mapId = DEFAULT_MAP, modifier = 'none') {
+export function buildArena(scene, size, mapId = DEFAULT_MAP, modifier = 'none', teams = false) {
   const map = MAPS[mapId] ?? MAPS[DEFAULT_MAP];
   // LIGHTS OUT means exactly that: the lamps below do not get built at all.
   // Dimming them would leave a lit rig somebody could still navigate by, and
@@ -281,19 +290,23 @@ export function buildArena(scene, size, mapId = DEFAULT_MAP, modifier = 'none') 
     root.push(cap);
   }
 
-  // Corner feeders. These are the spawn pads, doing a second job: stand on your
-  // own one to refill your crop instantly and heal out of combat.
+  // Feeders. Stand on yours to refill your crop instantly and heal out of
+  // combat.
   //
-  // Recoloured from spawn-blue to grain-gold, with an actual heap of grain in
-  // the middle. A trigger zone you cannot see is a mechanic that does not
-  // exist — and this one has to be findable by a player who has never read a
-  // word about the game, from across the arena, in the dark.
-  const pad = MeshBuilder.CreateBox('spawnPad', { width: 3.2, height: 0.12, depth: 3.2 }, scene);
+  // One shared pad per team in 4v4, at the middle of that team's spawn line,
+  // rather than four private corners. That is a design choice, not a saving:
+  // a shared pad is somewhere four players end up standing next to each other,
+  // which is the cheapest rally point a team game can have.
+  //
+  // Grain-gold with an actual heap on it, because a trigger zone you cannot see
+  // is a mechanic that does not exist — it has to be findable by a player who
+  // has never read a word about the game, from across the arena, in the dark.
+  const corners = feederPoints(half, teams).map((p) => [p.x, p.z]);
+  const padSize = teams ? CROP.feeder.teamRadius * 2 : 3.2;
+  const pad = MeshBuilder.CreateBox('spawnPad', { width: padSize, height: 0.12, depth: padSize }, scene);
   pad.material = emissiveMat(scene, 'padMat', '#ffcc3d', { intensity: 0.45, alpha: 0.4 });
   pad.isPickable = false;
-  const d = half - 3.5;
-  const corners = [[-d, -d], [d, d], [d, -d], [-d, d]];
-  const padM = new Float32Array(4 * 16);
+  const padM = new Float32Array(corners.length * 16);
   corners.forEach(([x, z], k) => {
     Matrix.Translation(x, 0.06, z).copyToArray(padM, k * 16);
   });
@@ -466,7 +479,6 @@ export class CameraRig {
 
     this.focus = new Vector3(0, 0, 0);
     this.shake = 0;
-    this.recoil = 0;
 
     // Smoothed separately from the raw input so a 40Hz patch, or a dropped
     // frame, doesn't make the whole world step sideways.
@@ -498,11 +510,6 @@ export class CameraRig {
     this.shake = Math.min(1.4, this.shake + amount);
   }
 
-  /** A shot was fired: kick the view up a touch. */
-  addRecoil() {
-    this.recoil = Math.min(0.12, this.recoil + FPS_RECOIL_KICK);
-  }
-
   /**
    * Respawn: snap the camera to the new corner so "I'm back" is unmissable.
    *
@@ -528,7 +535,6 @@ export class CameraRig {
    * @param watch    optional {x, z} to spectate — normally your killer
    */
   update(dt, targetX, targetY, targetZ, aim = 0, alive = true, pitch = 0, watch = null) {
-    this.recoil = Math.max(0, this.recoil - dt * FPS_RECOIL_RECOVER);
     if (!alive) return this.updateSpectator(dt, targetX, targetZ, watch);
 
     // Shortest-path yaw interpolation, or turning past +/-180 spins the world.
@@ -551,7 +557,9 @@ export class CameraRig {
       this.shake = Math.max(0, this.shake - dt * 2.6);
     }
 
-    const look = pitch + this.recoil;
+    // The pitch as given, with nothing added. Recoil is already in it — see the
+    // note beside FPS_YAW_LERP for what happened when it was not.
+    const look = pitch;
 
     if (this.view === 'tpp') {
       // The boom, solved by view.js — including retracting it off a wall. Shake

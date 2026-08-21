@@ -2,7 +2,7 @@
 // produces, so the sim can't tell them apart — which also means they work as
 // offline practice opponents on the client with zero extra code.
 
-import { applyInput } from './sim.js';
+import { applyInput, feederFor, feederRadius } from './sim.js';
 import { PLAYER, BOMBER, PICKUP, HILL, HEIST, BOMB, CROP, cropCapacity } from './constants.js';
 import { norm, len, dist2, clamp, angleDelta, segBoxEntry } from './math.js';
 
@@ -329,9 +329,9 @@ function coveringFire(world, p, b, fallbackX, fallbackZ) {
   };
 }
 
-/** Nest belonging to a seat. */
-function nestFor(world, seat) {
-  return world.nests ? world.nests.find((n) => n.seat === seat % 4) : null;
+/** Nest belonging to a team. */
+function nestFor(world, team) {
+  return world.nests ? world.nests.find((n) => n.team === team) : null;
 }
 
 /**
@@ -342,7 +342,7 @@ function nestFor(world, seat) {
  * dies — which is the same mistake new players make.
  */
 function heistErrand(world, p, b) {
-  const home = nestFor(world, p.seat);
+  const home = nestFor(world, p.team);
   if (!home) return null;
 
   const goTo = (x, z, stopWithin = 0) => {
@@ -371,7 +371,7 @@ function heistErrand(world, p, b) {
   let target = null;
   let bestScore = 0;
   for (const nest of world.nests) {
-    if (nest.seat === p.seat % 4 || nest.eggs <= 0) continue;
+    if (nest.team === p.team || nest.eggs <= 0) continue;
     const d = Math.sqrt(dist2(p.x, p.z, nest.x, nest.z)) + 1;
     const score = nest.eggs / d;
     if (score > bestScore) { target = nest; bestScore = score; }
@@ -391,7 +391,7 @@ function bombErrand(world, p, b) {
 
   if (bomb.state === 'planted') {
     // Only its owner can defuse. Everyone else may as well keep fighting.
-    if (bomb.plantSeat !== p.seat % 4) return null;
+    if (bomb.plantTeam !== p.team) return null;
     const d = Math.sqrt(dist2(p.x, p.z, bomb.x, bomb.z));
     if (d > BOMB.plantRadius * 0.6) {
       const [tx, tz] = norm(bomb.x - p.x, bomb.z - p.z);
@@ -408,8 +408,8 @@ function bombErrand(world, p, b) {
     let target = null;
     let bestD = Infinity;
     for (const nest of world.nests ?? []) {
-      if (nest.seat === p.seat % 4) continue;
-      if (![...world.players.values()].some((o) => o.seat % 4 === nest.seat)) continue;
+      if (nest.team === p.team) continue;
+      if (![...world.players.values()].some((o) => o.team === nest.team)) continue;
       const d = dist2(p.x, p.z, nest.x, nest.z);
       if (d < bestD) { target = nest; bestD = d; }
     }
@@ -447,13 +447,13 @@ function bombErrand(world, p, b) {
  * @returns a replacement input, or null to leave the bot's plan alone.
  */
 function feedErrand(world, p, b, input) {
-  const home = spawnPointFor(world, p.seat);
+  const home = feederFor(world, p.team ?? p.seat);
   const homeD = Math.sqrt(dist2(p.x, p.z, home.x, home.z));
 
   // Badly hurt and not in the middle of something: go and eat. The feeder heals
   // as well as refills, which makes this the bot equivalent of disengaging.
   const wantsHome = p.hp < 35 && p.crop < cropCapacity(world.modifier) * 0.5;
-  if (wantsHome && homeD > CROP.feeder.radius * 0.6) {
+  if (wantsHome && homeD > feederRadius(world) * 0.6) {
     const [tx, tz] = norm(home.x - p.x, home.z - p.z);
     return { ...input, mx: tx, mz: tz, shoot: input.shoot && p.crop > 0 };
   }
@@ -509,13 +509,8 @@ function feedErrand(world, p, b, input) {
   return null;
 }
 
-/** The corner this seat spawns on — also its feeder. */
-function spawnPointFor(world, seat) {
-  const d = world.arena.half - 3.5;
-  return [
-    { x: -d, z: -d }, { x: d, z: d }, { x: d, z: -d }, { x: -d, z: d },
-  ][seat % 4];
-}
+// Was a second copy of the spawn corners, which silently stopped matching the
+// moment team lines replaced them. It asks the simulation now.
 
 /**
  * How far up or down a bot is looking.

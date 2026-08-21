@@ -220,6 +220,13 @@ export class Sfx {
         this.tone({ freq: 300, to: 190, type: 'sawtooth', dur: 0.3, gain: 0.09, delay: 0.17 });
         break;
 
+      // A team-mate dropped a marker. Two clean notes: it has to cut through a
+      // firefight without ever being mistaken for a shot or a hit.
+      case 'ping':
+        this.tone({ freq: 1180, type: 'sine', dur: 0.06, gain: 0.06 });
+        this.tone({ freq: 1560, type: 'sine', dur: 0.09, gain: 0.055, delay: 0.055 });
+        break;
+
       // Somebody else climbed. Deliberately small: it is information, not an
       // event, and at four players this fires often.
       case 'rivalUp':

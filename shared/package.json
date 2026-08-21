@@ -11,11 +11,14 @@
   "scripts": {
     "test:modifiers": "node test/modifiers.mjs",
     "test:modes": "node test/modes.mjs",
+    "test:teams": "node test/teams.mjs",
     "test:combat": "node test/combat.mjs",
+    "test:spread": "node test/spread.mjs",
     "test:tasks": "node test/tasks.mjs",
     "test:control": "node test/control.mjs",
     "test:cover": "node test/cover.mjs",
     "test:crop": "node test/crop.mjs",
-    "test:levels": "node test/levels.mjs"
+    "test:levels": "node test/levels.mjs",
+    "measure:density": "node test/density.mjs"
   }
 }

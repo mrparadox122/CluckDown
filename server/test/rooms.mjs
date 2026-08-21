@@ -79,7 +79,7 @@ async function main() {
 
   const pubRow = listed.rooms.find((r) => r.roomId === pub.roomId);
   check('listing reports mode and capacity',
-    pubRow?.mode === 'casual' && pubRow?.maxPlayers === 4, JSON.stringify(pubRow));
+    pubRow?.mode === 'casual' && pubRow?.maxPlayers === 8, JSON.stringify(pubRow));
   check('listing counts the human', pubRow?.humans >= 1, `humans=${pubRow?.humans}`);
 
   // --- joinById works, which is what the browser button does -------------

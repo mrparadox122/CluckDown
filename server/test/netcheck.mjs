@@ -123,7 +123,7 @@ async function main() {
     `sim ran at ${((elapsedSim / DURATION) * 100).toFixed(0)}% of real speed`);
   check('state is streaming', stateChanges > 50, `${stateChanges} patches`);
   check('match reached live phase', s.phase === 'live' || s.phase === 'over', s.phase);
-  check('bots filled the lobby to 4', players.length === 4, `${players.length} players`);
+  check('bots filled the lobby to 8', players.length === 8, `${players.length} players`);
   check('own player is present and named', me?.name === 'Alice', me?.name);
   check('server acknowledged our inputs', (me?.ack ?? 0) > 100, `ack=${me?.ack}`);
   check('players actually moved', players.some((p) => Math.abs(p.x) > 0.5 || Math.abs(p.z) > 0.5));

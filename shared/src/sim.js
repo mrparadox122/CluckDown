@@ -8,12 +8,14 @@
 import {
   PLAYER, BULLET, BOMBER, PICKUP, SCORE, MODES,
   MULTIKILL_WINDOW, SEAT_COLORS, MODIFIER_POOL, modValue,
-  TEAM_COLORS, teamForSeat, HILL, SHRINK, rollPickup,
+  TEAM_COLORS, teamForSeat, teamShade, spawnLayout, feederPoints, HILL, SHRINK, rollPickup,
+  PING, pingDef,
   LEVELS, levelFromXp, xpForLevel, perkValue, rungOf,
   MAPS, DEFAULT_MAP, pickMapCandidates, BOUNTY, POTATO,
   CONTRACT, CONTRACTS, CONTRACT_LIST, HEIST, BOMB, REVENGE, GRAVITY, WALL_HEIGHT,
-  coverFor, CROP, cropCapacity,
+  coverFor, CROP, cropCapacity, SPREAD,
 } from './constants.js';
+import { nextSpread, coneDeviate } from './accuracy.js';
 import {
   clamp, clampUnit, norm, len, dist2, segHitsCapsule, mulberry32, angleDelta,
   segBoxEntry, pushOutBox, insideAny,
@@ -71,15 +73,24 @@ export function createWorld({ mode = 'casual', seed = (Math.random() * 1e9) | 0,
     // and get a safe answer.
     teamScores: cfg.teams ? [0, 0] : null,
 
-    // King of the Coop.
+    // King of the Coop. Progress is keyed rather than indexed, because in team
+    // play the hold belongs to the TEAM — four players rotating through the
+    // zone are one hold, not four that each never finish.
     hill: cfg.hill
-      ? { holder: null, contested: false, progress: [0, 0, 0, 0], x: 0, z: 0, moveAt: HILL.moveEvery }
+      ? { holder: null, contested: false, progress: {}, x: 0, z: 0, moveAt: HILL.moveEvery }
       : null,
 
     // Nests: home base in Egg Heist, and the plant site in Plant & Defuse.
+    // One per TEAM — a shared nest is the rally point that makes defending a
+    // place a thing four players can do together.
     nests: cfg.heist || cfg.bomb
-      ? [0, 1, 2, 3].map((seat) => ({ seat, eggs: cfg.heist ? HEIST.eggsPerNest : 0, x: 0, z: 0 }))
+      ? [0, 1].map((team) => ({ team, eggs: cfg.heist ? HEIST.eggsPerNest : 0, x: 0, z: 0 }))
       : null,
+
+    // Team pings, held for PING.life then dropped. They never enter synced
+    // state: the server sends each one only to the pinger's own team, so an
+    // opponent's client is never told where it was.
+    pings: [],
     looseEggs: cfg.heist ? [] : null,
 
     // Plant & Defuse.
@@ -114,17 +125,17 @@ export function applyMap(world, mapId) {
   world.safeHalf = size / 2;
   world.obstacles = coverFor(map, size);
 
-  // Move everyone onto the new corners, or they start outside the walls.
-  const pts = spawnPoints(world);
-  // Nests sit on the spawn corners, so they move with the arena too.
+  // Move everyone onto the new spawns, or they start outside the walls.
+  // Nests sit on the rally pads, so they move with the arena too.
   if (world.nests) {
     for (const nest of world.nests) {
-      nest.x = pts[nest.seat % 4].x;
-      nest.z = pts[nest.seat % 4].z;
+      const pad = feederFor(world, nest.team);
+      nest.x = pad.x;
+      nest.z = pad.z;
     }
   }
   for (const p of world.players.values()) {
-    const sp = pts[p.seat % 4];
+    const sp = spawnFor(world, p.seat);
     p.x = sp.x;
     p.z = sp.z;
     p.aim = Math.atan2(-sp.x, -sp.z);
@@ -164,23 +175,49 @@ export function beginMatch(world, mapId = null) {
 }
 
 export function spawnPoints(world) {
-  const d = world.arena.half - 3.5;
-  return [
-    { x: -d, z: -d }, { x: d, z: d }, { x: d, z: -d }, { x: -d, z: d },
-  ];
+  return spawnLayout(world.arena.half, !!world.cfg.teams);
+}
+
+/** Where this seat starts. */
+export function spawnFor(world, seat) {
+  const pts = spawnPoints(world);
+  return pts[((seat % pts.length) + pts.length) % pts.length];
+}
+
+/** The pad you refill on: your team's shared rally point, or your own corner. */
+export function feederFor(world, teamOrSeat) {
+  const pads = feederPoints(world.arena.half, !!world.cfg.teams);
+  return pads[((teamOrSeat % pads.length) + pads.length) % pads.length];
+}
+
+export function feederRadius(world) {
+  return world.cfg.teams ? CROP.feeder.teamRadius : CROP.feeder.radius;
+}
+
+/** Every spawn this player may legally come back on. */
+function spawnChoices(world, p) {
+  const pts = spawnPoints(world);
+  // Team play sends you back to your OWN line. Picking the corner furthest
+  // from the enemy would otherwise respawn you behind theirs, which is both
+  // free and unsurvivable.
+  if (world.cfg.teams && p.team !== null) {
+    return pts.filter((_, seat) => teamForSeat(seat) === p.team);
+  }
+  return pts;
 }
 
 export function addPlayer(world, { id, name, seat, isBot = false }) {
   const seatIdx = seat ?? world.players.size;
-  const sp = spawnPoints(world)[seatIdx % 4];
+  const sp = spawnFor(world, seatIdx);
+  const team = world.cfg.teams ? teamForSeat(seatIdx) : null;
   const p = {
     id,
     name: (name || 'Chicken').slice(0, 14),
     seat: seatIdx,
-    team: world.cfg.teams ? teamForSeat(seatIdx) : null,
-    color: world.cfg.teams
-      ? TEAM_COLORS[teamForSeat(seatIdx)]
-      : SEAT_COLORS[seatIdx % SEAT_COLORS.length],
+    team,
+    // Silhouette says which side; the shade says which teammate.
+    color: team !== null ? TEAM_COLORS[team] : SEAT_COLORS[seatIdx % SEAT_COLORS.length],
+    shade: teamShade(seatIdx, team),
     isBot,
     x: sp.x, z: sp.z,
     // Height above the floor, and the vertical velocity that changes it.
@@ -215,6 +252,11 @@ export function addPlayer(world, { id, name, seat, isBot = false }) {
     healAcc: 0,
     lastHurtAt: -99, // for the feeder's out-of-combat regen
     taggedUntil: 0,  // briefly slowed by a bullet — see fire()
+    pingAt: 0,       // next time this player may drop a marker
+    // Movement inaccuracy, in radians. Rises the moment you move and settles
+    // over SPREAD.settle when you stop — the number a counter-strafe is
+    // actually buying, and the number the crosshair draws.
+    spread: SPREAD.still,
     aimRaw: Math.atan2(-sp.x, -sp.z), // what the stick asked for, before assist
     aimTarget: null,  // sticky aim-assist lock
     carrying: 0,      // eggs in hand (Egg Heist)
@@ -364,6 +406,7 @@ export function stepWorld(world, dt) {
   stepPotato(world, dt);
   stepHeist(world, dt);
   stepBomb(world, dt);
+  stepPings(world);
   checkSurvival(world);
 
   // Contracts are scored last, from the events this tick produced — that keeps
@@ -464,6 +507,10 @@ function stepPlayers(world, dt) {
     stepCrop(world, p, dt);
     stepSecondWind(world, p);
     stepPotatoBurn(world, p, dt);
+    // Stepped here rather than inside fire(), because the cone has to keep
+    // settling while you are NOT shooting — that quarter second of stillness
+    // before the trigger comes down is the entire skill being rewarded.
+    p.spread = nextSpread(p.spread ?? SPREAD.still, len(inp.mx, inp.mz), p.y > 0, dt);
 
     if (inp.shoot && world.phase === 'live' && world.time >= p.nextShotAt) {
       if (p.crop > 0 && !p.dry) fire(world, p);
@@ -575,10 +622,15 @@ function fire(world, p) {
   // the crosshair honest — the shot leaves along exactly the vector the camera
   // is looking down, so a reticle nailed to screen centre is the truth rather
   // than an approximation of it.
-  const cp = Math.cos(p.pitch);
-  const dx = Math.sin(p.aim) * cp;
-  const dy = Math.sin(p.pitch);
-  const dz = Math.cos(p.aim) * cp;
+  //
+  // ...then MOVEMENT deviates it, inside a cone the crosshair is drawing at its
+  // true size. Standing still the cone is exactly zero and this is the identity
+  // — the reticle is not approximately honest for a stopped player, it is
+  // exactly honest, which is the contract everything else here rests on.
+  //
+  // Rolled from the world RNG on the authoritative side. Inaccuracy a client
+  // computes for itself is inaccuracy a client can decline.
+  const { dx, dy, dz } = coneDeviate(p.aim, p.pitch, p.spread ?? SPREAD.still, world.rng);
   const muzzle = PLAYER.radius + BULLET.radius + 0.25;
   const id = nextId(world);
   const bx = p.x + dx * muzzle;
@@ -614,7 +666,12 @@ function fire(world, p) {
     x: bx, y: by, z: bz,
     hx: shot.x, hy: shot.y, hz: shot.z,
     hit: shot.hit, head: !!shot.head, wall: shot.wall,
-    aim: p.aim, pitch: p.pitch, owner: p.id,
+    // The angles the round ACTUALLY left along, spread included — not the ones
+    // the player asked for. Only the tracer's fallback path reads them, and a
+    // fallback that draws a different line from the one that was resolved is a
+    // fallback that lies about where you shot.
+    aim: Math.atan2(dx, dz), pitch: Math.asin(clamp(dy, -1, 1)),
+    owner: p.id,
     rapid: world.time < p.frenzyUntil, crop: p.crop,
   });
 }
@@ -642,9 +699,10 @@ function stepCrop(world, p, dt) {
   p.feeding = false;
   if (world.phase !== 'live') return;
 
-  // --- the feeder: your own spawn pad.
-  const pad = spawnPoints(world)[p.seat % 4];
-  if (dist2(p.x, p.z, pad.x, pad.z) <= CROP.feeder.radius * CROP.feeder.radius) {
+  // --- the feeder: your team's rally pad, or your own corner in a duel.
+  const pad = feederFor(world, p.team ?? p.seat);
+  const fr = feederRadius(world);
+  if (dist2(p.x, p.z, pad.x, pad.z) <= fr * fr) {
     p.feeding = true;
     // Grain always, health only out of combat — see CROP.feeder.combatDelay.
     p.crop = Math.min(cap, p.crop + CROP.feeder.refill * dt);
@@ -1004,9 +1062,10 @@ function respawn(world, p) {
   const lim = world.safeHalf - 3.5;
   // Spawn at whichever corner is furthest from the nearest living enemy —
   // stops the "spawn directly into a bullet" experience.
-  const pts = spawnPoints(world);
-  const foes = [...world.players.values()].filter((o) => o !== p && o.alive);
-  let best = pts[p.seat % 4];
+  const pts = spawnChoices(world, p);
+  const foes = [...world.players.values()]
+    .filter((o) => o !== p && o.alive && (p.team === null || o.team !== p.team));
+  let best = spawnFor(world, p.seat);
   let bestScore = -Infinity;
   for (const pt of pts) {
     let nearest = Infinity;
@@ -1036,6 +1095,10 @@ function respawn(world, p) {
   p.peckAcc = 0;
   p.stillFor = 0;
   p.pecking = false;
+  // A fresh life starts pinpoint. Inheriting the cone you died sprinting with
+  // would mean your first shot back missed for something that happened before
+  // you existed.
+  p.spread = SPREAD.still;
   p.alive = true;
   p.invulnUntil = world.time + PLAYER.spawnInvuln;
   p.aim = Math.atan2(-p.x, -p.z);
@@ -1050,7 +1113,7 @@ function endMatch(world, reason) {
   // raid in the closing seconds can take the whole match.
   if (world.cfg.heist) {
     for (const p of world.players.values()) {
-      p.eggsHeld = nestOf(world, p.seat) ? nestOf(world, p.seat).eggs : 0;
+      p.eggsHeld = nestOf(world, p.team)?.eggs ?? 0;
       p.score += p.eggsHeld * HEIST.depositScore;
     }
   }
@@ -1058,7 +1121,7 @@ function endMatch(world, reason) {
   const ranking = [...world.players.values()].sort((a, b) => b.score - a.score || b.kills - a.kills);
   // A survival or hill win has already named its winner; don't overwrite it.
   world.winnerId ??= ranking[0]?.id ?? null;
-  if (world.teamScores) {
+  if (world.teamScores && world.winnerTeam === null) {
     const [blue, red] = world.teamScores;
     world.winnerTeam = blue === red ? null : (blue > red ? 0 : 1);
   }
@@ -1094,14 +1157,31 @@ function stepShrink(world, dt) {
   }
 }
 
-/** Ends a no-respawn match once one chicken (or nobody) is left standing. */
+/**
+ * Ends a no-respawn match once one side is left standing.
+ *
+ * Last Chicken is FFA-by-definition, so 4v4 reinterprets it as last ROOST
+ * standing: the round ends when every member of a team is down. Free-for-all
+ * (a duel) still resolves on one body, which is the same rule with one player
+ * per side.
+ */
 function checkSurvival(world) {
   if (world.cfg.respawn !== false || world.phase !== 'live') return;
   if (world.players.size < 2) return;
 
   const alive = [...world.players.values()].filter((p) => p.alive);
-  if (alive.length > 1) return;
 
+  if (world.cfg.teams) {
+    const sides = new Set(alive.map((p) => p.team));
+    if (sides.size > 1) return;
+    world.winnerTeam = alive.length ? [...sides][0] : null;
+    // Best of the surviving side, so the results screen still names somebody.
+    world.winnerId = alive.sort((a, b) => b.score - a.score)[0]?.id ?? null;
+    endMatch(world, 'lastStanding');
+    return;
+  }
+
+  if (alive.length > 1) return;
   world.winnerId = alive[0]?.id ?? null;
   endMatch(world, 'lastStanding');
 }
@@ -1122,9 +1202,18 @@ function stepHill(world, dt) {
   if (hill.moveAt <= 0) {
     hill.moveAt = HILL.moveEvery;
     const reach = world.arena.half * HILL.spread;
-    // The zone is a place you have to stand, so it cannot land on cover.
-    const spot = nearestClear(world,
-      (world.rng() * 2 - 1) * reach, (world.rng() * 2 - 1) * reach, HILL.radius);
+    // The zone is a place you have to stand, so it cannot land on cover — but
+    // nearestClear spirals up to 13 units to find room, which on a map with a
+    // busy middle walked the zone out to the wall. Reroll instead, and clamp
+    // whatever the last attempt gives back: a zone outside its band is a zone
+    // nobody has to cross the map for.
+    let spot = null;
+    for (let attempt = 0; attempt < 8 && !spot; attempt++) {
+      const c = nearestClear(world,
+        (world.rng() * 2 - 1) * reach, (world.rng() * 2 - 1) * reach, HILL.radius);
+      if (Math.abs(c.x) <= reach && Math.abs(c.z) <= reach) spot = c;
+      else if (attempt === 7) spot = { x: clamp(c.x, -reach, reach), z: clamp(c.z, -reach, reach) };
+    }
     hill.x = spot.x;
     hill.z = spot.z;
     emit(world, { type: 'hillMoved', x: hill.x, z: hill.z });
@@ -1145,8 +1234,12 @@ function stepHill(world, dt) {
 
   if (hill.contested || !inside.length) return;
 
+  // One key per SIDE. Without this a team of four rotating through the zone
+  // banks four separate quarter-holds and nobody ever reaches the target.
+  const key = hillKey(world, inside[0].seat);
+  hill.progress[key] = (hill.progress[key] ?? 0) + HILL.rate * dt;
+
   for (const p of inside) {
-    hill.progress[p.seat] = (hill.progress[p.seat] ?? 0) + HILL.rate * dt;
 
     // Score is a whole number, and Math.round(rate * dt * 10) is zero for any
     // dt under a twentieth of a second — so at 60Hz holding the zone paid
@@ -1159,17 +1252,21 @@ function stepHill(world, dt) {
       p.hillBank -= whole;
     }
 
-    if (hill.progress[p.seat] >= HILL.target) {
+    if (hill.progress[key] >= HILL.target) {
       world.winnerId = p.id;
+      world.winnerTeam = p.team;
       endMatch(world, 'hill');
       return;
     }
   }
 }
 
-/** 0..1 share of the hill target held by a seat, for HUD meters. */
+const hillKey = (world, seat) => (world.cfg.teams ? `t${teamForSeat(seat)}` : `s${seat}`);
+
+/** 0..1 share of the hill target held by a seat's side, for HUD meters. */
 export function hillProgress(world, seat) {
-  return world.hill ? Math.min(1, (world.hill.progress[seat] ?? 0) / HILL.target) : 0;
+  if (!world.hill) return 0;
+  return Math.min(1, (world.hill.progress[hillKey(world, seat)] ?? 0) / HILL.target);
 }
 
 // --------------------------------------------------------------- contracts
@@ -1271,9 +1368,9 @@ export function contractInfo(p) {
 
 // -------------------------------------------------------------- egg heist
 
-/** The nest belonging to a seat, or null outside Egg Heist. */
-function nestOf(world, seat) {
-  return world.nests ? world.nests.find((n) => n.seat === seat % 4) : null;
+/** The nest belonging to a team, or null outside Egg Heist. */
+function nestOf(world, team) {
+  return world.nests ? world.nests.find((n) => n.team === team) : null;
 }
 
 /**
@@ -1293,13 +1390,13 @@ function stepHeist(world, dt) {
     for (const nest of world.nests) {
       if (dist2(p.x, p.z, nest.x, nest.z) > HEIST.nestRadius * HEIST.nestRadius) continue;
 
-      if (nest.seat === p.seat % 4) {
+      if (nest.team === p.team) {
         // Home: bank whatever is in hand.
         if (p.carrying > 0) {
           nest.eggs += p.carrying;
           p.score += HEIST.depositScore * p.carrying;
           emit(world, {
-            type: 'eggDeposit', x: nest.x, z: nest.z, by: p.id, count: p.carrying, seat: nest.seat,
+            type: 'eggDeposit', x: nest.x, z: nest.z, by: p.id, count: p.carrying, team: nest.team,
           });
           p.carrying = 0;
         }
@@ -1311,7 +1408,7 @@ function stepHeist(world, dt) {
         p.stealAt = HEIST.stealCooldown;
         p.score += HEIST.stealScore;
         emit(world, {
-          type: 'eggSteal', x: nest.x, z: nest.z, by: p.id, from: nest.seat, carrying: p.carrying,
+          type: 'eggSteal', x: nest.x, z: nest.z, by: p.id, from: nest.team, carrying: p.carrying,
         });
       }
     }
@@ -1336,9 +1433,9 @@ function stepHeist(world, dt) {
       continue;
     }
     if (egg.returnAt <= 0) {
-      const home = nestOf(world, egg.fromSeat);
+      const home = nestOf(world, egg.fromTeam);
       if (home) home.eggs++;
-      emit(world, { type: 'eggReturned', x: egg.x, z: egg.z, seat: egg.fromSeat });
+      emit(world, { type: 'eggReturned', x: egg.x, z: egg.z, team: egg.fromTeam });
       continue;
     }
     keep.push(egg);
@@ -1357,7 +1454,7 @@ function dropEggs(world, p) {
       id: nextId(world),
       x: clamp(p.x + Math.cos(a) * r, -edge, edge),
       z: clamp(p.z + Math.sin(a) * r, -edge, edge),
-      fromSeat: p.seat % 4,
+      fromTeam: p.team,
       returnAt: HEIST.returnAfter,
     });
   }
@@ -1382,7 +1479,7 @@ function stepBomb(world, dt) {
     if (world.bombAt > 0) return;
     world.bomb = {
       x: 0, z: 0, state: 'loose', carriedBy: null, plantedBy: null,
-      plantSeat: -1, fuse: BOMB.fuse, plant: 0, defuse: 0,
+      plantTeam: -1, fuse: BOMB.fuse, plant: 0, defuse: 0,
     };
     emit(world, { type: 'bombSpawn', x: 0, z: 0 });
     return;
@@ -1409,8 +1506,8 @@ function stepBomb(world, dt) {
     bomb.z = carrier.z;
 
     const target = world.nests
-      ? world.nests.find((n) => n.seat !== carrier.seat % 4
-        && nestOwner(world, n.seat)
+      ? world.nests.find((n) => n.team !== carrier.team
+        && nestDefenders(world, n.team).length
         && dist2(carrier.x, carrier.z, n.x, n.z) <= BOMB.plantRadius * BOMB.plantRadius)
       : null;
     const still = len(carrier.input.mx, carrier.input.mz) < 0.2;
@@ -1419,14 +1516,14 @@ function stepBomb(world, dt) {
       bomb.plant += dt;
       if (bomb.plant >= BOMB.plantTime) {
         bomb.state = 'planted';
-        bomb.plantSeat = target.seat;
+        bomb.plantTeam = target.team;
         bomb.plantedBy = carrier.id;
         bomb.carriedBy = null;
         bomb.fuse = BOMB.fuse;
         bomb.defuse = 0;
         carrier.score += BOMB.plantScore;
         emit(world, {
-          type: 'bombPlanted', x: bomb.x, z: bomb.z, by: carrier.id, seat: target.seat,
+          type: 'bombPlanted', x: bomb.x, z: bomb.z, by: carrier.id, team: target.team,
         });
       }
     } else {
@@ -1446,21 +1543,21 @@ function stepBomb(world, dt) {
   }
 }
 
-/** Whoever occupies a nest's seat, or undefined if the corner is empty. */
-function nestOwner(world, seat) {
-  return [...world.players.values()].find((p) => p.seat % 4 === seat);
+/** Everyone who owns this nest. An empty side cannot be planted in. */
+function nestDefenders(world, team) {
+  return [...world.players.values()].filter((p) => p.team === team);
 }
 
 function stepPlantedBomb(world, bomb, dt) {
   bomb.fuse -= dt;
 
-  // Only the nest's owner can defuse, and only by standing on it.
-  const owner = nestOwner(world, bomb.plantSeat);
-  const canDefuse = owner && owner.alive
-    && dist2(owner.x, owner.z, bomb.x, bomb.z) <= BOMB.plantRadius * BOMB.plantRadius
-    && len(owner.input.mx, owner.input.mz) < 0.2;
+  // Only the nest's own side can defuse, and only by standing on it. Any one
+  // of them will do — four defenders is what makes retaking a site possible.
+  const owner = nestDefenders(world, bomb.plantTeam).find((p) => p.alive
+    && dist2(p.x, p.z, bomb.x, bomb.z) <= BOMB.plantRadius * BOMB.plantRadius
+    && len(p.input.mx, p.input.mz) < 0.2);
 
-  if (canDefuse) {
+  if (owner) {
     bomb.defuse += dt;
     if (bomb.defuse >= BOMB.defuseTime) {
       owner.score += BOMB.defuseScore;
@@ -1795,6 +1892,70 @@ function stepPickups(world, dt) {
     emit(world, { type: 'pickupTaken', x: pk.x, z: pk.z, kind: pk.type, id: pk.id, by: taken.id });
   }
   world.pickups = keep;
+}
+
+// ------------------------------------------------------------------- pings
+
+/**
+ * Drops a team marker at a world point.
+ *
+ * Rate-limited and capped per player, because the failure mode of a ping
+ * system is not that nobody uses it — it is one player painting the map and
+ * their team learning to ignore the markers entirely.
+ *
+ * Returns the ping, or null if it was refused. The caller decides who hears
+ * about it; nothing here broadcasts, and pings never enter synced state, so an
+ * enemy client is never told a marker exists.
+ */
+export function placePing(world, id, intent, x, z) {
+  const p = world.players.get(id);
+  if (!p || !p.alive || world.phase !== 'live') return null;
+  if (world.time < p.pingAt) return null;
+
+  const def = pingDef(String(intent ?? ''));
+  const px = Number(x);
+  const pz = Number(z);
+  if (!Number.isFinite(px) || !Number.isFinite(pz)) return null;
+  // A marker outside the arena is a hand-rolled client, not a player.
+  const lim = world.arena.half + 2;
+  if (Math.abs(px) > lim || Math.abs(pz) > lim) return null;
+  if (dist2(p.x, p.z, px, pz) > PING.maxRange * PING.maxRange) return null;
+
+  p.pingAt = world.time + PING.cooldown;
+
+  // Oldest one goes when you are at your cap, so the newest thing you saw is
+  // always on the map.
+  const mine = world.pings.filter((q) => q.by === id);
+  while (mine.length >= PING.maxPerPlayer) {
+    const drop = mine.shift();
+    world.pings.splice(world.pings.indexOf(drop), 1);
+  }
+
+  const ping = {
+    id: nextId(world),
+    by: id,
+    byName: p.name,
+    team: p.team,
+    intent: def.id,
+    x: px,
+    z: pz,
+    until: world.time + PING.life,
+  };
+  world.pings.push(ping);
+  emit(world, { type: 'ping', ...ping });
+  return ping;
+}
+
+function stepPings(world) {
+  if (!world.pings.length) return;
+  world.pings = world.pings.filter((q) => q.until > world.time);
+}
+
+/** Markers this player is allowed to see. Team-mates only, always. */
+export function pingsFor(world, id) {
+  const p = world.players.get(id);
+  if (!p) return [];
+  return world.pings.filter((q) => (p.team === null ? q.by === id : q.team === p.team));
 }
 
 // ------------------------------------------------------------------ helpers

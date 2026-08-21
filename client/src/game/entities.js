@@ -438,25 +438,25 @@ export class PotatoView {
 export class NestView {
   constructor(scene, nest, color) {
     this.scene = scene;
-    this.seat = nest.seat;
+    this.team = nest.team;
     this.color = color;
     this.eggs = [];
     this.t = Math.random() * 6;
 
-    this.pad = MeshBuilder.CreateCylinder(`nestPad${nest.seat}`, {
+    this.pad = MeshBuilder.CreateCylinder(`nestPad${nest.team}`, {
       diameter: HEIST.nestRadius * 2, height: 0.07, tessellation: 28,
     }, scene);
     this.pad.position.set(nest.x, 0.04, nest.z);
-    this.pad.material = emissiveMat(scene, `nestPadMat${nest.seat}`, color, {
+    this.pad.material = emissiveMat(scene, `nestPadMat${nest.team}`, color, {
       intensity: 0.5, alpha: 0.18, cache: false,
     });
     this.pad.isPickable = false;
 
-    this.ring = MeshBuilder.CreateTorus(`nestRing${nest.seat}`, {
+    this.ring = MeshBuilder.CreateTorus(`nestRing${nest.team}`, {
       diameter: HEIST.nestRadius * 2, thickness: 0.14, tessellation: 30,
     }, scene);
     this.ring.position.set(nest.x, 0.09, nest.z);
-    this.ring.material = emissiveMat(scene, `nestRingMat${nest.seat}`, color, {
+    this.ring.material = emissiveMat(scene, `nestRingMat${nest.team}`, color, {
       intensity: 1.0, cache: false,
     });
     this.ring.isPickable = false;
@@ -466,7 +466,7 @@ export class NestView {
   setCount(n, x, z) {
     while (this.eggs.length < n) {
       const i = this.eggs.length;
-      const egg = MeshBuilder.CreateSphere(`nestEgg${this.seat}_${i}`, {
+      const egg = MeshBuilder.CreateSphere(`nestEgg${this.team}_${i}`, {
         diameterX: 0.42, diameterY: 0.54, diameterZ: 0.42, segments: 8,
       }, this.scene);
       egg.material = emissiveMat(this.scene, 'eggMat', '#fff4d6', { intensity: 0.75 });

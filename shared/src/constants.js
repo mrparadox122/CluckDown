@@ -44,7 +44,33 @@ export const PLAYER = {
   speed: 7.2,
   respawnDelay: 3,
   spawnInvuln: 2,
-  fireCooldown: 0.18,
+
+  /**
+   * Seconds between shots. 0.10 is 600 rounds a minute.
+   *
+   * TIME TO KILL, and this number is one half of it — BULLET.damage is the
+   * other. They are one decision, not two, and the thing to hold in your head
+   * while moving either is the pair (shots to kill - 1) x cooldown:
+   *
+   *   before  19 damage, 6 shots, 0.18s  ->  900ms to kill a body
+   *           52 head,   2 shots         ->  180ms, a five-to-one gap
+   *   now     22 damage, 5 shots, 0.10s  ->  400ms to kill a body
+   *           40 head,   3 shots         ->  200ms, a two-to-one gap
+   *
+   * 900ms was the real complaint behind "it isn't as addictive as CoD Mobile".
+   * A body fight lasted the better part of a second, in which the loser had
+   * time to walk out of it, while a headshot deleted someone in a fifth of
+   * that. There was no middle: you either erased a player or plinked at one,
+   * and neither is a duel. CoD Mobile lands its ARs at 250-400ms and Valorant's
+   * Vandal at ~340ms for a reason — that is roughly human reaction time, so
+   * both players get exactly one decision each and the better aim wins it.
+   *
+   * Headshots still pay, and now they pay in a currency you can feel: one head
+   * is worth about 1.8 bodies, and two heads and a body is a kill. Five-to-one
+   * was not a skill reward, it was a coin flip about where the crosshair
+   * happened to be.
+   */
+  fireCooldown: 0.10,
   /**
    * Floor on the fire cooldown, whatever perks and modifiers multiply it by.
    *
@@ -52,8 +78,15 @@ export const PLAYER = {
    * Peck and Feeding Frenzy and TRIGGER HAPPY all multiply the same number, and
    * three multipliers stacked without a floor is a fire rate that empties a
    * crop before anyone can react to it.
+   *
+   * It moved with `fireCooldown`, and it had to. This is a RATIO to the base
+   * rate wearing an absolute number: at 0.07 against the old 0.18 it allowed a
+   * 2.6x ceiling, and leaving it there while the base dropped to 0.10 would
+   * have quietly capped everything at 1.4x — squashing TRIGGER HAPPY, Rapid
+   * Peck and Feeding Frenzy all at once, without any of them changing. 0.04
+   * against 0.10 is the same 2.6x the game was tuned around.
    */
-  minCooldown: 0.07,
+  minCooldown: 0.04,
   knockbackDecay: 6, // per second, exponential-ish damping
 
   /**
@@ -222,11 +255,24 @@ export const CROP = {
   /**
    * Shots in a full crop.
    *
-   * 14 against a 10-shot kill is the number that matters: you can kill one
-   * chicken and miss four times. Tight enough that spraying loses fights,
-   * loose enough that losing a fight is never blamed on the magazine.
+   * The number that matters is kills per magazine, not rounds: at 5 shots to a
+   * body kill, 16 is three kills and a miss. It was 14 against a 6-shot kill,
+   * which is the same 2.3 kills — so this is not a buff, it is the same
+   * magazine expressed against a faster gun.
+   *
+   * It had to move at all because the fire rate did. 14 rounds at 0.10s is 1.4
+   * seconds of held trigger, and a fight in a four-a-side match does not
+   * resolve in 1.4 seconds; running dry mid-duel every single time is not the
+   * "commit, run out, recover" beat this resource is here for, it is just a
+   * gun that stops working. 16 buys 1.6s of fire against a 1.8s peck.
+   *
+   * THE TRADE-OFF WORTH FLAGGING: that is a ~50% duty cycle. Pecking is a
+   * 1.8-second stand-still, and standing still is now also what accuracy costs
+   * (see SPREAD) — so a dry player is paying twice for the same second. This
+   * is the tension noted in the roadmap around a faster reload with pecking
+   * kept as the ran-dry penalty; it is not changed here, only measured.
    */
-  capacity: 14,
+  capacity: 16,
 
   /** Grain per second while pecking — a full crop from empty in ~1.5s. */
   peckRate: 9,
@@ -263,6 +309,8 @@ export const CROP = {
   feeder: {
     /** Matches the spawn pad you can already see on the floor. */
     radius: 2.0,
+    /** One shared rally pad per team has to fit four chickens on it. */
+    teamRadius: 3.4,
     /** Health per second while you stand on it. */
     heal: 16,
     /**
@@ -293,7 +341,17 @@ export const CROP = {
 export const BULLET = {
   radius: 0.16,
 
-  damage: 19,
+  /**
+   * Damage per body shot. Five of them kill, in 400ms — see PLAYER.fireCooldown
+   * for the whole time-to-kill argument, because the two numbers only mean
+   * anything together.
+   *
+   * Kept as a number of SHOTS rather than a fraction of health on purpose:
+   * `Math.ceil(maxHp / damage)` is the number a player actually learns, and it
+   * moves in steps. 22 and 25 look like a small change and are not — 25 kills
+   * in four rounds, 22 in five.
+   */
+  damage: 22,
 
   /**
    * How far a shot reaches, in units. It gets there instantly — see traceShot.
@@ -318,10 +376,17 @@ export const BULLET = {
    * anyone arriving from CS or Valorant. There, where you put the dot is the
    * whole game.
    *
-   * 52 against 100 health means two clean headshots kill, versus ten body
-   * shots. That gap is deliberately enormous: a five-to-one payoff is what
-   * makes going for the head a real decision under pressure rather than a small
-   * bonus you take when convenient.
+   * 40 against 100 health means three clean headshots kill, versus five body
+   * shots: 200ms against 400ms. A headshot is worth about 1.8 body shots, and
+   * two heads plus a body is a kill.
+   *
+   * It used to be 52 against 19 — two shots against six, 180ms against 900ms.
+   * That five-to-one gap was argued for as skill expression and was not one. A
+   * payoff that large stops being a decision and becomes a coin flip about
+   * where the crosshair happened to be when the trigger came down: whoever got
+   * a head first won regardless of everything else in the fight, and everybody
+   * else spent a full second plinking. Two-to-one is the size at which going
+   * for the head is a choice you make and can be punished for.
    *
    * `headFrom` is measured up from the chicken's FEET, so it travels with a
    * jumping target and stays correct at any height.
@@ -344,7 +409,7 @@ export const BULLET = {
    * Aim assist deliberately does NOT reach here: it pulls to 0.55 of the body
    * (0.99), well under the line. Assist gets you body shots; heads are earned.
    */
-  headDamage: 52,
+  headDamage: 40,
   headFrom: 1.28,
 
   /**
@@ -379,6 +444,139 @@ export const BULLET = {
    * display and reads as a dot rather than as gunfire.
    */
   tracerLength: 1.6,
+};
+
+// ------------------------------------------------------------------ RECOIL
+//
+// THE BUG THIS BLOCK REPLACES. There used to be a recoil kick that was applied
+// to the CAMERA and to nothing else: the view climbed while the shot kept
+// leaving along the un-kicked angle. The crosshair is nailed to screen centre,
+// so it rode the climbing camera and the bullets did not — up to 0.12 radians
+// of it, which is 1.4 units at duelling range. A whole chicken. Every player
+// who sprayed was watching their reticle sit above where their rounds landed
+// and had no way to name what was wrong, because everything on screen agreed
+// with everything else on screen.
+//
+// So recoil is REAL now. The kick goes into the look angle itself, which is the
+// one number the camera renders and the one number the shot is fired along —
+// they cannot drift apart because there is nothing to drift. What used to be a
+// lie about where you were aiming is now a true statement that your aim moved.
+//
+// DETERMINISTIC, never random. Every shot climbs by exactly `kick`, so a spray
+// is a pattern you can learn and pull against rather than a dice roll you can
+// only hope through. That is the difference between recoil a player masters and
+// recoil a player resents, and it is why CS's spray patterns are fixed.
+export const RECOIL = {
+  /**
+   * Radians the view climbs per shot. 0.014 is 0.8 of a degree.
+   *
+   * Sized against the kill, not against the magazine: five shots is a body
+   * kill, so a won duel costs about 3.2 degrees of climb — enough that the
+   * fifth round lands high on a chicken you are not compensating for, and
+   * nowhere near enough to lose the target. Hold the trigger past that and the
+   * climb is the whole point.
+   */
+  kick: 0.014,
+
+  /**
+   * Ceiling on accumulated climb, in radians (~11.5 degrees).
+   *
+   * A full 16-round magazine would otherwise climb 0.224, which walks the
+   * crosshair off the top of a target from any range and turns the last third
+   * of every magazine into wasted grain. Capping it keeps a long spray bad
+   * without making it pointless.
+   */
+  max: 0.20,
+
+  /**
+   * Seconds after the last shot before the view starts settling back.
+   *
+   * Slightly longer than one shot interval (0.10), which is what makes the
+   * whole system readable: inside a burst nothing recovers, so the climb
+   * accumulates and the pattern is stable and learnable. Stop firing and it
+   * comes back. A delay shorter than the fire rate would have recovery fighting
+   * accumulation on every single round, and the resulting climb would depend on
+   * frame timing — the exact opposite of deterministic.
+   */
+  delay: 0.12,
+
+  /**
+   * Radians per second the view settles back down, once `delay` has passed.
+   *
+   * 0.6 returns one shot's kick in 25ms — so a tap-firer at any human cadence
+   * is back to pixel-exact before the next round leaves — and a maxed-out spray
+   * in about a third of a second, which reads as the gun settling rather than
+   * as the camera snapping.
+   */
+  recover: 0.6,
+};
+
+// ------------------------------------------------------------------ SPREAD
+//
+// Movement inaccuracy: the skill ceiling this game did not have.
+//
+// There was no spread of any kind. Every round landed exactly on the crosshair,
+// forever, including at full sprint and including mid-jump — which means there
+// was no such thing as a good position, a good moment, or a wrong one. Aiming
+// well and aiming while running paid identically, so shooting had no mastery
+// curve at all, and "stop moving to shoot" is the single defining skill of CS,
+// Valorant and CoD Mobile alike.
+//
+// The cone is driven by MOVEMENT and nothing else. Firing does not widen it —
+// that job belongs to RECOIL, which is deterministic and visible. Keeping the
+// two separate is what lets a stationary player spray a learnable pattern
+// instead of a random one, and it is why the invariant "a standing shot goes
+// exactly where the camera points" survives sustained fire.
+//
+// It is drawn from the world's seeded RNG on the authoritative side, so a
+// client cannot decline to be inaccurate.
+export const SPREAD = {
+  /**
+   * Standing still: EXACTLY zero. Not a small number.
+   *
+   * First-shot accuracy is the contract the whole system rests on — if a
+   * stopped player's round can miss a target their crosshair covers, every
+   * other rule here reads as the game cheating rather than as a cost they
+   * chose. Zero also makes it testable: camera direction and fired direction
+   * are the same vector to the last bit, at rest and under fire.
+   */
+  still: 0,
+
+  /**
+   * Cone half-angle at full running speed, in radians (~5.2 degrees).
+   *
+   * Scaled by how hard you are actually moving, so a nudge costs a little and a
+   * sprint costs all of it. At 12 units that is about a unit either side of the
+   * crosshair against a chicken 1.2 wide: moving-and-shooting still wins a
+   * point-blank scramble and reliably loses a mid-range duel, which is the
+   * shape every game the player named uses.
+   */
+  moving: 0.09,
+
+  /**
+   * Mid-air, in radians (~9.2 degrees). Flat, not scaled.
+   *
+   * Jumping is the one state you cannot steer out of and the hardest to be hit
+   * in, so jump-shooting has to be the worst trade in the game rather than a
+   * free dodge with a gun attached. At 12 units this is nearly two units off
+   * centre — a coin flip against a stationary target and a loss against a
+   * moving one.
+   */
+  air: 0.16,
+
+  /**
+   * Seconds from a full-speed cone back to pinpoint, after stopping.
+   *
+   * This number IS counter-strafing. Long enough that you have to genuinely
+   * commit to the stop, short enough that the commit is a quarter of a second
+   * rather than a decision to leave the fight. Below about 0.15 it stops being
+   * a skill and above about 0.5 nobody ever stops at all.
+   *
+   * The decay is linear at `moving / settle` radians a second, so the airborne
+   * cone — which is wider — takes proportionally longer to settle on landing.
+   * Landing costing more than stopping is correct.
+   */
+  settle: 0.25,
 };
 
 export const BOMBER = {
@@ -616,10 +814,11 @@ export const MODES = {
   casual: {
     id: 'casual',
     label: 'Casual',
-    blurb: '4-player free-for-all. No rank, just vibes.',
-    maxPlayers: 4,
+    blurb: '4v4. No rank, just vibes.',
+    maxPlayers: 8,
     minPlayers: 2,
-    arena: 48,
+    arena: 54,
+    teams: true,
     matchTime: 240,
     killLimit: 0,
     ranked: false,
@@ -634,7 +833,9 @@ export const MODES = {
     blurb: 'Two roosts enter. Friendly fire is off.',
     maxPlayers: 4,
     minPlayers: 2,
-    arena: 48,
+    arena: 54,
+    // 2v2 keeps its old density while the maps grow for 4v4.
+    arenaScale: 0.89,
     matchTime: 240,
     killLimit: 0,
     teamKillLimit: 20,
@@ -648,10 +849,11 @@ export const MODES = {
   hill: {
     id: 'hill',
     label: 'King of the Coop',
-    blurb: 'Hold the middle. Everyone wants it.',
-    maxPlayers: 4,
+    blurb: 'Hold the middle. Your roost holds it together.',
+    maxPlayers: 8,
     minPlayers: 2,
-    arena: 48,
+    arena: 54,
+    teams: true,
     matchTime: 240,
     killLimit: 0,
     hill: true,
@@ -664,10 +866,11 @@ export const MODES = {
   survival: {
     id: 'survival',
     label: 'Last Chicken',
-    blurb: 'One life. The arena closes in.',
-    maxPlayers: 4,
+    blurb: 'One life each. Last roost standing.',
+    maxPlayers: 8,
     minPlayers: 2,
-    arena: 48,
+    arena: 54,
+    teams: true,
     matchTime: 180,
     killLimit: 0,
     respawn: false,
@@ -681,10 +884,11 @@ export const MODES = {
   heist: {
     id: 'heist',
     label: 'Egg Heist',
-    blurb: 'Four eggs each. Steal theirs, defend yours.',
-    maxPlayers: 4,
+    blurb: 'One nest each. Raid theirs, defend yours.',
+    maxPlayers: 8,
     minPlayers: 2,
-    arena: 48,
+    arena: 54,
+    teams: true,
     matchTime: 240,
     killLimit: 0,
     heist: true,
@@ -697,10 +901,11 @@ export const MODES = {
   bomb: {
     id: 'bomb',
     label: 'Plant & Defuse',
-    blurb: 'Carry the bomb to a rival nest. Then survive the clock.',
-    maxPlayers: 4,
+    blurb: 'Carry the bomb to their nest. Then survive the clock.',
+    maxPlayers: 8,
     minPlayers: 2,
-    arena: 48,
+    arena: 54,
+    teams: true,
     matchTime: 300,
     killLimit: 0,
     bomb: true,
@@ -713,10 +918,11 @@ export const MODES = {
   ranked: {
     id: 'ranked',
     label: 'Ranked',
-    blurb: '4-player FFA. Your rating is on the line.',
-    maxPlayers: 4,
+    blurb: '4v4. Your rating is on the line.',
+    maxPlayers: 8,
     minPlayers: 2,
-    arena: 48,
+    arena: 54,
+    teams: true,
     matchTime: 240,
     killLimit: 0,
     ranked: true,
@@ -727,12 +933,14 @@ export const MODES = {
   deathmatch: {
     id: 'deathmatch',
     label: 'Deathmatch',
-    blurb: 'Endless respawns. First to 15 kills.',
-    maxPlayers: 4,
+    blurb: 'Endless respawns. First roost to 40 kills.',
+    maxPlayers: 8,
     minPlayers: 2,
-    arena: 48,
+    arena: 54,
     matchTime: 300,
-    killLimit: 15,
+    killLimit: 0,
+    teamKillLimit: 40,
+    teams: true,
     ranked: false,
     bomberEnabled: true,
     bomberFirstSpawn: 6,
@@ -743,7 +951,7 @@ export const MODES = {
     id: 'duel',
     label: '1v1',
     blurb: 'Tight arena, two chickens, one survives.',
-    arenaScale: 0.68, // a duel on The Big Yard would be two chickens jogging
+    arenaScale: 0.60, // a duel on The Big Yard would be two chickens jogging
     maxPlayers: 2,
     minPlayers: 2,
     arena: 32,
@@ -761,11 +969,94 @@ export const MODE_LIST = [
   'casual', 'heist', 'bomb', 'teams', 'hill', 'survival', 'ranked', 'deathmatch', 'duel',
 ];
 
-// Team play. Seats 0 and 3 hold the west corners, 1 and 2 the east ones, so a
-// team always spawns down one side rather than diagonally across the arena.
+// Team play. A snake over every group of four seats — 0,3,4,7 west and
+// 1,2,5,6 east — so 8 seats split 4/4 and the old 2v2 mapping is unchanged.
 export const TEAM_COLORS = ['#4da3ff', '#ff5d5d'];
 export const TEAM_NAMES = ['Blue Roost', 'Red Roost'];
-export const teamForSeat = (seat) => ((seat === 1 || seat === 2) ? 1 : 0);
+export const teamForSeat = (seat) => {
+  const s = ((seat % 4) + 4) % 4;
+  return (s === 1 || s === 2) ? 1 : 0;
+};
+
+/** Which of the four slots inside a team this seat holds. */
+export const teamSlot = (seat) => {
+  const s = ((seat % 4) + 4) % 4;
+  return Math.floor(seat / 4) * 2 + ((s === 0 || s === 1) ? 0 : 1);
+};
+
+// Eight bodies need two answers at a glance: whose side, and who exactly.
+// The silhouette stays team-coloured; the shade is the per-player accent the
+// nameplate, the scoreboard dot and the ping marker use.
+export const TEAM_SHADES = [
+  ['#a9d8ff', '#4da3ff', '#2f7ede', '#1257a0'],
+  ['#ffb3b3', '#ff5d5d', '#e03a3a', '#a82020'],
+];
+
+export const teamShade = (seat, team) => (
+  team === null || team === undefined
+    ? SEAT_COLORS[seat % SEAT_COLORS.length]
+    : TEAM_SHADES[team][teamSlot(seat) % 4]
+);
+
+/**
+ * The order seats are handed to arriving humans.
+ *
+ * Seat index decides your team, so "first free seat" decides who you play with,
+ * and the answer is different for the two kinds of room:
+ *
+ *   * a PUBLIC queue wants humans spread evenly, so nobody ends up as the only
+ *     real player on a side of bots. Strictly alternating does that at every
+ *     prefix, which plain seat order does not (0,1,2,3 is 0,1,1,0).
+ *   * a PRIVATE room is friends who typed the same code. Splitting them is the
+ *     opposite of what they came for, so those seats go team-major: the first
+ *     four arrivals are one roost, the next four are the other.
+ *
+ * Both are permutations, so every seat is still reachable either way.
+ */
+export function seatOrder(maxPlayers, together = false) {
+  const all = Array.from({ length: maxPlayers }, (_, i) => i);
+  if (maxPlayers <= 2) return all;
+  const blue = all.filter((seat) => teamForSeat(seat) === 0);
+  const red = all.filter((seat) => teamForSeat(seat) === 1);
+  if (together) return [...blue, ...red];
+  const out = [];
+  for (let i = 0; i < Math.max(blue.length, red.length); i++) {
+    if (blue[i] !== undefined) out.push(blue[i]);
+    if (red[i] !== undefined) out.push(red[i]);
+  }
+  return out;
+}
+
+// ------------------------------------------------------- SPAWNS AND RALLIES
+//
+// 4v4 needs a front line rather than a scramble, so a team lines up along its
+// own wall and both sides know which way forward is. The rally pad sits in the
+// middle of that line: one shared feeder per team, which is also the nest in
+// Egg Heist and Plant & Defuse.
+export const SPAWN = {
+  inset: 3.5,       // from the wall
+  laneSpread: 0.5,  // how far the four lanes reach, as a share of the half-extent
+};
+
+/** Spawn spots indexed by SEAT. Corners in free-for-all, lines in team play. */
+export function spawnLayout(half, teams) {
+  const d = half - SPAWN.inset;
+  if (!teams) return [{ x: -d, z: -d }, { x: d, z: d }, { x: d, z: -d }, { x: -d, z: d }];
+  const reach = half * SPAWN.laneSpread;
+  const lanes = [-1, -1 / 3, 1 / 3, 1].map((k) => k * reach);
+  const out = [];
+  for (let seat = 0; seat < 8; seat++) {
+    out.push({ x: teamForSeat(seat) === 0 ? -d : d, z: lanes[teamSlot(seat)] });
+  }
+  return out;
+}
+
+/** Feeder pads. Indexed by TEAM in team play, by seat corner otherwise. */
+export function feederPoints(half, teams) {
+  const d = half - SPAWN.inset;
+  if (!teams) return [{ x: -d, z: -d }, { x: d, z: d }, { x: d, z: -d }, { x: -d, z: d }];
+  return [{ x: -d, z: 0 }, { x: d, z: 0 }];
+}
 
 // King of the Coop: hold the middle. Contested by anyone not on your side.
 export const HILL = {
@@ -800,9 +1091,70 @@ export const SEAT_COLORS = [
   '#ffd166', // amber
   '#8ecae6', // sky
   '#c77dff', // violet
+  '#7ae582', // mint
+  '#ff9f6e', // coral
+  '#ff8ad1', // rose
+  '#b8c1ff', // periwinkle
 ];
 
 export const QUICK_CHAT = ['GG!', 'Help!', 'Nice shot!', 'Oops.', 'Bomber!', 'Follow me'];
+
+// ------------------------------------------------------------------- PINGS
+//
+// Team comms for a mobile shooter is a ping, not a voice channel: one tap,
+// language-independent, and it carries a position — which is the only thing
+// worth saying in a firefight anyway.
+//
+// Five intents, and the smallness is the design. A wheel you have to read is a
+// wheel nobody uses under fire, so this is the set that fits one thumb sweep
+// and covers what a player actually needs to say.
+export const PINGS = [
+  { id: 'enemy',  label: 'Enemy here', icon: '⚠', color: '#ff5d5d' },
+  { id: 'watch',  label: 'Watch out',  icon: '◉', color: '#ffcc3d' },
+  { id: 'help',   label: 'Need help',  icon: '➕', color: '#7ae582' },
+  { id: 'coming', label: 'On my way',  icon: '➤', color: '#4da3ff' },
+  { id: 'attack', label: 'Attacking',  icon: '⚔', color: '#ff8a3d' },
+];
+
+export const PING_LIST = PINGS.map((p) => p.id);
+export const pingDef = (id) => PINGS.find((p) => p.id === id) ?? PINGS[0];
+
+/**
+ * Which wedge a drag points at.
+ *
+ * Direction, not position: any drag past the deadzone counts, so the gesture is
+ * "flick towards the one I want" rather than "land on a small target" — which
+ * is the difference between a wheel that works with a thumb under fire and one
+ * that does not. Inside the deadzone it stays on the first intent, so a plain
+ * tap is the fastest thing on the wheel.
+ *
+ * Lives here rather than in the HUD so it can be tested without a browser.
+ */
+export function pingWedge(dx, dy, deadzone = 26) {
+  if (Math.hypot(dx, dy) < deadzone) return 0;
+  const step = (Math.PI * 2) / PINGS.length;
+  // The wheel starts at straight up, so shift before rounding to a wedge.
+  const i = Math.round((Math.atan2(dy, dx) + Math.PI / 2) / step);
+  return ((i % PINGS.length) + PINGS.length) % PINGS.length;
+}
+
+/** Where a wedge sits on the wheel, in radians, with 0 at the top. */
+export const pingAngle = (i) => -Math.PI / 2 + (i / PINGS.length) * Math.PI * 2;
+
+export const PING = {
+  /** Seconds a marker stays up. Long enough to act on, short enough to expire. */
+  life: 6,
+  /**
+   * Per player, and both halves matter.
+   *
+   * The cooldown stops a ping becoming a spam button; the cap stops a player
+   * blanketing the map with markers their team then has to read past.
+   */
+  cooldown: 1.1,
+  maxPerPlayer: 2,
+  /** Beyond this a marker is noise, not information. */
+  maxRange: 90,
+};
 
 // Room codes for playing with friends.
 //
@@ -993,12 +1345,15 @@ function quad(boxes) {
   return out;
 }
 
+// Sizes grew ~12% for 4v4 and no more. Doubling the roster already halves the
+// space per player, which is the density this game wanted; scaling the map by
+// the player ratio would hand it straight back. See README for the numbers.
 export const MAPS = {
   coop: {
     id: 'coop',
     label: 'The Coop',
     blurb: 'The original yard. Balanced, with cover to fight around.',
-    size: 48,
+    size: 54,
     floor: '#3f6fd8',
     trim: '#9aa6c4',
     lamp: '#8fb4ff',
@@ -1014,7 +1369,7 @@ export const MAPS = {
     id: 'squeeze',
     label: 'Tight Squeeze',
     blurb: 'Small and vicious. Four pillars and bad intentions.',
-    size: 34,
+    size: 38,
     floor: '#8f3fd8',
     trim: '#b49ac4',
     lamp: '#d79aff',
@@ -1029,7 +1384,7 @@ export const MAPS = {
     id: 'yard',
     label: 'The Big Yard',
     blurb: 'Room to run, and things to run behind.',
-    size: 64,
+    size: 72,
     floor: '#2f9e6f',
     trim: '#9ac4b4',
     lamp: '#9affd0',
@@ -1046,7 +1401,7 @@ export const MAPS = {
     id: 'dusk',
     label: 'Dusk Pen',
     blurb: 'Dim and rusty. Follow the tracers, watch the corners.',
-    size: 48,
+    size: 54,
     floor: '#a8452f',
     trim: '#c49a8a',
     lamp: '#ffb066',
@@ -1063,7 +1418,7 @@ export const MAPS = {
     id: 'frost',
     label: 'Frost Roost',
     blurb: 'Cold and pale. Long walls, longer sightlines.',
-    size: 56,
+    size: 62,
     floor: '#4a7fa8',
     trim: '#c9d8e4',
     lamp: '#bfe4ff',
@@ -1244,7 +1599,7 @@ export const CONTRACT_LIST = Object.keys(CONTRACTS);
 // and it stops the leader simply hoarding. Eggs drop where you fall rather than
 // teleporting home, which turns a death into a scramble.
 export const HEIST = {
-  eggsPerNest: 4,
+  eggsPerNest: 8,
   nestRadius: 2.6,
   stealCooldown: 0.7,   // between individual eggs, so a nest isn't emptied instantly
   carrySlow: 0.08,      // speed lost per egg carried

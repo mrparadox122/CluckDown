@@ -10,8 +10,9 @@ import { Client } from 'colyseus.js';
 import {
   createWorld, addPlayer, applyInput, stepWorld,
   stepBots, initBot, botName, xpForLevel,
-  MODES, SEAT_COLORS, TEAM_COLORS, TICK_DT, MAX_CATCHUP, QUICK_CHAT, cleanRoomCode,
+  MODES, TEAM_COLORS, teamShade, TICK_DT, MAX_CATCHUP, QUICK_CHAT, cleanRoomCode,
   hillProgress, castVote, voteTally, beginMatch, MAP_VOTE, MAPS, contractInfo, BOMB,
+  placePing, PING,
 } from '@cluckdown/shared';
 
 const DEFAULT_ENDPOINT = import.meta.env.VITE_SERVER_URL
@@ -25,7 +26,7 @@ const PING_WINDOW = 12; // samples kept for average / jitter
 class BaseSession {
   constructor() {
     this.handlers = {
-      fx: [], feed: [], chat: [], matchEnd: [], error: [], joinedInProgress: [],
+      fx: [], feed: [], chat: [], matchEnd: [], error: [], joinedInProgress: [], ping: [],
     };
   }
 
@@ -66,6 +67,9 @@ export class OnlineSession extends BaseSession {
     room.onMessage('fx', (evs) => this.emit('fx', evs));
     room.onMessage('feed', (f) => this.emit('feed', f));
     room.onMessage('chat', (m) => this.emit('chat', m));
+    // 'mark' on the wire because 'ping' is the latency probe. Only ever
+    // arrives for your own team — the server sends it nowhere else.
+    room.onMessage('mark', (m) => this.emit('ping', m));
     room.onMessage('matchEnd', (m) => this.emit('matchEnd', m));
     // Dropped into a match already running — the client shows a heads-up so
     // the clock reading 0:47 is not a mystery.
@@ -149,14 +153,14 @@ export class OnlineSession extends BaseSession {
 
   get nests() {
     const out = [];
-    this.room.state?.nests?.forEach((n) => out.push({ seat: n.seat, x: n.x, z: n.z, eggs: n.eggs }));
+    this.room.state?.nests?.forEach((n) => out.push({ team: n.team, x: n.x, z: n.z, eggs: n.eggs }));
     return out;
   }
 
   get looseEggs() {
     const out = [];
     this.room.state?.eggs?.forEach((e, id) => {
-      out.push({ id, x: e.x, z: e.z, seat: e.seat, returnAt: e.returnAt });
+      out.push({ id, x: e.x, z: e.z, team: e.team, returnAt: e.returnAt });
     });
     return out;
   }
@@ -169,7 +173,7 @@ export class OnlineSession extends BaseSession {
       x: st.bombX,
       z: st.bombZ,
       carriedBy: st.bombCarrier || null,
-      plantSeat: st.bombSeat,
+      plantTeam: st.bombTeam,
       fuse: st.bombFuse,
       plant: st.bombPlant,
       defuse: st.bombDefuse,
@@ -186,7 +190,10 @@ export class OnlineSession extends BaseSession {
         seat: p.seat,
         team: p.team >= 0 ? p.team : null,
         hillPct: (p.hillPct ?? 0) / 100,
-        color: p.team >= 0 ? TEAM_COLORS[p.team] : SEAT_COLORS[p.seat % SEAT_COLORS.length],
+        // Team colour is the silhouette; the shade is which team-mate. Derived
+        // rather than synced — the seat and the team already say it.
+        color: p.team >= 0 ? TEAM_COLORS[p.team] : teamShade(p.seat, null),
+        shade: teamShade(p.seat, p.team >= 0 ? p.team : null),
         x: p.x, y: p.y ?? 0, z: p.z, aim: p.aim, pitch: p.pitch ?? 0,
         hp: p.hp, alive: p.alive,
         invuln: p.invuln,
@@ -230,6 +237,7 @@ export class OnlineSession extends BaseSession {
 
   sendInput(input) { this.room.send('input', input); }
   sendChat(msg) { this.room.send('chat', msg); }
+  sendPing(intent, x, z) { this.room.send('mark', { intent, x, z }); }
 
   update() { /* server drives the sim */ }
 
@@ -317,7 +325,7 @@ export class LocalSession extends BaseSession {
 
   get looseEggs() {
     return (this.world.looseEggs ?? []).map((e) => ({
-      id: String(e.id), x: e.x, z: e.z, seat: e.fromSeat, returnAt: e.returnAt,
+      id: String(e.id), x: e.x, z: e.z, team: e.fromTeam, returnAt: e.returnAt,
     }));
   }
 
@@ -329,7 +337,7 @@ export class LocalSession extends BaseSession {
       x: b.x,
       z: b.z,
       carriedBy: b.carriedBy,
-      plantSeat: b.state === 'planted' ? b.plantSeat : -1,
+      plantTeam: b.state === 'planted' ? b.plantTeam : -1,
       fuse: b.fuse,
       plant: Math.min(1, b.plant / BOMB.plantTime),
       defuse: Math.min(1, b.defuse / BOMB.defuseTime),
@@ -344,6 +352,7 @@ export class LocalSession extends BaseSession {
       team: p.team,
       hillPct: hillProgress(this.world, p.seat),
       color: p.color,
+      shade: p.shade,
       x: p.x, y: p.y, z: p.z, aim: p.aim, pitch: p.pitch,
       hp: p.hp, alive: p.alive,
       invuln: p.invulnUntil > this.world.time,
@@ -377,7 +386,16 @@ export class LocalSession extends BaseSession {
     const text = typeof msg?.preset === 'number' ? QUICK_CHAT[msg.preset] : String(msg?.text ?? '').slice(0, 80);
     if (!text) return;
     const me = this.world.players.get(this.selfId);
-    this.emit('chat', { name: me?.name ?? 'You', color: me?.color, text });
+    this.emit('chat', { name: me?.name ?? 'You', color: me?.color, text, team: me?.team ?? -1 });
+  }
+
+  sendPing(intent, x, z) {
+    const ping = placePing(this.world, this.selfId, intent, x, z);
+    if (!ping) return;
+    this.emit('ping', {
+      id: ping.id, by: ping.by, byName: ping.byName, intent: ping.intent,
+      x: ping.x, z: ping.z, life: PING.life,
+    });
   }
 
   /**
@@ -446,6 +464,8 @@ export class LocalSession extends BaseSession {
         fx.push(e);
       } else if (e.type === 'matchEnd') {
         this.finish(e);
+      } else if (e.type === 'ping') {
+        // sendPing already emitted it; bots don't ping.
       } else {
         fx.push(e);
       }
@@ -458,12 +478,15 @@ export class LocalSession extends BaseSession {
     const ranking = [...this.world.players.values()]
       .sort((a, b) => b.score - a.score || b.kills - a.kills)
       .map((p, i) => ({
-        place: i + 1, id: p.id, name: p.name, color: p.color, seat: p.seat,
+        place: i + 1, id: p.id, name: p.name, color: p.color, shade: p.shade, seat: p.seat,
+        team: p.team ?? -1,
         kills: p.kills, deaths: p.deaths, score: p.score,
         damage: Math.round(p.damageDealt), bot: p.isBot,
       }));
     this.emit('matchEnd', {
       reason: ev.reason, winner: ev.winner, ranking,
+      winnerTeam: ev.winnerTeam ?? null,
+      teams: this.world.teamScores ? [...this.world.teamScores] : null,
       ranked: false, deltas: {}, offline: true, returnIn: 0,
     });
   }

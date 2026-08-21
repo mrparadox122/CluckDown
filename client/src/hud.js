@@ -1,6 +1,6 @@
 import {
-  QUICK_CHAT, PLAYER, MODES, MULTIKILL_NAMES, MODIFIERS, TEAM_NAMES, HILL,
-  LEVELS, rungOf, xpForLevel,
+  QUICK_CHAT, PLAYER, MODES, MULTIKILL_NAMES, MODIFIERS, TEAM_NAMES, TEAM_COLORS, HILL,
+  LEVELS, rungOf, xpForLevel, PINGS, pingDef, pingWedge, pingAngle,
 } from '@cluckdown/shared';
 
 const $ = (id) => document.getElementById(id);
@@ -27,13 +27,15 @@ function el2(tag, cls, text) {
 }
 
 export class Hud {
-  constructor({ onChat }) {
+  constructor({ onChat, onPing }) {
     this.root = $('hud');
     this.overlay = $('world-overlay');
     this.killfeed = $('killfeed');
     this.chatLog = $('chat-log');
     this.chatInput = $('chat-input');
     this.quickChat = $('quick-chat');
+    this.pingBtn = $('ping-btn');
+    this.pingWheelEl = $('ping-wheel');
     this.scoreboard = $('scoreboard');
     this.announcer = $('announcer');
     this.clockEl = $('match-clock');
@@ -47,6 +49,9 @@ export class Hud {
     this.promptEl = $('action-prompt');
     this.roomChip = $('room-chip');
     this.onChat = onChat;
+    // { open, drag, close } — the Game latches the world point on open and
+    // sends the marker on close. See buildPingWheel.
+    this.onPing = onPing ?? {};
     // Compact by default; expanded shows the full breakdown.
     this.netExpanded = false;
     this.bindNetStats();
@@ -58,6 +63,7 @@ export class Hud {
     this.announceUntil = 0;
 
     this.buildQuickChat();
+    this.buildPingWheel();
     this.bindChatInput();
   }
 
@@ -85,6 +91,7 @@ export class Hud {
     this.promptEl.classList.add('hidden');
     this.promptShown = null;
     this.setKilledBy(null);
+    this.closePingWheel();
     this.clearMarkers();
     this.roomChip.classList.add('hidden');
   }
@@ -92,6 +99,8 @@ export class Hud {
   setMode(mode, modifier = 'none') {
     this.modeId = mode;
     this.modePill.textContent = MODES[mode]?.label ?? mode;
+    // Nobody to ping in a duel.
+    this.pingBtn?.classList.toggle('hidden', !MODES[mode]?.teams);
 
     // A persistent badge, because the opening announcement scrolls away and
     // players who joined mid-match never saw it at all.
@@ -115,18 +124,18 @@ export class Hud {
   setObjective({ teamScores, hill, nests, bomb, self, players }) {
     const el = this.objectiveEl;
 
-    // Egg Heist: the standings ARE the nests, so show all four counts. Nothing
+    // Egg Heist: the standings ARE the nests, so show both counts. Nothing
     // else in the mode tells you whether you are winning.
     if (nests?.length) {
       el.classList.remove('hidden');
       el.classList.remove('contested');
       el.replaceChildren();
       const row = el2('div', 'nest-row');
-      for (const nest of [...nests].sort((a, b) => a.seat - b.seat)) {
-        const owner = players?.find((pp) => pp.seat % 4 === nest.seat);
-        const cell = el2('div', `nest-count${owner?.isSelf ? ' mine' : ''}`, String(nest.eggs));
-        cell.style.setProperty('--seat', owner?.color ?? '#9aa6c4');
-        cell.title = owner ? `${owner.name}'s nest` : 'Empty corner';
+      for (const nest of [...nests].sort((a, b) => a.team - b.team)) {
+        const mine = self?.team === nest.team;
+        const cell = el2('div', `nest-count${mine ? ' mine' : ''}`, String(nest.eggs));
+        cell.style.setProperty('--seat', TEAM_COLORS[nest.team] ?? '#9aa6c4');
+        cell.title = `${TEAM_NAMES[nest.team] ?? 'Roost'} nest`;
         row.append(cell);
       }
       el.append(row);
@@ -142,9 +151,9 @@ export class Hud {
       const planted = bomb.state === 'planted';
       el.classList.toggle('contested', planted);
       if (planted) {
-        const victim = players?.find((pp) => pp.seat % 4 === bomb.plantSeat);
+        const whose = TEAM_NAMES[bomb.plantTeam];
         el.append(el2('span', 'bomb-label', `\u{1F4A3} ${Math.ceil(bomb.fuse)}s`));
-        el.append(el2('span', 'hill-label', victim ? `in ${victim.name}'s nest` : 'planted'));
+        el.append(el2('span', 'hill-label', whose ? `in the ${whose} nest` : 'planted'));
       } else if (bomb.carriedBy) {
         const who = players?.find((pp) => pp.id === bomb.carriedBy);
         el.append(el2('span', 'bomb-label',
@@ -166,7 +175,9 @@ export class Hud {
     el.classList.remove('hidden');
     el.replaceChildren();
 
-    if (teamScores) {
+    // The hill comes first even though every mode has a team score now: kills
+    // are not how King of the Coop is won, and the meter is.
+    if (!hill) {
       const [blue, red] = teamScores;
       const mk = (n, cls, lead) => {
         const d = el2('div', `team-score ${cls}${lead ? ' leading' : ''}`, String(n));
@@ -185,6 +196,8 @@ export class Hud {
     const label = moving
       ? `Moving in ${Math.ceil(hill.moveAt)}`
       : (hill.contested ? 'Contested' : (hill.holder ? 'Held' : 'Open'));
+    // hillPct is the ROOST's hold in team play — four players rotating through
+    // the zone are one hold, so one meter is the honest readout.
     const meter = el2('div', 'hill-meter');
     const fill = el2('i');
     fill.style.transform = `scaleX(${Math.max(0, Math.min(1, self?.hillPct ?? 0))})`;
@@ -259,7 +272,7 @@ export class Hud {
       let el = this.markers.get(it.key);
       if (!el) {
         el = el2('div', 'marker');
-        el.append(el2('span', 'mk-icon'), el2('span', 'mk-dist'));
+        el.append(el2('span', 'mk-icon'), el2('span', 'mk-who'), el2('span', 'mk-dist'));
         this.overlay.append(el);
         this.markers.set(it.key, el);
       }
@@ -289,11 +302,14 @@ export class Hud {
         y = Math.max(pad, Math.min(h - pad, y));
       }
 
-      el.className = `marker${off ? ' is-off' : ''}${it.urgent ? ' is-urgent' : ''}`;
+      el.className = `marker${off ? ' is-off' : ''}${it.urgent ? ' is-urgent' : ''}${it.ping ? ' is-ping' : ''}`;
       el.style.transform = `translate(${x}px, ${y}px) translate(-50%, -50%)`;
       el.style.setProperty('--mk', it.color ?? '#ffffff');
-      el.firstChild.textContent = it.icon;
-      el.lastChild.textContent = it.dist != null ? `${Math.round(it.dist)}m` : '';
+      el.style.opacity = it.fade != null ? String(it.fade) : '';
+      const [icon, who, dist] = el.children;
+      icon.textContent = it.icon;
+      who.textContent = it.who ?? '';
+      dist.textContent = it.dist != null ? `${Math.round(it.dist)}m` : '';
     }
 
     for (const [key, el] of this.markers) {
@@ -309,25 +325,63 @@ export class Hud {
   }
 
   /**
-   * Shows or hides the reticle. That is the whole job now.
+   * The reticle: where it is aiming, and how wide the shot can go.
    *
-   * It used to be projected into screen space every frame, because the shot
-   * ignored pitch and left along the yaw at chest height — a reticle at screen
-   * centre would have been pointing somewhere the bullet was never going. Aim
-   * is genuinely 3D now and fire() builds the bullet from the same yaw and
-   * pitch the camera looks down, so screen centre is the aim point by
-   * construction and the CSS can simply park it there.
+   * WHERE is free — screen centre, by construction. It used to be projected
+   * into screen space every frame, because the shot ignored pitch and left
+   * along the yaw at chest height, so a reticle at screen centre would have
+   * been pointing somewhere the bullet was never going. Aim is genuinely 3D
+   * now and fire() builds the bullet from the same yaw and pitch the camera
+   * looks down, so the CSS can simply park it there.
+   *
+   * HOW WIDE is the part that is new, and it is the whole reason the arms
+   * exist. `gap` is the movement cone measured in real pixels at this frame's
+   * field of view — not a stylised wobble, the actual radius a round can land
+   * inside. A player who is being made less accurate has to be able to watch it
+   * happen, or the miss reads as the game cheating rather than as the cost of
+   * having kept running.
    *
    * Hidden while dead, where there is nothing to aim.
    */
-  setCrosshair(visible, state = '') {
+  setCrosshair(visible, state = '', gap = 0) {
     const el = $('crosshair');
     el.style.opacity = visible ? '1' : '0';
+    // A floor, so the reticle never closes into an unreadable blob at rest —
+    // and never smaller than the dot it has to stay clear of.
+    el.style.setProperty('--gap', `${Math.max(4, gap).toFixed(1)}px`);
     // 'dry' = nothing to fire, 'busy' = refilling. Both are answers to the one
     // question a player asks in the instant before pulling the trigger, put
     // where they are already looking.
     el.classList.toggle('dry', visible && state === 'dry');
     el.classList.toggle('busy', visible && state === 'busy');
+  }
+
+  /**
+   * Hit confirmation, at the crosshair.
+   *
+   * The game had none at all: the only way to learn a shot had landed was to
+   * watch a health bar you were not looking at, or to notice feathers on a
+   * chicken you were busy aiming at. At a 400ms time-to-kill a duel is four
+   * decisions long, and "did that land" is the input to every one of them —
+   * a shooter without a hitmarker is asking the player to fight blind.
+   *
+   * Restarted by hand rather than by retriggering the class: three hits inside
+   * one animation is normal at this fire rate, and without the reflow the
+   * second and third would silently do nothing.
+   *
+   * @param kind 'hit' | 'head' | 'kill'
+   */
+  hitMarker(kind = 'hit') {
+    const el = $('crosshair')?.querySelector('.ch-mark');
+    if (!el) return;
+    el.classList.remove('show', 'is-head', 'is-kill');
+    // Forcing layout is what makes the restart happen. It is one element, once
+    // per landed shot, and the alternative is a hitmarker that stops confirming
+    // hits precisely when they are coming fastest.
+    void el.offsetWidth;
+    if (kind === 'kill') el.classList.add('is-kill');
+    else if (kind === 'head') el.classList.add('is-head');
+    el.classList.add('show');
   }
 
   /**
@@ -574,6 +628,87 @@ export class Hud {
     }));
   }
 
+  // -------------------------------------------------------------- the wheel
+
+  /** Five wedges around screen centre. The picking rule is in pingWedge. */
+  buildPingWheel() {
+    const R = 96;
+    this.pingItems = PINGS.map((def, i) => {
+      const a = pingAngle(i);
+      const node = el2('div', 'pw-item');
+      node.style.left = `${Math.cos(a) * R}px`;
+      node.style.top = `${Math.sin(a) * R}px`;
+      node.style.setProperty('--pw', def.color);
+      node.append(el2('span', 'pw-icon', def.icon), el2('span', null, def.label));
+      return node;
+    });
+    this.pingWheelEl.replaceChildren(...this.pingItems);
+    this.pingVec = { x: 0, y: 0 };
+    this.pingPick = 0;
+
+    if (!this.pingBtn) return;
+    let id = null;
+    let from = null;
+    this.pingBtn.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      id = e.pointerId;
+      from = { x: e.clientX, y: e.clientY };
+      this.pingBtn.setPointerCapture?.(id);
+      this.pingBtn.classList.add('is-held');
+      this.onPing.open?.();
+    });
+    this.pingBtn.addEventListener('pointermove', (e) => {
+      if (e.pointerId !== id || !from) return;
+      this.movePingWheel(e.clientX - from.x, e.clientY - from.y, true);
+    });
+    const end = (e) => {
+      if (e.pointerId !== id) return;
+      id = null;
+      from = null;
+      this.pingBtn.classList.remove('is-held');
+      this.onPing.close?.(this.closePingWheel());
+    };
+    this.pingBtn.addEventListener('pointerup', end);
+    this.pingBtn.addEventListener('pointercancel', end);
+  }
+
+  openPingWheel() {
+    this.pingVec = { x: 0, y: 0 };
+    this.pingPick = 0;
+    this.pingWheelEl.classList.remove('hidden');
+    this.highlightPing();
+  }
+
+  /** @param absolute true when the caller passes a total drag, not a delta. */
+  movePingWheel(dx, dy, absolute = false) {
+    if (this.pingWheelEl.classList.contains('hidden')) return;
+    if (absolute) this.pingVec = { x: dx, y: dy };
+    else this.pingVec = { x: this.pingVec.x + dx, y: this.pingVec.y + dy };
+    this.highlightPing();
+  }
+
+  highlightPing() {
+    this.pingPick = pingWedge(this.pingVec.x, this.pingVec.y);
+    this.pingItems.forEach((node, i) => node.classList.toggle('is-on', i === this.pingPick));
+  }
+
+  /** Hides the wheel and returns the intent that was aimed at, if any. */
+  closePingWheel() {
+    if (this.pingWheelEl.classList.contains('hidden')) return null;
+    this.pingWheelEl.classList.add('hidden');
+    return PINGS[this.pingPick]?.id ?? null;
+  }
+
+  /** A team-mate said something. Language-independent on the map, named here. */
+  addPingLine({ byName, intent }) {
+    const def = pingDef(intent);
+    const row = el('div', 'chat-row');
+    const who = el('b', null, `${byName ?? 'Team'}: `);
+    who.style.color = def.color;
+    row.append(who, el('span', null, `${def.icon} ${def.label}`));
+    this.pushRow(this.chatLog, row, MAX_CHAT);
+  }
+
   bindChatInput() {
     this.chatInput.addEventListener('keydown', (e) => {
       e.stopPropagation(); // don't let WASD in the chat box drive the chicken
@@ -634,8 +769,11 @@ export class Hud {
     this.pushRow(this.chatLog, row, MAX_CHAT);
   }
 
-  addChat({ name, color, text }) {
+  addChat({ name, color, text, team }) {
     const row = el('div', 'chat-row');
+    // Says out loud that only your side hears it — otherwise a callout typed
+    // at the enemy looks like it went nowhere.
+    if (team === 0 || team === 1) row.append(el('span', 'chat-tag', '[TEAM] '));
     const n = el('b', null, `${name}: `);
     n.style.color = color || '#fff';
     row.append(n, document.createTextNode(text));
@@ -822,17 +960,38 @@ export class Hud {
   }
 
   syncScoreboard(players, selfId) {
-    const sorted = [...players].sort((a, b) => b.score - a.score || b.kills - a.kills);
-    const rows = sorted.map((p) => {
-      const row = el('div', `sb-row${p.id === selfId ? ' is-self' : ''}${p.alive ? '' : ' is-dead'}`);
+    const byScore = (a, b) => b.score - a.score || b.kills - a.kills;
+    const row = (p) => {
+      const r = el('div', `sb-row${p.id === selfId ? ' is-self' : ''}${p.alive ? '' : ' is-dead'}`);
       const dot = el('div', 'sb-dot');
-      dot.style.background = p.color;
+      // The shade, not the team colour: eight rows in two colours tells you
+      // nothing about who is who, which is the only thing a scoreboard is for.
+      dot.style.background = p.shade ?? p.color;
       const k = el('div', 'sb-k');
       k.append(el('b', null, String(p.kills)), document.createTextNode(` / ${p.deaths}`));
-      row.append(dot, el('div', 'sb-name', p.name + (p.isBot ? ' 🤖' : '')), k);
-      return row;
-    });
-    this.scoreboard.replaceChildren(...rows);
+      r.append(dot, el('div', 'sb-name', p.name + (p.isBot ? ' 🤖' : '')), k);
+      return r;
+    };
+
+    // Free-for-all is one list. Team play is two, yours on top — eight names in
+    // score order is a wall you have to read, and in a team game the question
+    // is "how is my side doing", not "what place am I".
+    const teamed = players.some((p) => p.team === 0 || p.team === 1);
+    if (!teamed) {
+      this.scoreboard.replaceChildren(...[...players].sort(byScore).map(row));
+      return;
+    }
+
+    const mine = players.find((p) => p.id === selfId)?.team ?? 0;
+    const out = [];
+    for (const team of [mine, 1 - mine]) {
+      const side = players.filter((p) => p.team === team).sort(byScore);
+      if (!side.length) continue;
+      const head = el('div', 'sb-team', TEAM_NAMES[team]);
+      head.style.color = TEAM_COLORS[team];
+      out.push(head, ...side.map(row));
+    }
+    this.scoreboard.replaceChildren(...out);
   }
 
   setRespawn(seconds) {

@@ -7,6 +7,10 @@ import { Schema, MapSchema, ArraySchema, defineTypes } from '@colyseus/schema';
 // ~5 shots/sec that's the difference between syncing ~60 moving entities every
 // tick and sending a handful of tiny events. Hit detection still happens
 // server-side and arrives as authoritative `hit`/`kill` events.
+//
+// NOTE ON PINGS: also not synced, for a different reason. Synced state goes to
+// every client, and a team marker an opponent can read is worse than no marker
+// at all — so pings are sent as messages, to team-mates only.
 
 export class PlayerState extends Schema {}
 defineTypes(PlayerState, {
@@ -75,10 +79,10 @@ defineTypes(PlayerState, {
   contractDone: 'float32', // progress toward the goal
 });
 
-/** One player's nest: home base in Egg Heist, plant site in Plant & Defuse. */
+/** One team's nest: home base in Egg Heist, plant site in Plant & Defuse. */
 export class NestState extends Schema {}
 defineTypes(NestState, {
-  seat: 'uint8',
+  team: 'uint8',
   x: 'float32',
   z: 'float32',
   eggs: 'uint8',
@@ -89,7 +93,7 @@ export class EggState extends Schema {}
 defineTypes(EggState, {
   x: 'float32',
   z: 'float32',
-  seat: 'uint8',       // nest it belongs to
+  team: 'uint8',       // nest it belongs to
   returnAt: 'float32', // seconds until it walks itself home
 });
 
@@ -162,7 +166,7 @@ defineTypes(ArenaState, {
   bombX: 'float32',
   bombZ: 'float32',
   bombCarrier: 'string',
-  bombSeat: 'int8',       // nest it is planted in, -1 when it isn't
+  bombTeam: 'int8',       // whose nest it is planted in, -1 when it isn't
   bombFuse: 'float32',
   bombPlant: 'float32',   // 0..1 plant progress
   bombDefuse: 'float32',  // 0..1 defuse progress

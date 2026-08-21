@@ -4,6 +4,7 @@ import {
   stepBots, initBot, botName,
   MODES, TICK_HZ, TICK_DT, PATCH_MS, MAX_CATCHUP, QUICK_CHAT, PLAYER, cleanRoomCode,
   hillProgress, castVote, voteTally, beginMatch, MAP_VOTE, contractInfo, BOMB,
+  placePing, PING, seatOrder,
 } from '@cluckdown/shared';
 import {
   ArenaState, PlayerState, PickupState, MapChoiceState, NestState, EggState,
@@ -44,6 +45,9 @@ export class ArenaRoom extends Room {
 
     this.world = createWorld({ mode });
     this.seats = new Array(this.cfg.maxPlayers).fill(null);
+    // Seat index decides your team, so who gets which seat decides who you
+    // play WITH. A coded room is friends; a public queue is strangers.
+    this.seatOrder = seatOrder(this.cfg.maxPlayers, !!this.code);
     // Friends need longer to gather than a public queue does.
     this.botFillAt = this.code ? BOT_FILL_DELAY_PRIVATE : BOT_FILL_DELAY;
     this.postMatch = 0;
@@ -78,6 +82,12 @@ export class ArenaRoom extends Room {
     });
 
     this.onMessage('chat', (client, msg) => this.handleChat(client, msg));
+
+    // 'mark', NOT 'ping' — 'ping' is already the RTT probe below, and Colyseus
+    // keeps one handler per message name, so the second registration silently
+    // replaces the first. A team marker and a latency probe sharing a name is
+    // one of them quietly never arriving.
+    this.onMessage('mark', (client, msg) => this.handlePing(client, msg));
 
     this.onMessage('vote', (client, mapId) => {
       if (!castVote(this.world, client.sessionId, String(mapId ?? ''))) return;
@@ -197,22 +207,26 @@ export class ArenaRoom extends Room {
   /**
    * Claims a seat for an arriving human.
    *
-   * A seat decides spawn corner and colour, so two players must never share
-   * one. If bots hold every seat, one of them makes way — a human always
-   * outranks a bot. Returns -1 only if the room is genuinely full of humans,
-   * which maxClients should already have prevented.
+   * A seat decides your team, your spawn lane and your shade, so two players
+   * must never share one. If bots hold every seat, one of them makes way — a
+   * human always outranks a bot. Returns -1 only if the room is genuinely full
+   * of humans, which maxClients should already have prevented.
+   *
+   * Both halves walk seatOrder rather than the raw seat list, or a private
+   * room full of bots would evict one at random and split the friends who just
+   * typed the same code.
    */
   takeSeat(id) {
-    let seat = this.seats.indexOf(null);
+    let seat = this.seatOrder.find((i) => this.seats[i] === null) ?? -1;
     if (seat < 0) seat = this.evictBotSeat();
     if (seat < 0) return -1;
     this.seats[seat] = id;
     return seat;
   }
 
-  /** Removes the first bot found and hands back the seat index it freed. */
+  /** Removes the best-placed bot and hands back the seat index it freed. */
   evictBotSeat() {
-    for (let i = 0; i < this.seats.length; i++) {
+    for (const i of this.seatOrder) {
       const occupant = this.seats[i];
       const p = occupant ? this.world.players.get(occupant) : null;
       if (!p?.isBot) continue;
@@ -247,7 +261,7 @@ export class ArenaRoom extends Room {
   fillWithBots() {
     if (!this.cfg.fillWithBots) return;
     let guard = 0;
-    while (this.world.players.size < this.cfg.maxPlayers && guard++ < 8) {
+    while (this.world.players.size < this.cfg.maxPlayers && guard++ < 16) {
       const seat = this.seats.indexOf(null);
       if (seat < 0) break;
       const id = `bot_${seat}_${Math.random().toString(36).slice(2, 7)}`;
@@ -280,7 +294,43 @@ export class ArenaRoom extends Room {
     }
     if (!text) return;
 
-    this.broadcast('chat', { name: p.name, color: p.color, text });
+    // Team modes keep chat inside the team. Calling a rotation to the people
+    // you are shooting at is not communication, it is a handicap.
+    const line = { name: p.name, color: p.color, text, team: p.team ?? -1 };
+    if (p.team === null) {
+      this.broadcast('chat', line);
+      return;
+    }
+    this.sendToTeam(p.team, 'chat', line);
+  }
+
+  /**
+   * A team marker.
+   *
+   * The world point comes from the client, because it is the point under their
+   * own crosshair and only their camera knows where that is. The simulation
+   * checks it is inside the arena and within range before it becomes a marker,
+   * and does the rate limiting — see placePing.
+   */
+  handlePing(client, msg) {
+    const ping = placePing(
+      this.world, client.sessionId, msg?.intent, msg?.x, msg?.z,
+    );
+    if (!ping) return;
+    const out = {
+      id: ping.id, by: ping.by, byName: ping.byName, intent: ping.intent,
+      x: ping.x, z: ping.z, life: PING.life,
+    };
+    if (ping.team === null) client.send('mark', out);
+    else this.sendToTeam(ping.team, 'mark', out);
+  }
+
+  /** Broadcast, but only to the clients whose chicken is on this side. */
+  sendToTeam(team, type, payload) {
+    for (const c of this.clients) {
+      if (this.world.players.get(c.sessionId)?.team !== team) continue;
+      c.send(type, payload);
+    }
   }
 
   // ------------------------------------------------------------------- tick
@@ -422,6 +472,10 @@ export class ArenaRoom extends Room {
         case 'matchEnd':
           this.finishMatch(e);
           break;
+        case 'ping':
+          // Already sent to the team that owns it in handlePing. Letting it
+          // into the fx broadcast would hand every opponent the marker.
+          break;
         case 'bomberDown':
           this.broadcast('feed', {
             kind: 'bomber',
@@ -447,7 +501,9 @@ export class ArenaRoom extends Room {
         id: p.id,
         name: p.name,
         color: p.color,
+        shade: p.shade,
         seat: p.seat,
+        team: p.team ?? -1,
         kills: p.kills,
         deaths: p.deaths,
         score: p.score,
@@ -468,6 +524,8 @@ export class ArenaRoom extends Room {
     this.broadcast('matchEnd', {
       reason: ev.reason,
       winner: ev.winner,
+      winnerTeam: ev.winnerTeam ?? null,
+      teams: this.cfg.teams ? [...this.world.teamScores] : null,
       ranking,
       ranked: this.cfg.ranked,
       deltas,
@@ -604,7 +662,7 @@ export class ArenaRoom extends Room {
       this.state.nests.clear();
       for (const n of nests) {
         const ns = new NestState();
-        ns.seat = n.seat;
+        ns.team = n.team;
         ns.x = n.x;
         ns.z = n.z;
         ns.eggs = n.eggs;
@@ -633,7 +691,7 @@ export class ArenaRoom extends Room {
         es = new EggState();
         es.x = egg.x;
         es.z = egg.z;
-        es.seat = egg.fromSeat;
+        es.team = egg.fromTeam;
         this.state.eggs.set(key, es);
       }
       es.returnAt = Math.max(0, egg.returnAt);
@@ -651,7 +709,7 @@ export class ArenaRoom extends Room {
     if (!bomb) {
       s.bombState = '';
       s.bombCarrier = '';
-      s.bombSeat = -1;
+      s.bombTeam = -1;
       s.bombPlant = 0;
       s.bombDefuse = 0;
       return;
@@ -660,7 +718,7 @@ export class ArenaRoom extends Room {
     s.bombX = bomb.x;
     s.bombZ = bomb.z;
     s.bombCarrier = bomb.carriedBy ?? '';
-    s.bombSeat = bomb.state === 'planted' ? bomb.plantSeat : -1;
+    s.bombTeam = bomb.state === 'planted' ? bomb.plantTeam : -1;
     s.bombFuse = Math.max(0, bomb.fuse);
     // Sent as a 0..1 share so the client can draw a ring without knowing the
     // hold durations.

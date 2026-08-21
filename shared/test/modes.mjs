@@ -8,7 +8,7 @@
 
 import {
   createWorld, addPlayer, stepWorld, stepBots, initBot, hillProgress,
-  MODES, TICK_DT, HILL, SHRINK, PLAYER, beginMatch,
+  MODES, MAPS, TICK_DT, HILL, SHRINK, PLAYER, beginMatch,
 } from '../src/index.js';
 
 const failures = [];
@@ -92,14 +92,22 @@ check('the team result matches the team scores',
 }
 check('team kills were counted', teams.world.teamScores.some((n) => n > 0), JSON.stringify(teams.world.teamScores));
 
-console.log('\n--- Last Chicken Standing ---');
-const surv = play('survival');
+console.log('\n--- Last Chicken Standing (last roost) ---');
+// Last Chicken is FFA-with-no-respawn by definition, so 4v4 reinterprets it as
+// last ROOST standing: the round ends when one side is wiped out, not when one
+// body is left.
+const surv = play('survival', { players: 8 });
 const aliveAtEnd = [...surv.world.players.values()].filter((p) => p.alive);
 console.log(`  ended=${surv.world.phase} after ${surv.elapsed.toFixed(0)}s, safeHalf ${surv.world.safeHalf.toFixed(1)}, ${aliveAtEnd.length} alive`);
 check('the match resolved', surv.world.phase === 'over', surv.world.phase);
-check('exactly one chicken is left', aliveAtEnd.length <= 1, `${aliveAtEnd.length} alive`);
+check('exactly one roost is left standing',
+  new Set(aliveAtEnd.map((p) => p.team)).size <= 1,
+  aliveAtEnd.map((p) => `${p.name}=T${p.team}`).join(' ') || 'nobody');
 check('it ended by last-standing, not the clock', surv.end?.reason === 'lastStanding', surv.end?.reason);
 check('a winner was named', !!surv.end?.winner, String(surv.end?.winner));
+check('the winning roost is the one still up',
+  aliveAtEnd.length === 0 || surv.end?.winnerTeam === aliveAtEnd[0].team,
+  `winnerTeam=${surv.end?.winnerTeam}`);
 check('nobody respawned', (surv.events.respawn ?? 0) === 0, `${surv.events.respawn ?? 0} respawns`);
 // Bot rounds can end before the boundary has had time to move, so drive the
 // shrink deterministically instead of depending on match length.
@@ -185,12 +193,27 @@ check('a contested hill scores for nobody worth mentioning',
   `${(hillProgress(fight, 0) * 100).toFixed(2)}% / ${(hillProgress(fight, 1) * 100).toFixed(2)}% over 40s of standing on it`);
 check('contested is reported to clients', fight.hill.contested === true);
 
-console.log('\n--- free-for-all is unaffected ---');
-const ffa = play('casual', { seconds: 300 });
-check('casual players have no team', [...ffa.world.players.values()].every((p) => p.team === null));
-check('casual has no hill or team score', ffa.world.hill === null && ffa.world.teamScores === null);
-check('casual never shrinks', ffa.world.safeHalf === MODES.casual.arena / 2, String(ffa.world.safeHalf));
+console.log('\n--- Casual is four a side now ---');
+const ffa = play('casual', { seconds: 300, players: 8 });
+const casualRoster = [...ffa.world.players.values()];
+check('casual splits four and four',
+  casualRoster.filter((p) => p.team === 0).length === 4
+  && casualRoster.filter((p) => p.team === 1).length === 4,
+  casualRoster.map((p) => `${p.name}=T${p.team}`).join(' '));
+check('casual has a team score and no hill', ffa.world.hill === null && !!ffa.world.teamScores);
+check('casual never shrinks', ffa.world.safeHalf === MAPS.coop.size / 2, String(ffa.world.safeHalf));
 check('casual still respawns', (ffa.events.respawn ?? 0) > 0, `${ffa.events.respawn ?? 0} respawns`);
+check('casual has no friendly fire either', ffa.friendlyHits === 0, `${ffa.friendlyHits} friendly hits`);
+
+console.log('\n--- 1v1 is the one mode left with no team ---');
+const duel = createWorld({ mode: 'duel', seed: 11 });
+addPlayer(duel, { id: 'd0', name: 'D0', seat: 0 });
+addPlayer(duel, { id: 'd1', name: 'D1', seat: 1 });
+beginMatch(duel, 'coop');
+check('duel players have no team', [...duel.players.values()].every((p) => p.team === null));
+check('duel has no team score', duel.teamScores === null);
+// The maps grew ~12% for 4v4; duel scales them back down, because 1v1 did not.
+check('duel keeps its own footprint', Math.abs(duel.arena.size - 32) < 1.5, String(duel.arena.size));
 
 console.log(failures.length ? `\n✗ ${failures.length} check(s) failed\n` : '\n✓ all checks passed\n');
 process.exit(failures.length ? 1 : 0);

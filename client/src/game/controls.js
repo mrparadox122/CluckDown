@@ -1,6 +1,7 @@
 import nipplejs from 'nipplejs';
 import { AIM_ASSIST, PLAYER, pickAimTarget, pullAim, pullPitch } from '@cluckdown/shared';
 import { asView, convergeAim } from './view.js';
+import { Look } from './look.js';
 
 /**
  * First-person input.
@@ -30,21 +31,11 @@ import { asView, convergeAim } from './view.js';
 // BASE, because the player multiplies it. What feels right depends on the
 // device, the grip and the person, and no single pair of numbers has ever
 // served everyone — hence the sensitivity slider in Settings.
+// Z for the team wheel: within reach of WASD, and not already spoken for.
+const PING_KEY = 'KeyZ';
+
 const FP_MOUSE_SENS = 0.0022;
 const FP_TOUCH_SENS = 0.0052;
-
-// Vertical sensitivity, as a fraction of horizontal.
-//
-// It used to be 0.65 on the grounds that pitch was a look control rather than
-// an aim one — everything stood on the ground plane, so the vertical axis did
-// nothing but tilt the horizon. Pitch is half of the shot now, so damping it is
-// damping your aim: "the crosshair only moves left and right" was the report,
-// and a sluggish vertical axis is the mild version of exactly that.
-//
-// Not quite 1.0 either. A screen is wider than it is tall, so a thumb has less
-// vertical travel to spend, and every shooter that ships pulls this number
-// slightly under.
-const FP_PITCH_RATIO = 0.9;
 
 export class Controls {
   constructor({ leftZone, canvas }) {
@@ -55,11 +46,15 @@ export class Controls {
     this.mouseDown = false;
     this.usingTouch = false;
 
-    // Look angles are held here, not read back from the simulation: looking
-    // around has to respond to this frame's input, not to a network round-trip.
-    this.yaw = 0;
-    this.pitch = 0;
+    // Where you are looking — including the recoil climb and the movement cone.
+    // One object, deliberately: the camera renders `look.pitch` and the input
+    // struct is built from `look.pitch`, so there is no second angle for them
+    // to disagree about. See look.js for the bug that came of having one.
+    this.look = new Look();
     this.pointerLocked = false;
+
+    // Ping wheel. While it is up the pointer aims the wheel, not the camera.
+    this.pingOpen = false;
 
     // Aim assist state. Applied to our own look angles before sending — see
     // shared/src/aim.js for why it lives on this side of the wire.
@@ -67,9 +62,6 @@ export class Controls {
     this.aimTarget = null;
     this.assistYaw = 0;
     this.assistPitch = 0;
-
-    // Player-set multiplier over the two base sensitivities above.
-    this.sensitivity = 1;
 
     // Which camera is rendering. It changes nothing about how you look around
     // and everything about where the shot has to be pointed — see view.js.
@@ -123,11 +115,19 @@ export class Controls {
       this.keys.add(e.code);
       // Space scrolls the page and clicks whatever has focus if left alone.
       if (e.code === 'Space') e.preventDefault();
+      // Hold to aim the wheel, tap to send the first intent — see setPingOpen.
+      if (e.code === PING_KEY) { e.preventDefault(); this.setPingOpen(true); }
     };
-    this.onKeyUp = (e) => this.keys.delete(e.code);
+    this.onKeyUp = (e) => {
+      this.keys.delete(e.code);
+      if (e.code === PING_KEY) this.setPingOpen(false);
+    };
     this.onBlur = () => {
       this.keys.clear();
       this.mouseDown = false;
+      // A wheel left open behind a backgrounded tab swallows every look input
+      // when the player comes back.
+      this.setPingOpen(false);
       // Backgrounding the tab does not reliably deliver pointerup for a thumb
       // that is still down, and a button left held is a chicken that fires (or
       // hops) forever once you come back.
@@ -221,6 +221,32 @@ export class Controls {
     canvas.addEventListener('contextmenu', this.onContextMenu);
   }
 
+  // --------------------------------------------------------------- look state
+  //
+  // `yaw` and `pitch` read and write straight through to the Look. Everything
+  // outside this class — the camera, aim assist, the browser tests — has always
+  // said `controls.yaw`, and it should keep meaning exactly one angle rather
+  // than starting to mean "one of the two angles".
+
+  get yaw() { return this.look.yaw; }
+
+  set yaw(v) { this.look.yaw = v; }
+
+  get pitch() { return this.look.pitch; }
+
+  set pitch(v) { this.look.pitch = v; }
+
+  /** The movement cone, in radians. The crosshair draws it at this size. */
+  get spread() { return this.look.spread; }
+
+  /**
+   * A shot actually left the gun — climb.
+   *
+   * Called from the `shot` event rather than from the trigger, because the
+   * trigger is a request: a round the crop could not pay for must not kick.
+   */
+  addRecoil() { this.look.kick(); }
+
   // ------------------------------------------------------------ pointer lock
 
   requestLock() {
@@ -242,7 +268,7 @@ export class Controls {
    * you are not allowed to fire along.
    */
   clampPitch(min = PLAYER.pitchMin, max = PLAYER.pitchMax) {
-    this.pitch = Math.max(min, Math.min(max, this.pitch));
+    this.look.clampPitch(min, max);
   }
 
   setAssist(on) { this.assistOn = on; }
@@ -274,7 +300,7 @@ export class Controls {
    */
   setSensitivity(mul) {
     const n = Number(mul);
-    this.sensitivity = Number.isFinite(n) && n > 0 ? Math.min(4, Math.max(0.1, n)) : 1;
+    this.look.sensitivity = Number.isFinite(n) && n > 0 ? Math.min(4, Math.max(0.1, n)) : 1;
   }
 
   /**
@@ -285,9 +311,23 @@ export class Controls {
    * multiplier cannot apply to some of them and not others.
    */
   applyLook(dx, dy, base) {
-    const k = base * this.sensitivity;
-    this.yaw += dx * k;
-    this.pitch -= dy * k * FP_PITCH_RATIO;
+    // The ping wheel eats the pointer while it is up. It has to: the marker is
+    // latched at whatever the crosshair was on when the wheel opened, and
+    // letting the same mouse movement also turn the camera means picking an
+    // intent drags the shot you were about to call out off the screen.
+    if (this.pingOpen) {
+      this.onPingDrag?.(dx, dy);
+      return;
+    }
+    this.look.turn(dx, dy, base);
+  }
+
+  /** Opens or closes the wheel. Idempotent — a key repeat must not reopen it. */
+  setPingOpen(on) {
+    if (this.pingOpen === !!on) return;
+    this.pingOpen = !!on;
+    if (this.pingOpen) this.onPingOpen?.();
+    else this.onPingClose?.();
   }
 
   /** Drag-to-reposition mode, for both thumb buttons at once. */
@@ -327,6 +367,13 @@ export class Controls {
       sx = this.stickX;
       sz = this.stickZ;
     }
+
+    // Settle the recoil and resize the movement cone, from the input that is
+    // being sampled this very frame. Both are pure functions of what the player
+    // is doing right now, which is why neither waits for the server: a reticle
+    // that widened a network tick after you started running would be describing
+    // a stance you had already left.
+    this.look.step(dt, Math.hypot(sx, sz), (self?.y ?? 0) > 0);
 
     const look = this.assistedLook(self, foes, dt);
 

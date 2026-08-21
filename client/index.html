@@ -108,11 +108,20 @@
             <span>Announcer voice</span>
             <select id="gfx-voice"></select>
           </label>
-          <label class="setting toggle">
+          <!-- A select rather than a toggle, because the honest answer has three
+               values. Assist is a thumb aid: on touch it is the difference
+               between aiming and flailing, and on a mouse it pulls at an angle
+               you already set exactly, which is why shots stop feeling like
+               yours. Auto asks the device and gets it right for both. -->
+          <label class="setting">
             <span>Aim assist</span>
-            <input id="gfx-assist" type="checkbox" />
+            <select id="gfx-assist">
+              <option value="auto">Auto &mdash; touch only</option>
+              <option value="on">Always on</option>
+              <option value="off">Always off</option>
+            </select>
           </label>
-          <p class="settings-hint">Aim assist gently pulls your crosshair onto a nearby chicken. On by default — aiming with a thumb is hard.</p>
+          <p class="settings-hint">Gently pulls your aim onto a nearby chicken. <strong>Auto</strong> turns it on for touch and off for a mouse &mdash; a thumb needs the help, and a pointer is already exact, so assist just fights it.</p>
           <label class="setting toggle">
             <span>Move the touch buttons</span>
             <input id="gfx-fire-edit" type="checkbox" />
@@ -161,8 +170,26 @@
          along exactly the line the camera looks down. It used to be projected
          16 units along the firing line specifically BECAUSE that was not true —
          shots went flat whatever the view did, and a centre reticle would have
-         been lying. -->
-    <div id="crosshair" class="crosshair"></div>
+         been lying.
+
+         Four arms, a centre gap and a dot, rather than the two bars that used
+         to cross THROUGH the aim pixel. The gap is not decoration: the exact
+         point you are aiming at is the one place a reticle must not cover, and
+         a chicken at range is a couple of dozen pixels tall. The dot is the aim
+         point itself; the arms are the movement cone, and they open and close
+         with it — an inaccuracy the player cannot see is an unfair one.
+
+         The mark is hit confirmation, and it is the other half of the same
+         idea: at a 400ms time-to-kill a fight is four decisions long, and
+         "did that land" has to be answered before the next one. -->
+    <div id="crosshair" class="crosshair">
+      <i class="ch-dot"></i>
+      <i class="ch-arm up"></i>
+      <i class="ch-arm down"></i>
+      <i class="ch-arm left"></i>
+      <i class="ch-arm right"></i>
+      <i class="ch-mark"></i>
+    </div>
     <!-- Touch first-person controls.
          `#look-zone` is a bare swipe surface, NOT a stick. Every successful
          mobile shooter (CoD Mobile, PUBG, Standoff) does it this way: a stick
@@ -181,6 +208,15 @@
     <button id="jump-btn" class="jump-btn" type="button" aria-label="Jump">
       <span>JUMP</span>
     </button>
+    <!-- Team ping. Hold to open the wheel, drag to pick, release to send; a
+         plain tap sends the first intent. On desktop the same wheel opens on Z
+         and is aimed with the mouse — look is suspended while it is up, or
+         choosing an intent would drag the marker off whatever you were
+         pointing at. -->
+    <button id="ping-btn" class="ping-btn" type="button" aria-label="Ping">
+      <span>PING</span>
+    </button>
+    <div id="ping-wheel" class="ping-wheel hidden"></div>
     <!-- Bottom-centre strips.
          These MUST be direct children of #hud. Nested inside .hud-top they
          positioned against it instead of the viewport, and .hud-top grows with

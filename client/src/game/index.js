@@ -7,12 +7,14 @@ import {
 } from './entities.js';
 import { BulletPool, DebrisPool, BlastRings, MuzzleFlash } from './fx.js';
 import { Controls } from './controls.js';
-import { asView } from './view.js';
+import { asView, lookBasis, rayOrigin, convergeDistance } from './view.js';
+import { assistOn } from '../graphics.js';
 import { sfx } from '../audio/sfx.js';
 import { tts, SAY } from '../audio/index.js';
 import {
   PLAYER, BULLET, BOMBER, MODIFIERS, MODES, HILL, BOMB, HEIST, SEAT_COLORS,
   GRAVITY, coverFor, cropCapacity, MULTIKILL_NAMES, modValue, clampUnit, clamp,
+  spreadPixels, TEAM_COLORS, PING, pingDef,
 } from '@cluckdown/shared';
 
 // Matches the server's simulation rate: sending slower would leave most ticks
@@ -55,7 +57,10 @@ export class Game {
 
     // Arena geometry and palette both come from the voted map.
     this.map = session.map ?? 'coop';
-    this.arena = buildArena(this.scene, session.arenaSize, this.map, this.modifier);
+    this.arena = buildArena(
+      this.scene, session.arenaSize, this.map, this.modifier,
+      !!MODES[session.mode]?.teams,
+    );
     // The same boxes the simulation collides against, derived rather than
     // synced — the camera has to retract off them and the crosshair has to
     // converge on them, and both must agree with what stops a bullet.
@@ -98,7 +103,10 @@ export class Game {
       canvas,
     });
     this.controls.setButtonEdit(!!gfx?.fireEdit);
-    this.controls.setAssist(gfx?.assist !== false);
+    // 'auto' | 'on' | 'off' resolved against the device — a fine pointer gets
+    // no assist, because a mouse is already exact and a soft lock on top of one
+    // is what "the shots don't feel like mine" actually is.
+    this.controls.setAssist(assistOn(gfx?.assist));
     this.controls.setSensitivity(gfx?.sensitivity ?? 1);
     tts.setEnabled(!!gfx?.announcer);
     // The arena never changes size within a match — the map vote resolves
@@ -109,6 +117,13 @@ export class Game {
 
     // Who to watch while dead — set from the kill event, cleared on respawn.
     this.killedBy = null;
+
+    // Team markers, and the world point the open wheel is aimed at. Latched
+    // when the wheel opens, because that is the moment the player pointed at
+    // the thing they mean.
+    this.pings = new Map();
+    this.pingAim = null;
+    this.bindPingWheel();
 
     // Shown once per match, the first time the cursor gets captured.
     let hinted = false;
@@ -184,6 +199,69 @@ export class Game {
       if (f.kind === 'kill' && f.multi > 1) this.hud.announceMulti(f.multi);
     });
     this.session.on('chat', (m) => this.hud.addChat(m));
+    // Only ever arrives for your own side — see ArenaRoom.handlePing.
+    this.session.on('ping', (m) => this.addPing(m));
+  }
+
+  /**
+   * The wheel, on both input schemes.
+   *
+   * Touch drives it from the HUD button; the keyboard drives it from Z, with
+   * the mouse borrowed for the selection. Both end in the same place: an intent
+   * and the point that was under the crosshair when the wheel opened.
+   */
+  bindPingWheel() {
+    const open = () => {
+      this.pingAim = this.pingTarget();
+      this.hud.openPingWheel();
+    };
+    const close = (intent) => {
+      const at = this.pingAim;
+      this.pingAim = null;
+      if (!intent || !at) return;
+      this.session.sendPing?.(intent, at.x, at.z);
+    };
+
+    this.controls.onPingOpen = open;
+    this.controls.onPingDrag = (dx, dy) => this.hud.movePingWheel(dx, dy);
+    this.controls.onPingClose = () => close(this.hud.closePingWheel());
+    // The HUD owns the touch button, so it calls back rather than being polled.
+    this.hud.onPing = { open, close };
+  }
+
+  /**
+   * Where the crosshair is actually pointing, in world space.
+   *
+   * The same ray view.js converges the shot onto — a marker has to land on the
+   * thing you were looking at, and "the thing you were looking at" is already
+   * a solved problem here.
+   */
+  pingTarget() {
+    const self = this.self();
+    if (!self) return null;
+    const px = this.pred.has ? this.pred.x : self.x;
+    const py = this.pred.has ? this.pred.y : (self.y ?? 0);
+    const pz = this.pred.has ? this.pred.z : self.z;
+    const basis = lookBasis(this.controls.yaw, this.controls.pitch);
+    const half = this.session.arenaSize / 2;
+    const o = rayOrigin(px, py, pz, basis, half);
+    const foes = this.session.players.filter((p) => !p.isSelf && p.alive);
+    const range = convergeDistance(o, basis, foes, half, this.cover);
+    return { x: o.x + basis.fx * range, z: o.z + basis.fz * range };
+  }
+
+  addPing(m) {
+    if (!m?.intent) return;
+    this.pings.set(String(m.id), { ...m, left: m.life ?? PING.life });
+    this.hud.addPingLine(m);
+    sfx.play('ping');
+  }
+
+  stepPings(dt) {
+    for (const [key, p] of this.pings) {
+      p.left -= dt;
+      if (p.left <= 0) this.pings.delete(key);
+    }
   }
 
   self() {
@@ -244,9 +322,15 @@ export class Game {
           // the beak's, sized for the distance it is actually seen from.
           if (!tip) this.muzzle.fire(e.x, e.y, e.z);
           // ...replaced by a recoil kick, which reads as "I fired" far better
-          // than a flash does anyway.
+          // than a flash does anyway — and which now moves the AIM rather than
+          // only the camera. It goes to the controls, not to the rig: the rig
+          // renders whatever pitch it is handed, and a rig with its own private
+          // kick is exactly the bug look.js exists to prevent.
+          //
+          // Driven by the shot EVENT rather than by the trigger, so a round the
+          // crop could not pay for never kicks.
           if (ownShot) {
-            this.rig.addRecoil();
+            this.controls.addRecoil();
             this.beak.kick();
           }
           sfx.play(e.rapid ? 'rapidShot' : 'shot');
@@ -278,6 +362,12 @@ export class Game {
           } else if (self && e.by === self.id) {
             // Only your own hits get a hit-marker; other people's are noise.
             sfx.play(e.head ? 'headshot' : 'hit');
+            // ...and now a visible one as well. The sound was carrying this
+            // alone, which fails exactly when it matters: a phone on silent, a
+            // busy round, or the moment three other things are also making
+            // noise. Two channels saying the same thing is redundancy, not
+            // clutter.
+            this.hud.hitMarker(e.head ? 'head' : 'hit');
             if (e.head) {
               this.hud.announce('HEADSHOT');
               tts.say('Headshot', { priority: SAY.streak, key: 'headshot' });
@@ -303,6 +393,11 @@ export class Game {
             sfx.play('kill');
           }
           if (self && e.by === self.id) {
+            // The kill mark, over the top of the hit mark the same round just
+            // drew. Distinct from an ordinary hit on purpose: "they are dead"
+            // and "that landed" are different pieces of news, and a fight you
+            // have already won is a fight you should stop spending grain on.
+            this.hud.hitMarker('kill');
             if (e.multi > 1) sfx.streak(e.multi);
             if (e.revenge) {
               this.hud.announce('REVENGE!');
@@ -406,7 +501,7 @@ export class Game {
         case 'eggSteal': {
           this.debris.emit('white', e.x, 0.9, e.z, 6, { speed: 5, up: 1, size: 0.24, life: 0.45 });
           sfx.play(self && e.by === self.id ? 'pickupRapid' : 'hit');
-          if (self && e.from === self.seat % 4 && e.by !== self.id) {
+          if (self && e.from === self.team && e.by !== self.id) {
             this.hud.announce('YOUR NEST IS BEING RAIDED');
           }
           break;
@@ -446,7 +541,7 @@ export class Game {
           break;
         }
         case 'bombPlanted': {
-          const mine = self && e.seat === self.seat % 4;
+          const mine = self && e.team === self.team;
           this.hud.announce(mine ? 'BOMB IN YOUR NEST — DEFUSE IT' : 'BOMB PLANTED');
           sfx.play('bomberSpawn');
           this.debris.emit('red', e.x, 0.8, e.z, 14, { speed: 8, up: 1.2, size: 0.34, life: 0.7 });
@@ -597,6 +692,10 @@ export class Game {
             this.pred.z = e.z;
             this.pred.y = 0;
             this.pred.vy = 0;
+            // Fresh life, fresh gun. The simulation zeroes the movement cone on
+            // respawn for the same reason: a first shot back that misses for
+            // something you did that last life reads as the game cheating.
+            this.controls.look.reset();
             this.hud.announce('GO!');
             this.killedBy = null;
             sfx.play('respawn');
@@ -642,6 +741,7 @@ export class Game {
     this.syncBomber(dt);
 
     this.syncObjectives(dt, players);
+    this.stepPings(dt);
     this.potatoView.sync(this.session.potato, dt);
     this.bullets.update(dt);
     this.debris.update(dt);
@@ -724,7 +824,25 @@ export class Game {
       // the crop is back above CROP.recoverTo, and the reticle has to say so for
       // the whole of that window rather than clearing on the first grain.
       const busy = !!(self?.pecking || self?.feeding);
-      this.hud.setCrosshair(alive, self?.dry ? 'dry' : (busy ? 'busy' : ''));
+      // The arms ARE the movement cone, converted from radians to pixels
+      // through the camera's own field of view — so what the reticle shows is
+      // the radius a round can actually land inside, not a stylised wobble.
+      //
+      // Read from the local look state rather than from the snapshot. The cone
+      // is a pure function of what the player is doing this frame, and a
+      // reticle that opened a network tick after they started running would be
+      // describing a stance they had already left.
+      //
+      // In third person the cone leaves the chicken while the reticle belongs
+      // to a camera four units behind it, so the conversion is a close
+      // approximation there rather than an identity — the same parallax view.js
+      // exists to manage, and far smaller than the cone it is drawing.
+      const spread = spreadPixels(
+        this.controls.spread,
+        this.camera.fov,
+        this.engine.getRenderHeight() * this.engine.getHardwareScalingLevel(),
+      );
+      this.hud.setCrosshair(alive, self?.dry ? 'dry' : (busy ? 'busy' : ''), spread);
     }
     const dead = self && !self.alive;
     this.hud.setRespawn(dead ? self.respawnIn : 0);
@@ -949,7 +1067,7 @@ export class Game {
     }
   }
 
-  /** Nests are keyed by seat and coloured by their owner. */
+  /** Nests are keyed by team and coloured by the roost that owns them. */
   syncNests(dt, players) {
     const nests = this.session.nests ?? [];
     const self = players.find((p) => p.isSelf);
@@ -963,17 +1081,16 @@ export class Game {
     const raiding = rules.heist && self && self.carrying === 0;
 
     for (const nest of nests) {
-      let view = this.nests.get(nest.seat);
+      let view = this.nests.get(nest.team);
       if (!view) {
-        const owner = players.find((p) => p.seat % 4 === nest.seat);
-        view = new NestView(this.scene, nest, owner?.color ?? SEAT_COLORS[nest.seat]);
-        this.nests.set(nest.seat, view);
+        view = new NestView(this.scene, nest, TEAM_COLORS[nest.team] ?? SEAT_COLORS[nest.team]);
+        this.nests.set(nest.team, view);
       }
-      const rival = self ? nest.seat !== self.seat % 4 : false;
-      const owned = players.some((p) => p.seat % 4 === nest.seat);
+      const rival = self ? nest.team !== self.team : false;
+      const owned = players.some((p) => p.team === nest.team);
       const target = (carryingBomb && rival && owned)
         || (raiding && rival && nest.eggs > 0)
-        || (rules.bomb && bomb?.state === 'planted' && bomb.plantSeat === nest.seat);
+        || (rules.bomb && bomb?.state === 'planted' && bomb.plantTeam === nest.team);
       view.update(dt, nest, target);
     }
   }
@@ -1020,7 +1137,7 @@ export class Game {
       if (bomb.state === 'planted') {
         // Only its owner can do anything about it. Everyone else is told to
         // defend, because "wait it out" is genuinely the correct play.
-        if (bomb.plantSeat !== self.seat % 4) {
+        if (bomb.plantTeam !== self.team) {
           return { text: `Bomb planted — ${Math.ceil(bomb.fuse)}s`, progress: 0 };
         }
         if (!near(bomb, BOMB.plantRadius)) {
@@ -1031,8 +1148,8 @@ export class Game {
       }
 
       if (bomb.carriedBy === self.id) {
-        const target = nests.find((n) => n.seat !== self.seat % 4 && near(n, BOMB.plantRadius));
-        if (!target) return { text: 'CARRY THE BOMB TO A RIVAL NEST', progress: 0 };
+        const target = nests.find((n) => n.team !== self.team && near(n, BOMB.plantRadius));
+        if (!target) return { text: 'CARRY THE BOMB TO THEIR NEST', progress: 0 };
         if (!still) return { text: 'STOP MOVING TO PLANT', progress: 0 };
         return { text: 'PLANTING…', progress: bomb.plant };
       }
@@ -1043,12 +1160,12 @@ export class Game {
 
     if (rules.heist) {
       if (self.carrying > 0) {
-        const home = nests.find((n) => n.seat === self.seat % 4);
+        const home = nests.find((n) => n.team === self.team);
         if (home && near(home, HEIST.nestRadius)) return null; // already banking
         return { text: `RUN ${self.carrying} EGG${self.carrying > 1 ? 'S' : ''} HOME`, progress: 0 };
       }
-      const raidable = nests.some((n) => n.seat !== self.seat % 4 && n.eggs > 0);
-      if (raidable) return { text: 'RAID A RIVAL NEST', progress: 0 };
+      const raidable = nests.some((n) => n.team !== self.team && n.eggs > 0);
+      if (raidable) return { text: 'RAID THEIR NEST', progress: 0 };
     }
 
     return null;
@@ -1079,6 +1196,27 @@ export class Game {
       out.push({ key, x, z, icon, color, urgent, dist, bearing: Math.atan2(x - px, z - pz) - yaw });
     };
 
+    // --- team markers. Above everything else on purpose: a team-mate asking
+    // you to look somewhere outranks any objective the game is asking for.
+    for (const [key, ping] of this.pings) {
+      const def = pingDef(ping.intent);
+      out.push({
+        key: `ping${key}`,
+        x: ping.x,
+        z: ping.z,
+        icon: def.icon,
+        color: def.color,
+        who: ping.by === self.id ? null : ping.byName,
+        ping: true,
+        // Fades out over its last second rather than vanishing, so a marker
+        // that expires mid-glance does not read as one that was never there.
+        fade: Math.max(0.25, Math.min(1, ping.left)),
+        urgent: false,
+        dist: Math.hypot(ping.x - px, ping.z - pz),
+        bearing: Math.atan2(ping.x - px, ping.z - pz) - yaw,
+      });
+    }
+
     // --- the bomber. The one thing that can kill you from behind.
     const b = this.session.bomber;
     if (b) {
@@ -1092,12 +1230,12 @@ export class Game {
     // --- Egg Heist: where the eggs go, and where to get more.
     if (rules.heist) {
       const nests = this.session.nests ?? [];
-      const home = nests.find((n) => n.seat === self.seat % 4);
+      const home = nests.find((n) => n.team === self.team);
       if (self.carrying > 0 && home) {
         add('home', home.x, home.z, '🏠', self.color, false);
       } else {
         const target = nests
-          .filter((n) => n.seat !== self.seat % 4 && n.eggs > 0)
+          .filter((n) => n.team !== self.team && n.eggs > 0)
           .sort((a, c) => Math.hypot(a.x - px, a.z - pz) - Math.hypot(c.x - px, c.z - pz))[0];
         if (target) add('raid', target.x, target.z, '🥚', '#fff4d6', false);
       }
@@ -1107,12 +1245,12 @@ export class Game {
     if (rules.bomb) {
       const bomb = this.session.bomb;
       if (bomb?.state === 'planted') {
-        const mine = bomb.plantSeat === self.seat % 4;
+        const mine = bomb.plantTeam === self.team;
         add('bomb', bomb.x, bomb.z, mine ? '🛠' : '💥', mine ? '#ff2d4b' : '#ffcc3d', mine);
       } else if (bomb?.carriedBy === self.id) {
         const nests = this.session.nests ?? [];
         const target = nests
-          .filter((n) => n.seat !== self.seat % 4 && players.some((p) => p.seat % 4 === n.seat))
+          .filter((n) => n.team !== self.team && players.some((p) => p.team === n.team))
           .sort((a, c) => Math.hypot(a.x - px, a.z - pz) - Math.hypot(c.x - px, c.z - pz))[0];
         if (target) add('plant', target.x, target.z, '🎯', '#ff8a3d', false);
       } else if (bomb) {
@@ -1197,6 +1335,9 @@ export class Game {
     // Speech outlives a page far more stubbornly than audio nodes do: an
     // utterance already queued keeps talking after the match is gone.
     tts.stop();
+    // The HUD outlives a match, so a wheel still pointed at this Game would
+    // call into a disposed scene the next time somebody presses the button.
+    this.hud.onPing = {};
     this.beak.dispose();
     this.controls.dispose();
     for (const v of this.nests.values()) v.dispose();

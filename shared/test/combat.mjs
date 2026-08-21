@@ -50,6 +50,16 @@ console.log('\n--- the shot goes where you are looking ---');
  */
 function shoot({ from = [0, 0, 0], at = null, pitch = 0, aim = null, seconds = 1.6 } = {}) {
   const world = arena();
+  // Fire down the MIDDLE of the movement cone, every time.
+  //
+  // Every check in this file is about geometry: does a line drawn from here
+  // reach there. Spread is a cone drawn around that line, and several cases
+  // below pin the shooter at jump height — the widest cone in the game — so
+  // leaving the roll alone would make them read as random. `() => 0` is an
+  // ordinary value of the RNG rather than a special case in the simulation:
+  // the deviation is `cone * sqrt(roll)`, so a roll of zero is dead centre.
+  // The cone itself has its own suite, in shared/test/spread.mjs.
+  world.rng = () => 0;
   const me = add(world, 'me', 0, from[0], from[2]);
   me.y = from[1];
   const foe = at ? add(world, 'foe', 1, at[0], at[2]) : null;
@@ -405,14 +415,36 @@ console.log('\nHEADSHOTS');
     BULLET.headFrom < PLAYER.hitHeight, `${BULLET.headFrom} vs ${PLAYER.hitHeight}`);
   // Measured in SHOTS TO KILL rather than as a damage ratio, because that is
   // what a player actually experiences and it is what survives body damage
-  // being retuned. Half the shots is the floor: below that, going for the head
-  // is a small bonus rather than the decision the fight turns on.
+  // being retuned.
+  //
+  // This used to demand that a head kill in at most HALF the shots of a body,
+  // and that bound was wrong in the direction it protected. It held at 2 head
+  // against 6 body — 180ms against 900ms — and a five-to-one payoff is not
+  // skill expression, it is a coin flip about where the crosshair happened to
+  // be: whoever landed a head first won the fight regardless of everything
+  // else in it. The bound is now two-sided, because the failure mode has always
+  // been on both sides. Too small and aiming carefully is a bonus you take when
+  // convenient; too large and it is the only thing in the game.
   const bodyShots = Math.ceil(PLAYER.maxHp / BULLET.damage);
   const headShots = Math.ceil(PLAYER.maxHp / BULLET.headDamage);
-  check('a headshot kills in at most half the shots of a body shot',
-    headShots * 2 <= bodyShots, `${bodyShots} body vs ${headShots} head`);
-  check('...but never in one, which would make whiffing the only outcome that matters',
+  // Time to kill, not shots: the first round of either is free, so a 5-shot
+  // body kill is four cooldowns long and a 3-shot head kill is two.
+  const ttk = (n) => (n - 1) * PLAYER.fireCooldown;
+  const ratio = ttk(bodyShots) / ttk(headShots);
+  console.log(`  body ${bodyShots} shots / ${(ttk(bodyShots) * 1000).toFixed(0)}ms, `
+    + `head ${headShots} shots / ${(ttk(headShots) * 1000).toFixed(0)}ms — ${ratio.toFixed(2)}x`);
+  check('a headshot is meaningfully faster than a body shot', ratio >= 1.5,
+    `${ratio.toFixed(2)}x`);
+  check('...and not so much faster that nothing else in the fight matters', ratio <= 3,
+    `${ratio.toFixed(2)}x`);
+  check('...and never kills in one, which would make whiffing the only outcome',
     headShots >= 2, `${headShots} head shot(s)`);
+
+  // The body TTK itself, which is the number the whole retune was aimed at.
+  // 900ms was long enough for the loser of a duel to walk out of it.
+  check('a body kill lands between 350 and 500ms',
+    ttk(bodyShots) >= 0.35 && ttk(bodyShots) <= 0.5,
+    `${(ttk(bodyShots) * 1000).toFixed(0)}ms`);
 
   const level = shoot({ at: [0, 0, 12], pitch: 0 });
   console.log(`  level shot at 12u: ${level.damage} damage, head=${level.ends[0]?.head}`);
@@ -428,9 +460,15 @@ console.log('\nHEADSHOTS');
     `${head.damage} damage`);
   check('...and the shot event says so', head.ends[0]?.head === true, String(head.ends[0]?.head));
 
-  // Two heads kill; ten bodies do. The gap is the point.
-  check('two headshots are lethal', BULLET.headDamage * 2 >= PLAYER.maxHp,
-    `${BULLET.headDamage * 2} vs ${PLAYER.maxHp}hp`);
+  // A head is worth about 1.8 bodies: two heads and a body kill, and neither
+  // two heads alone nor one head and two bodies do. That is the size at which
+  // going for the head is a decision with a cost rather than a jackpot.
+  check('a headshot is worth more than one body shot but less than two',
+    BULLET.headDamage > BULLET.damage && BULLET.headDamage < BULLET.damage * 2,
+    `head ${BULLET.headDamage} vs body ${BULLET.damage}`);
+  check('two heads and a body are lethal',
+    BULLET.headDamage * 2 + BULLET.damage >= PLAYER.maxHp,
+    `${BULLET.headDamage * 2 + BULLET.damage} vs ${PLAYER.maxHp}hp`);
   check('...but one is not, so it is never a one-shot game',
     BULLET.headDamage < PLAYER.maxHp, String(BULLET.headDamage));
 

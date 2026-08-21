@@ -38,6 +38,14 @@ const check = (l, c, d = '') => {
 
 function live() {
   const w = createWorld({ mode: 'casual', seed: 71, modifier: 'none' });
+  // No bomber. Every check in this file is about the XP ladder, and a bomb
+  // wandering into a fixed-length duel changes the answer by killing one of the
+  // participants — which is XP moving for a reason that has nothing to do with
+  // the ladder. It hid here for a while: the anti-farming check below was
+  // passing partly because the farmer kept getting blown up during a run that
+  // happened to be long enough for that, and it started failing the moment the
+  // time-to-kill retune made the same 40 kills take half as many seconds.
+  w.bomberSpawnAt = Infinity;
   const a = addPlayer(w, { id: 'a', name: 'A', seat: 0 });
   const b = addPlayer(w, { id: 'b', name: 'B', seat: 1 });
   beginMatch(w, 'coop');
@@ -154,19 +162,28 @@ console.log('\n--- climbing, in the simulation ---');
     `level ${g.a.level} after ${kills}`);
   check('...but not trivially', kills >= 5, `${kills} kills`);
 
-  // ...and the same run against someone who never climbs must NOT get there.
-  // Farming the bottom of the table is the failure mode the clamp exists for.
+  // ...and the same climb against someone who never climbs has to COST far
+  // more. Farming the bottom of the table is the failure mode the clamp exists
+  // for.
+  //
+  // Measured as a ratio against the run above rather than as "40 kills is not
+  // enough", because the absolute number was never the claim and it silently
+  // depended on how long 40 kills happened to take. The clamp does not stop the
+  // climb — nothing should permanently — it makes it four times the work, which
+  // is well past what a four-minute match affords against one victim.
   {
     const farm = live();
-    for (let i = 0; i < 40; i++) {
+    let farmed = 0;
+    while (farm.a.level < LEVELS.max && farmed < 200) {
       farm.b.alive = true; farm.b.hp = PLAYER.maxHp;
       farm.b.x = 0; farm.b.z = 8; farm.b.invulnUntil = 0;
       setLevel(farm.b, 1);
       killWith(farm, farm.a, farm.b);
+      farmed++;
     }
-    console.log(`  40 kills on a rung-1 punching bag: level ${farm.a.level}`);
-    check('farming the bottom of the table stalls out', farm.a.level < LEVELS.max,
-      `level ${farm.a.level} after 40 kills`);
+    console.log(`  to the top: ${kills} kills against equals, ${farmed} against a rung-1 bag`);
+    check('farming the bottom of the table costs several times as many kills',
+      farmed >= kills * 3, `${farmed} vs ${kills}`);
   }
 
   // And it stops there rather than running off the end.

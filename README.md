@@ -37,6 +37,7 @@ same shot — so switching is a matter of what you would rather look at.
 | Jump | The JUMP button | `Space` |
 | View | The **1P / 3P** button, beside fullscreen | `V` |
 | Chat | Quick-chat buttons | `T`, or the quick-chat buttons |
+| Ping | Hold the PING button, drag to pick, release | Hold `Z`, aim with the mouse, release |
 
 On touch, **hold FIRE and slide the same thumb to aim.** The press sticks to the
 finger rather than to the circle, so the gun keeps firing wherever that thumb
@@ -60,6 +61,18 @@ shared/    Headless game simulation — no Babylon, no Colyseus, no DOM
 server/    Colyseus rooms; runs shared/ as the authority
 client/    Babylon.js renderer, HUD, menu
 ```
+
+A handful of files are worth knowing by name:
+
+| | |
+|---|---|
+| `shared/src/sim.js` | the whole simulation, as pure functions over plain data |
+| `shared/src/constants.js` | every tunable, with the reasoning beside it — the file you edit to change how the game feels |
+| `shared/src/aim.js` | aim assist. Game tuning, so it lives here; it runs on the client |
+| `shared/src/accuracy.js` | recoil and the movement cone. Same reason, opposite split: the client applies the recoil, the server rolls the spread |
+| `client/src/game/look.js` | where you are looking. **One** number for the camera and the shot |
+| `shared/src/sim.js` → `spawnPoints` / `feederFor` | team lines and the shared rally pad — the geometry 4v4 turns on |
+| `client/src/game/view.js` | the third-person boom, and the geometry that keeps its crosshair honest |
 
 **`shared/` is the important bit.** The simulation is written once as pure
 functions over plain data, and *both* sides run it:
@@ -88,26 +101,38 @@ naive point test would tunnel straight through a 0.6-radius chicken.
 
 | Mode | Players | Rules |
 |---|---|---|
-| **Casual** | 4 | Free-for-all, 4 min, bots fill empty seats |
-| **Egg Heist** | 4 | Four eggs per nest. Steal theirs, bank yours, most eggs at the whistle wins |
-| **Plant & Defuse** | 4 | Carry the bomb into a rival nest, hold to plant, then survive the fuse |
-| **2v2 Teams** | 4 | Blue vs Red, friendly fire off, first team to 20 kills |
-| **King of the Coop** | 4 | Hold the zone for 25 uncontested seconds — and it moves every 18 |
-| **Last Chicken** | 4 | One life each, and the arena closes in around you |
-| **Ranked** | 4 | Free-for-all, Elo on the line, humans only |
-| **Deathmatch** | 4 | Endless respawns, first to 15 kills |
-| **1v1** | 2 | Tight arena, first to 10, humans only |
+| **Casual** | 4v4 | 4 min, bots fill empty seats |
+| **Egg Heist** | 4v4 | Eight eggs per nest. Raid theirs, bank yours, most eggs at the whistle wins |
+| **Plant & Defuse** | 4v4 | Carry the bomb into their nest, hold to plant, then survive the fuse |
+| **2v2 Teams** | 2v2 | Blue vs Red on a tighter arena, first team to 20 kills |
+| **King of the Coop** | 4v4 | Hold the zone for 25 uncontested seconds — and it moves every 18 |
+| **Last Chicken** | 4v4 | One life each, last roost standing, and the arena closes in |
+| **Ranked** | 4v4 | Elo on the line, humans only |
+| **Deathmatch** | 4v4 | Endless respawns, first roost to 40 kills |
+| **1v1** | 1v1 | Tight arena, first to 10, humans only |
+
+**Everything is four a side except the two modes that are about being
+outnumbered by nobody.** 2v2 Teams stays 2v2 and 1v1 stays 1v1; every other
+mode is eight players split down the middle, with friendly fire off. That is
+the answer to the report that started this — *"it feels like 1v4"* — and it is
+a bigger change than the player count suggests: it also halves the space each
+player has, which is the density the game was short of. See
+**[Four a side](#four-a-side)**.
 
 Modes are data in `shared/src/constants.js` — `teams`, `hill`, `shrink`,
 `respawn` and `killLimit` are flags the simulation reads. Adding a variant is an
 entry in `MODES`, not a new system.
 
-**2v2 Teams** puts seats 0 and 3 on the west corners and 1 and 2 on the east, so
-a team spawns down one side rather than diagonally across the map. Bullets pass
-*through* team-mates rather than being absorbed, so a partner can't body-block you.
+**Seats decide sides.** `teamForSeat` snakes over each group of four — seats
+0, 3, 4 and 7 west, 1, 2, 5 and 6 east — so eight seats split four and four and
+the old 2v2 mapping is untouched. Bullets pass *through* team-mates rather than
+being absorbed, so a partner can't body-block you.
 
-**Egg Heist** is decided by what is sitting in your nest at the final whistle,
-not by score — so a raid in the closing seconds can take the whole match. Eggs
+**Egg Heist** is decided by what is sitting in your ROOST's nest at the final
+whistle, not by score — so a raid in the closing seconds can take the whole
+match. There are two nests now, one per team, not one per seat: four private
+corners in a 4v4 would mean nobody ever defends anything together, and the
+whole point of a nest is that it is a place worth holding. Eggs
 are stolen one at a time on a cooldown, so a nest can actually be defended;
 carrying slows you down, so hoarding is punished; and dying scatters your load
 on the floor rather than sending it home, so shooting the carrier is worth it.
@@ -126,18 +151,25 @@ so it costs no extra traffic and works offline.
 
 Under the hood, **Plant & Defuse** has one bomb. Both planting and defusing mean standing still
 and holding, which turns it into a fight over a place rather than a race to
-touch a thing. Only the nest's owner can defuse, and only nests belonging to a
-present player can be planted in — otherwise an empty corner would be a free,
+touch a thing. Only the nest's own side can defuse — *any* of them, which is
+what makes a retake a thing four players can do — and only a nest with somebody
+alive on that side can be planted in, or an empty side would be a free,
 undefusable win.
 
 **King of the Coop** only scores while one side is alone in the zone. Two players
 from different sides cancel out, so the point has to be cleared, not just reached.
+The hold belongs to the TEAM rather than to a player: four team-mates rotating
+through the zone are one hold, and keyed per seat they would each have banked a
+quarter of it and nobody would ever have finished.
 The zone relocates every 18 seconds with a 4-second warning. That has to be well
 under the 25-second win target or the mechanic never fires at all — at 30 seconds
 a solo holder wins before the zone ever moves.
 
-**Last Chicken** shrinks the safe area from half-extent 20 down to 7, starting 8
-seconds in. Players are clamped to the boundary, so it physically herds everyone
+**Last Chicken** is FFA-with-no-respawn by definition, so four-a-side reads it
+as last ROOST standing: the round ends when one side is wiped out, not when one
+body is left. Being dead is also a shorter wait than it sounds, because your
+team is still playing the round you are watching. It shrinks the safe area
+starting 8 seconds in. Players are clamped to the boundary, so it physically herds everyone
 together. The boundary rides in synced state rather than being broadcast — it
 moves every tick, and an event per tick would be 60 messages a second for one
 number.
@@ -145,6 +177,166 @@ number.
 Rating is placement-based Elo: finishing above someone counts as beating them,
 scaled so a 4-player match moves your rating about as much as one duel would.
 It lives in `localStorage` and is sent to the server on join.
+
+> **Flagged, not fixed:** Ranked is a team mode now, and its rating is still
+> individual placement. That is defensible — you are rated on how you did, not
+> on which side the coin landed — but it is not obviously the right answer for
+> a 4v4, and it is the one thing four-a-side changed the meaning of without
+> changing the code. Worth a decision before anyone takes the ladder seriously.
+
+---
+
+## Four a side
+
+The report this answers is *"it feels like 1v4"*, and the fix is not better
+bots. It is a team.
+
+Every mode except 2v2 Teams and 1v1 is now eight players, four a side, with
+friendly fire off. Four things had to move with the player count, and every one
+of them was quietly hardcoded to four seats:
+
+**Who is on which team.** `teamForSeat` was `seat === 1 || seat === 2`. At eight
+seats that is a 2v6, and nothing anywhere throws — so it snakes over each group
+of four instead (0, 3, 4, 7 west; 1, 2, 5, 6 east), which splits 4/4 at eight
+seats and leaves the documented 2v2 mapping exactly as it was.
+
+**Where you spawn.** Four corners put both teams diagonally across from each
+other, which is a scramble, not a fight. Each team now lines up along its own
+wall in four lanes nine units apart, so first contact happens somewhere in the
+middle and both sides know which way forward is. Respawns are drawn from your
+OWN line: the old rule was "whichever corner is furthest from the nearest
+enemy", which on a map with team lines means *behind theirs*.
+
+**Where you refill.** One feeder per team, at the middle of that team's line,
+instead of one per seat. That is a deliberate choice rather than a saving: a
+shared pad is somewhere four players end up standing next to each other, which
+is the cheapest rally point a team game can have. It is also the nest in Egg
+Heist and Plant & Defuse, so both of those became two-sided rather than
+four-cornered.
+
+**Who you can tell apart.** Eight bodies need two answers at a glance: *whose
+side*, and *which of you is that*. The silhouette stays team-coloured, because
+"shoot them?" has to be answered in a tenth of a second. A per-player shade of
+the same hue rides on the scoreboard dot and the results table for the slower
+question. The scoreboard splits into two lists with yours on top — eight names
+in score order is a wall you have to read, and in a team game the question is
+"how is my side doing", not "what place am I".
+
+### Who you get seated with
+
+Seat index decides your team, so seat *allocation* decides who you play with —
+and "first free seat" is the wrong answer to that in both directions. At eight
+seats it would have put the first two arrivals on opposite sides, which for two
+friends who just typed the same code is precisely the opposite of what they
+came for.
+
+`seatOrder` gives two orders, and the room picks by whether it has a code:
+
+- **public queue** — strictly alternating, so the count is balanced at every
+  prefix and not merely at the end. The second human to arrive must not be the
+  only real player on their side.
+- **private room** — team-major, so the first four arrivals are one roost and
+  the next four are the other. Friends land together; a group of eight still
+  splits into a real match.
+
+Both are permutations of the seat list, so no seat becomes unreachable and the
+room still fills. Bot eviction walks the same order — a private room already
+full of bots has to drop the *right* one, or the friend who just joined ends up
+opposite the person who invited them.
+
+### Map sizes: measured, not assumed
+
+Doubling the roster halves the space per player, and that halving IS the fix —
+this game's problem was never that the arena felt cramped. So the maps grew
+about 12%, enough for eight bodies and their spawn lanes, and no more. Scaling
+by the player-count ratio would have handed the entire density gain straight
+back.
+
+`shared/test/density.mjs` is the measurement, and it asserts nothing on
+purpose — there is no correct kills-per-minute, only a number you should know
+before touching these sizes again. Ten 180-second bot matches per row:
+
+| | | u²/player | kills/min | per player |
+|---|---|---|---|---|
+| **The Coop** before | 4p FFA, 48u | 576 | 9.5 | 2.37 |
+| roster only | 8p 4v4, 48u | 288 | 24.8 | 3.10 |
+| **after** | 8p 4v4, 54u | **365** | **23.0** | **2.87** |
+| **The Big Yard** before | 4p FFA, 64u | 1024 | 8.1 | 2.02 |
+| roster only | 8p 4v4, 64u | 512 | 20.3 | 2.54 |
+| **after** | 8p 4v4, 72u | **648** | **17.3** | **2.17** |
+| **Tight Squeeze** before | 4p FFA, 34u | 289 | 14.5 | 3.62 |
+| **after** | 8p 4v4, 38u | **181** | **37.2** | **4.65** |
+
+The middle row of each block is the point: the roster alone more than doubles
+the kill rate, and the 12% of map growth costs about a tenth of that back. Space
+per player still falls 37%.
+
+The per-player column is the one that answers the original complaint, and it
+went UP — 2.37 to 2.87 kills a minute on The Coop — *despite* friendly fire
+meaning half the roster is no longer shootable. A match is denser per person
+even though each person has fewer legal targets.
+
+Sizes moved as `MAPS[*].size`, which is the one number cover, lamps, spawns and
+the safe zone all derive from. **Nothing about the chicken changed**, and that
+is deliberate: shrinking the player would cascade through `PLAYER.radius`,
+`hitHeight`, `eyeHeight`, `maxJumpHeight`, `COVER.minHeight`, both third-person
+boom offsets and the beak viewmodel — roughly fifteen coupled constants, each
+needing retuning, to get the same ratio one number already gives you.
+
+2v2 Teams and 1v1 carry an `arenaScale` that undoes the growth (0.89 and 0.60),
+so neither plays a metre differently than it did.
+
+---
+
+## Talking to your roost
+
+A **ping**, not voice. This is a mobile game: a ping is one tap, it is
+language-independent, and it carries a position — which is the only thing worth
+saying in a firefight anyway. It is what CoD Mobile and Apex use, for exactly
+those reasons.
+
+Five intents, and the smallness is the design:
+
+| | |
+|---|---|
+| ⚠ | Enemy here |
+| ◉ | Watch out |
+| ➕ | Need help |
+| ➤ | On my way |
+| ⚔ | Attacking |
+
+A wheel you have to read is a wheel nobody uses under pressure. Five fits one
+thumb sweep and covers what a player actually needs to say.
+
+**Picking is by direction, not by position.** Any drag past a 26-pixel deadzone
+counts, so the gesture is "flick towards the one I want" rather than "land on a
+small target" — the difference between a wheel that works with a thumb while
+being shot at and one that does not. Releasing inside the deadzone sends the
+first intent, which makes a plain tap the fastest thing on the wheel, and
+"enemy here" is what a plain tap should mean. The rule is `pingWedge` in
+`constants.js` rather than in the HUD, so it can be tested without a browser.
+
+**The marker is latched when the wheel opens**, at whatever the crosshair had
+resolved onto — the same ray `view.js` converges a shot along, so a ping lands
+on the thing you were looking at, cover and chickens included. On desktop the
+mouse is borrowed to aim the wheel and look is suspended while it is up;
+without that, choosing an intent would drag the marker off the thing you were
+about to call out.
+
+Markers ride the off-screen world-marker system the bomber and the objectives
+already use, so one behind you is pinned to the edge of the screen pointing at
+it. They fade over their last second rather than vanishing.
+
+**Pings are never synced state.** Colyseus state goes to every client, and a
+team marker an opponent can read is worse than no marker at all — so the server
+sends each one only to clients whose chicken is on the pinger's side. Quick
+chat and typed chat are scoped the same way, and tagged `[TEAM]` so nobody
+types a callout expecting the enemy to read it.
+
+Rate limiting lives in the simulation rather than in the transport: 1.1 seconds
+between pings and two live markers per player, oldest dropped. The failure mode
+of a ping system is not that nobody uses it — it is one player painting the map
+and their team learning to ignore the markers entirely.
 
 ## Revenge
 
@@ -246,13 +438,25 @@ problem, it is a design one: with no resource the player never makes a decision
 about shooting, so every second of a match is identical to every other second
 and nobody is ever vulnerable for a reason they caused.
 
-**The crop is the magazine.** 14 shots against a 10-shot kill — enough to kill
-one chicken with four misses, never enough for two. Two ways to refill:
+**The crop is the magazine.** 16 shots against a 5-shot kill — about three
+kills' worth if you place every round, one kill and eleven misses if you don't.
+Two ways to refill:
 
 | | Where | Cost | Gives |
 |---|---|---|---|
 | **Peck** | anywhere | stand still ~1.5s, head down, visible to everyone | grain |
 | **Feeder** | your own spawn pad | the walk, and being somewhere predictable | grain instantly, plus health |
+
+**A flag, not a change.** The magazine grew from 14 to 16 when the fire rate
+nearly doubled, which holds *kills per magazine* steady — but it does not hold
+the duty cycle steady. Sixteen rounds at 0.10s is 1.6 seconds of held trigger
+against a 1.8-second peck, so a player who empties a crop spends roughly half
+their time reloading, and pecking now costs them twice over: standing still is
+also the only way to be accurate (see the movement cone below), so a peck is
+both the reload and the moment you cannot take. That interaction is worth a
+decision rather than a quiet tweak, and the obvious shape is a faster reload
+with pecking kept as the *ran-dry* penalty rather than the ordinary one. Nothing
+here has changed on that front; it is measured and flagged.
 
 **The reload is a stance, not a button.** You stop, your chicken puts its head
 in the dirt, and *everyone can see you doing it*. That readability is the whole
@@ -413,6 +617,19 @@ Aiming with a thumb on a 375px-tall screen is genuinely hard, and that was the
 loudest piece of player feedback. `AIM_ASSIST` in `shared/src/constants.js` is
 one block of tunables; **`strength` is the whole feel of it**:
 
+**It is off by default on a mouse, and that is the point of the setting having
+three states rather than two.** Assist exists for thumbs. On a pointer — which
+is already exact — a soft lock pulling at the angle you just set is the game
+arguing with your hand, and it is the direct cause of "the shots don't feel like
+mine". Same feature, same number, two opposite verdicts, decided entirely by
+what you are holding. So the stored value is `'auto' | 'on' | 'off'`: auto asks
+`matchMedia('(pointer: fine)')` and gets both devices right, while an explicit
+choice always outranks the guess. An old stored `true` migrates to `'auto'`
+rather than `'on'` — it was the shipped default, so almost nobody carrying one
+ever chose it, and treating it as a preference would preserve the exact problem
+the change exists to fix. A stored `false` migrates to `'off'`, because nobody
+ever got that by accident.
+
 ```
 0     off
 0.35  a gentle nudge, you still do the aiming
@@ -435,6 +652,15 @@ Two details that are load-bearing:
   both to the same field, so every tick reset the aim to the raw stick angle and
   the pull never accumulated — it closed 0.028 of a 0.25 radian gap and stayed
   there.
+- **This is the one place the crosshair and the bullet legitimately part
+  company**, and it is worth saying out loud next to the recoil bug, which is
+  the same divergence arrived at by accident. Assist steers the *shot* without
+  steering the view, so with it on the reticle and the round point at slightly
+  different things — up to 25 degrees when a target sits right at the edge of
+  the acquisition cone. That is the feature working: it is what lets a thumb
+  land body shots. `test:aim` measures it and holds it to the sticky cone, so it
+  can never bend a round at somebody you were not roughly pointing at, and on a
+  mouse the whole question is now moot because assist defaults off there.
 - **It runs on the client, not the server.** In first person the camera renders
   your local yaw, so a server quietly steering the aim somewhere else would
   leave the crosshair pointing at one thing and the bullet going to another.
@@ -482,13 +708,41 @@ Aim assist and the bots both **stopped leading**, in the same change. Leading wa
 correct for a projectile and is precisely wrong for a trace: it aims at the floor
 next to a moving chicken.
 
-### 2. Headshots
+### 2. Headshots, and the time to kill
 
-`BULLET.headDamage` is 52 against a body's 11 — two clean headshots kill, versus
-ten body shots. That five-to-one payoff is deliberately enormous, because the
-other half of "shooting feels flat" was that every shot did the same damage
-wherever it landed. Aiming carefully and aiming vaguely paid identically; in CS,
+`BULLET.headDamage` is 40 against a body's 22 — three clean headshots kill in
+200ms, versus five body shots in 400ms. Aiming carefully and aiming vaguely used
+to pay identically, which was the other half of "shooting feels flat"; in CS,
 where you put the dot is the whole game.
+
+**Both numbers moved, and the pair is the point.** The gun used to do 19 damage
+on a 0.18s cooldown, so a body kill was six rounds and *900 milliseconds* — long
+enough for the loser of a duel to simply walk out of it — while a headshot
+deleted someone in 180ms. Five to one, with no middle: you either erased a
+player or plinked at one, and neither is a fight. That gap was argued for as
+skill expression and was not one. A payoff that large stops being a decision and
+becomes a coin flip about where the crosshair happened to be when the trigger
+came down.
+
+| | before | now |
+|---|---|---|
+| body | 19 x 6 = **900ms** | 22 x 5 = **400ms** |
+| head | 52 x 2 = **180ms** | 40 x 3 = **200ms** |
+| gap | 5.0x | **2.0x** |
+| fire rate | 333 rpm | **600 rpm** |
+
+400ms is where CoD Mobile's assault rifles and Valorant's Vandal both sit, and
+they sit there for a reason: it is about human reaction time, so both players
+get exactly one decision each and the better aim wins it. A head is now worth
+about 1.8 bodies — two heads and a body kill — which is large enough to aim for
+and small enough to be punished for missing.
+
+Everything is tuned from `PLAYER.fireCooldown` and `BULLET.damage` together, and
+the number to hold in your head is `(shots to kill - 1) x cooldown`. `test:combat`
+asserts the band rather than the constants, so the two can be moved without
+rewriting the test — and `PLAYER.minCooldown` moved with them, because it is a
+ratio wearing an absolute number and leaving it behind would have quietly capped
+TRIGGER HAPPY, Rapid Peck and Feeding Frenzy all at once.
 
 **The line has to sit above eye height, and the first attempt got that backwards.**
 `headFrom` started at 1.05 — the underside of the head box the renderer builds,
@@ -503,7 +757,90 @@ At **1.28** a level shot lands in the neck and body, and the head has to be aime
 at: about 0.6 of a degree at duelling range, a few pixels of crosshair placement.
 That is the skill, and assist deliberately cannot reach it.
 
-### 3. Tagging, not knockback
+### 3. Recoil that moves the bullets
+
+**This was a bug, and it is probably the one the player could feel and could not
+name.** The camera rig held its own kick and rendered `pitch + this.recoil`,
+while the input struct went out along the un-kicked `pitch`. The crosshair is
+nailed to screen centre, so it rode the climbing camera and the rounds did not.
+Under sustained fire the reticle sat up to 0.12 radians — 6.9 degrees, or **1.45
+units at twelve units of range, a whole chicken** — above where shots landed.
+Every element on screen agreed with every other element on screen, which is
+exactly why it was invisible: there was nothing to compare the lie against.
+
+Recoil is real now. The kick goes into the look angle itself, which is the one
+number the camera renders and the one number the shot is fired along, so they
+cannot drift apart — there is no second angle left to drift. `client/src/game/
+look.js` owns it, and it is deliberately free of Babylon, the DOM and nipplejs
+so that `test:aim` can drive the whole thing headlessly. That test asserts the
+camera direction and the fired direction are the same vector to within 1e-12,
+at rest across the full look range and through a magazine held down. A future
+kick, sway or hit-flinch that touches only the view fails it.
+
+The shape (`RECOIL` in `constants.js`) is deterministic on purpose — a spray is
+a pattern you learn and pull against, never a dice roll:
+
+| | |
+|---|---|
+| `kick` 0.014 | 0.8 degrees per shot, so a 5-round kill burst costs 3.2 degrees |
+| `max` 0.20 | 11.5 degrees; a full magazine would otherwise walk off any target |
+| `delay` 0.12 | just longer than one shot interval, so nothing recovers *inside* a burst |
+| `recover` 0.6 | one shot's kick back in 25ms, a maxed spray in a third of a second |
+
+Two details are load-bearing. **Pulling down spends the bank**: if the player
+compensates for the climb themselves, that must remove the climb, or the
+automatic recovery lands on top of their correction and drags the view below the
+target — a shooter that punishes correct recoil control is worse than one with
+no recoil at all. And **the pitch clamp cannot bank a kick it swallowed**: firing
+at the sky with the view already at `pitchMax` must not owe recovery for climb
+that never happened.
+
+### 4. The movement cone
+
+There was no spread of any kind. Every round landed exactly on the crosshair,
+forever, at a full sprint and mid-jump alike — so there was no such thing as a
+good position, a good moment, or a wrong one, and shooting had no mastery curve
+at all. "Stop moving to shoot" is the first thing a player learns in CS, in
+Valorant and in CoD Mobile, and it was the one skill this game did not have.
+
+`SPREAD` is a cone the round is drawn from, sized **by movement and nothing
+else**. Firing does not widen it: that job belongs to recoil, which is
+deterministic and visible, and keeping the two separate is what lets a
+stationary player spray a learnable pattern rather than a random one.
+
+| state | cone | what it costs at 12 units | rounds landed |
+|---|---|---|---|
+| standing still | **exactly 0** | nothing | **100%** |
+| moving, full speed | 5.2 deg | +/- 1.08u against a 0.76u chicken | 48% |
+| mid-air | 9.2 deg | +/- 1.94u | 8% |
+
+Zero is not "a small number". First-shot accuracy is the contract the whole
+system rests on: if a stopped player's round can miss a target their crosshair
+covers, every other rule here reads as the game cheating rather than as a cost
+they chose. It also makes the recoil invariant above exactly testable.
+
+Because a cone is an *angle*, range decides what it costs. Moving fire lands
+100% of its rounds at 4 units and 13% at 24 — so running and gunning still wins
+a point-blank scramble and reliably loses a duel, which is the shape every game
+the player named uses. Stopping pays back over `settle` (250ms), which is the
+number that makes counter-strafing a skill; landing takes 450ms, because the
+airborne cone is wider and settles at the same rate, and being in the air is the
+one state you cannot steer out of.
+
+**The roll happens on the authority.** Spread is applied inside `fire()` from
+the world's seeded RNG, using a movement state the server derived itself — there
+is nothing in the input struct a client could set to decline being inaccurate.
+That is the opposite of aim assist, which has to be on the client. The two are
+different because one shapes what you asked for and the other decides what
+actually happened.
+
+**And the crosshair draws it at true size.** The arms are the cone converted
+from radians to pixels through the camera's own field of view, not a stylised
+wobble — an inaccuracy the player cannot see is an unfair one. `test:aim` checks
+that the number the reticle draws and the number the simulation rolls against
+never disagree.
+
+### 5. Tagging, not knockback
 
 Bullets used to shove you across the floor. That is a projectile-game idea, and
 to anyone from a hitscan shooter it reads as the game taking the controls off
@@ -602,8 +939,8 @@ dropdown that switched between them are gone.
 | Aim (touch) | swipe anywhere on the right half of the screen |
 | Fire (touch) | a dedicated, **repositionable** button |
 | Jump (touch) | a second one, next to it |
-| Aim assist | on, applied client-side to your own look angles |
-| Extras | centre crosshair, world markers, recoil kick |
+| Aim assist | auto: on for touch, off for a mouse — client-side either way |
+| Extras | centre crosshair that shows the spread, hitmarkers, world markers |
 
 ### Third person
 
@@ -758,7 +1095,7 @@ Three consequences follow from it:
 
 ### The crosshair tells the truth
 
-It is a dot in the middle of the screen, and that got *simpler* rather than
+It is nailed to the middle of the screen, and that got *simpler* rather than
 harder when aim went 3D.
 
 It used to be projected to the world position 16 units down the firing line,
@@ -768,6 +1105,23 @@ the bullet went to another. `fire()` now builds the bullet from the same yaw and
 pitch the camera looks down, so screen centre **is** the aim point by
 construction, and the projection had nothing left to correct for. Deleted rather
 than extended.
+
+**Four arms, a centre gap and a dot.** It used to be two bars crossing straight
+*through* the aim pixel, which is the one thing a competitive reticle never
+does: the pixel you are aiming at is the pixel you most need to see, and a
+chicken at range is a couple of dozen pixels tall. The dot is the aim point; the
+arms are the movement cone, and they open and close with it in real pixels.
+
+**Hit confirmation**, which the game simply did not have. The only way to learn
+a shot had landed was to watch a health bar you were not looking at. At a 400ms
+time-to-kill a duel is four decisions long and "did that land" is the input to
+every one of them, so there is now a mark at the crosshair on every hit: white
+for a body, gold and larger for a head, red for a kill. It restarts by hand
+rather than by retriggering a class, because three hits inside one animation is
+normal at this fire rate and the second and third would otherwise do nothing.
+The headshot *sound* was already the most distinctive in the game; two channels
+saying the same thing is redundancy, not clutter — a phone on silent is a phone
+that cannot hear an audio-only hitmarker.
 
 ### Other first-person notes
 
@@ -782,8 +1136,10 @@ the angle sent.
 eyeballs are, so the muzzle flash (a 0.9-unit glowing sphere) and the tracer
 both rendered *inside* the camera — a full-screen white flash on every shot. The
 flash is now skipped for your own shots, your tracer starts 3.2 units ahead, and
-a small recoil kick replaces them. It reads as "I fired" better than the flash
-did anyway.
+the recoil kick replaces them. It reads as "I fired" better than the flash did
+anyway — and it is a real kick now, one that moves the shot as well as the view.
+See *Recoil that moves the bullets* above for the version that only moved the
+view, and what that cost.
 
 **The tracer's size and the bullet's size are different numbers.**
 `BULLET.radius` (0.22) is the collision radius, added to the chicken's own in
@@ -840,7 +1196,7 @@ to play with them running:
   so the setting cannot apply to some inputs and not others. It updates on
   `input` (so dragging the slider turns the view as you drag) and saves on
   `change` (one settled value in storage, not forty).
-- **Aim assist** — see above.
+- **Aim assist** — `Auto | Always on | Always off`, not a checkbox. See above.
 - **Move the touch buttons** — drag mode for FIRE and JUMP.
 
 Some optimisations are unconditional: each chicken is merged into a **single
@@ -977,11 +1333,16 @@ Everything here drives the real thing — a real socket, a real browser, the rea
 simulation. There are no mocks.
 
 ```bash
-npm run test:sim       # simulation only: modes + modifiers. No server, ~5s
+npm run test:sim       # simulation, aim and feel. No server or browser, seconds
 npm run test:server    # needs `npm run dev:server`
 npm run test:browser   # needs `npm run dev` + Playwright chromium
 npm test               # all three, in order
 ```
+
+`shared/test/density.mjs` sits beside these and is deliberately **not** in
+`test:sim`: it measures kills per minute at different roster and map sizes and
+asserts nothing. Run it with `npm run measure:density -w @cluckdown/shared`
+before changing `MAPS[*].size`, and put the numbers in the table above.
 
 First time, for the browser suites:
 
@@ -991,6 +1352,7 @@ npm install -D playwright && npx playwright install chromium
 
 | Suite | Covers |
 |---|---|
+| `test:teams` | Four a side: the seat-to-team snake at 4 and 8 seats, per-player shades, spawn lines that mirror and do not overlap, the shared feeder, respawning on your own half with the enemy standing on it, every mode carrying the right roster — and pings: that a team-mate sees one, the other roost never does, the cooldown and the cap hold, out-of-range and out-of-arena markers are refused, they expire, and the wheel picks the wedge you flicked at |
 | `test:sim` | Mode win conditions, friendly fire, hill scoring and contest, the shrinking zone, every modifier's effect, aim assist, the pecking order, and every objective system — contracts, Egg Heist, Plant & Defuse, the rotating hill, Hot Potato |
 | `smoke` | Two real clients: state sync, input acks, chat rate-limiting, **match clock drift** |
 | `test:seats` | Seat allocation and bot eviction when a human joins |
@@ -1006,12 +1368,62 @@ npm install -D playwright && npx playwright install chromium
 | `test:levels` | The pecking order: the XP asymmetry both ways, every rung unlocking something named and measurable in the sim, the top being reachable but not farmable, and the three death-spiral guards |
 | `test:crop` | Grain: the crop empties, pecking refills progressively, the feeder heals only out of combat, and none of the anti-frustration rules can be regressed |
 | `test:view` | Third-person framing, headless and instant: the shot line meets the camera ray, a target under the crosshair is hit dead centre, the boom retracts off walls, and the camera never escapes the arena |
+| `test:aim` | **The camera and the bullet are the same line** — see below — plus recoil: that it is deterministic, that a tap resets to pixel-exact, that a spray climbs and caps, that compensating by hand is not punished afterwards, and that the reticle's cone and the simulation's cone never disagree |
+| `test:spread` | Movement inaccuracy: a standing shot never misses, moving costs about half your rounds at duelling range and none at four units, jumping is the worst way to shoot in the game, stopping pays back in 250ms, and a client claiming to stand still is given the cone anyway |
 | `test:tts` | The announcer, headless: the voice ranking (a neural voice beats a local one), a saved voice that has vanished falling back rather than going mute, voices arriving late, and every rule about what it refuses to say |
 | `test:control` | **Knockback can never take the wheel** — see below — plus movement symmetry on every map and in every mode, and the vertical axis: jump arcs, the height ceiling, air control, and that nothing but your own jump can lift you |
-| `test:combat` | Aim assist in both axes, **that hits land on the same tick as the shot**, headshots (including that the head line sits above eye height), tagging instead of knockback, the stacked fire-rate floor, and shooting in 3D — over a target, onto a jumping one, down out of a jump, into the floor, over a wall |
+| `test:combat` | Aim assist in both axes, **that hits land on the same tick as the shot**, headshots (the head line sitting above eye height, and the time-to-kill band in both directions), tagging instead of knockback, the stacked fire-rate floor, and shooting in 3D — over a target, onto a jumping one, down out of a jump, into the floor, over a wall |
 | `test:controls` | Desktop: camera at eye level and on the player, own body hidden, facing-relative movement, mouse look in both axes, `Space` jumps and `F` fires, the centre crosshair, the 1P/3P toggle, the sensitivity slider, world markers and the spectator orbit |
 | `test:fps-touch` | First person on an emulated phone: swipe-to-look **proportionality**, pitch and its clamp, FIRE and JUMP, jumping and firing and looking with three thumbs at once, and dragging both buttons to new homes |
 | `test:retention` | Killed-by panel, the nemesis ring, the auto-requeue countdown and its cancellation |
+
+### The recoil bug, and why `test:aim` exists
+
+The camera rig rendered `pitch + this.recoil`; the input struct went out along
+`pitch`. Two numbers for one idea, and the crosshair — nailed to screen centre —
+followed the wrong one. Under sustained fire the reticle sat 6.9 degrees above
+where rounds landed, which is 1.45 units at duelling range: a whole chicken.
+
+It survived because it was *self-consistent*. The camera, the crosshair and the
+viewmodel all agreed with each other; only the bullets disagreed, and bullets
+are invisible. A player can feel that and cannot name it, and no test that
+checks any one of those things against any other one would ever catch it.
+
+So `test:aim` does not check recoil. It checks the **invariant**: build the
+direction the camera looks down and the direction the simulation fires along,
+from the same look state, by two independent constructions — and demand they are
+the same vector to within 1e-12. At rest across the whole look range, and
+through a full magazine held down. That is why `look.js` has no Babylon, no DOM
+and no nipplejs in it: the browser is where this bug hid, so the thing that
+proves it gone has to run without one.
+
+(It measures the gap as a straight-line distance between two unit vectors rather
+than as `Math.acos` of their dot product. Near a dot of 1, `acos` amplifies
+floating-point noise by about 1e8 — two identical vectors came back 2e-8 radians
+apart, and a test that has to allow 2e-8 cannot tell "identical" from "very
+slightly wrong".)
+
+### Two harnesses that had to learn about the cone
+
+Movement spread broke `test:combat` and `test:cover` the day it landed, and both
+for the same honest reason: several of their checks fire from the top of a jump,
+which is now the widest cone in the game, and they were asking a question about
+**geometry** — does a line drawn from here reach there. The answer they started
+getting was about randomness instead.
+
+Both fix it with `world.rng = () => 0`. That is an ordinary value of the RNG
+rather than a hole punched in the simulation: the deviation is `cone *
+sqrt(roll)`, so a roll of zero is dead centre of the cone. The cone itself is
+measured in `test:spread`, where it is the subject rather than the weather.
+
+`test:levels` broke too, and that one was a latent bug rather than a
+consequence. Its anti-farming check was passing partly because the farmer kept
+getting blown up by a bomber that wandered into a run which happened to take 36
+seconds — halve the time-to-kill and the same 40 kills take 19, the bomber does
+less, and the check fails. It now keeps the bomber out entirely and measures the
+clamp as a *ratio* (9 kills to the top against equals, 36 against a rung-1
+punching bag) rather than as an absolute number of kills that quietly depended
+on how long they took.
 
 ### The knockback bug, and why `test:control` exists
 
@@ -1321,21 +1733,36 @@ bugs. Don't "clean them up" without checking:
   before it detonates; `BOMBER.maxHp` is the knob if you want it scarier.
 - Bot navigation is one whisker cast down the heading, not pathfinding. It is
   enough for a handful of convex boxes in an open square and would not survive a
-  concave map. Tuned by measurement rather than feel: four bots average ~13
-  kills over a 240-second match at 14–18% accuracy, dry about a quarter of the
-  time. The first pass at "make them dumber" landed at 1–4 kills, which is not
+  concave map. Tuned by measurement rather than feel: over 40 matches, four bots
+  average ~10.1 kills a minute at 12.3% accuracy, dry about a quarter of the
+  time. **Bots were never given a compensating accuracy buff when the movement
+  cone landed**, and it shows in the right place: their hit rate fell from 16.6%
+  to 12.3% because they run and gun constantly, which is exactly the archetype
+  the cone is there to tax. Their kill rate is unchanged (10.3 to 10.1 a minute,
+  inside the noise) because the faster gun paid for the worse aim. If they ever
+  need it back, `DIFFICULTY[*].aimError` in `bots.js` is the knob — but a bot that learns to
+  stop before firing is the better answer, and it is Phase 3 work. The first pass at "make them dumber" landed at 1–4 kills, which is not
   dumb, it is absent — dumb has to mean *bad decisions*, not *cannot shoot*.
-- Last Chicken rounds are short with four players — one life each resolves fast.
-  Best-of-N rounds would be the proper fix.
+- Last Chicken rounds are short — one life each resolves fast, and four-a-side
+  only partly helps (a round now ends when a whole side is down, which is later
+  than the first death but earlier than seven of them). Best-of-N rounds would
+  be the proper fix.
 - Performance work is verified by draw-call and material counts, not by profiling
   on real low-end hardware. The counts are real; the frame-time win is inferred.
 - **Egg Heist and Plant & Defuse have not been played by humans yet.** The rules
   are covered by tests and the bots exercise them, but the tuning numbers
   (`HEIST`, `BOMB` in `constants.js`) are first guesses. Plant and defuse times
   in particular are the kind of thing only real matches settle.
-- Both new modes give every seat a nest, including corners nobody occupies. In
-  Egg Heist an empty corner is a free four-egg pile for whoever walks over first;
-  in Plant & Defuse it is skipped as a plant target, but it still gets drawn.
+- Bots do not ping. They play four-a-side correctly — same team assignment,
+  same shared feeder, and friendly fire is off so they cannot shoot each other —
+  but the marker system is human-only, which means a lobby of bots is a silent
+  one. Phase 3 role bots are the natural place to fix that.
+- Ranked is a team mode with an individual placement rating. See the note under
+  Modes: defensible, but undecided.
+- `HEIST.eggsPerNest` went 4 → 8 when four nests became two. That keeps the
+  total on the map identical, which is the safe move and probably not the right
+  one — eight players raiding two nests is a different game from four raiding
+  four, and nobody has played it yet.
 
 ## Roadmap
 
@@ -1349,6 +1776,11 @@ Ordered roughly by value per unit of work:
   variants (fast / heavy / splitter), egg-laying mines.
 - **Arena obstacles** — destructible cover and a few layouts. The biggest
   gameplay change available, and the biggest job: bots need avoidance too.
+- **Roles** — a unique-per-team pick with one signature ability each, and the
+  pecking order rungs handing out that role's perks instead of the same five
+  for everybody. Four a side is the thing that makes roles mean anything, so
+  this is the natural next step; the constraint that matters is that the picker
+  must not add dead time to a three-second respawn.
 
 ## Contributing
 

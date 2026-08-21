@@ -32,7 +32,10 @@ const DEFAULTS = {
   glow: true,
   antialias: true,
   // Cluckdown is first person. There is no camera setting any more.
-  assist: true,    // aim assist, applied client-side before input is sent
+  //
+  // Aim assist is 'auto' | 'on' | 'off' — three states, not a checkbox. See
+  // ASSIST_MODES below for why the device gets a vote.
+  assist: 'auto',
   fireEdit: false, // drag-to-reposition mode for the touch buttons
 
   /**
@@ -91,6 +94,63 @@ export const BRIGHTNESS_MAX = 1.6;
 export const SENSITIVITY_MIN = 0.25;
 export const SENSITIVITY_MAX = 2;
 
+// ------------------------------------------------------------- aim assist
+//
+// THREE states, because a boolean was answering the wrong question.
+//
+// Assist exists for thumbs. Aiming at a chicken on a 375px-tall screen with a
+// finger is genuinely hard, it was the loudest piece of player feedback the
+// game ever got, and at 0.6 strength it makes that playable. On a MOUSE it is
+// the opposite of help: a pointer is already exact, so a soft lock pulling at
+// the angle you just set is the game arguing with your hand — and it is the
+// direct cause of "the shots don't feel like mine". The same feature, the same
+// number, two opposite verdicts, decided entirely by what you are holding.
+//
+// A default of `true` therefore could not be right for everybody, and a default
+// of `false` could not either. 'auto' asks the device: a fine pointer means a
+// mouse or a trackpad, and assist stays out of the way; anything else is a
+// thumb, and it helps. 'on' and 'off' remain, because an explicit choice has to
+// outrank a guess — a player who wants assist with a mouse (or none with a
+// thumb) has said so, and the browser has not.
+export const ASSIST_MODES = ['auto', 'on', 'off'];
+
+/**
+ * Normalises anything into one of the three modes.
+ *
+ * Booleans are the old shape and are migrated rather than rejected. `true`
+ * becomes 'auto' rather than 'on': it was the shipped default, so almost
+ * everyone carrying one never chose it — treating it as an explicit preference
+ * would preserve the exact bug this change exists to fix. `false` becomes 'off',
+ * because nobody ever got that by default; it was always somebody deciding.
+ */
+export function assistMode(v) {
+  if (v === true) return 'auto';
+  if (v === false) return 'off';
+  return ASSIST_MODES.includes(v) ? v : 'auto';
+}
+
+/**
+ * Does assist actually run, on THIS device, right now?
+ *
+ * `(pointer: fine)` is the standard query for "the primary input is precise" —
+ * a mouse, a trackpad, a stylus. It is a live media query rather than a
+ * user-agent guess, so a tablet with a mouse plugged in answers correctly and a
+ * phone never has to be sniffed for.
+ */
+export function assistOn(mode) {
+  const m = assistMode(mode);
+  if (m === 'on') return true;
+  if (m === 'off') return false;
+  try {
+    return !window.matchMedia?.('(pointer: fine)')?.matches;
+  } catch {
+    // No matchMedia at all: assume a thumb. Getting it wrong on a mouse is an
+    // annoyance a player can turn off, and getting it wrong on a phone is a
+    // game they cannot aim.
+    return true;
+  }
+}
+
 export function loadGfx() {
   try {
     const raw = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? '{}');
@@ -100,7 +160,7 @@ export function loadGfx() {
     merged.glow = !!merged.glow;
     merged.antialias = !!merged.antialias;
     merged.fireEdit = !!merged.fireEdit;
-    merged.assist = merged.assist !== false;
+    merged.assist = assistMode(merged.assist);
     merged.sensitivity = clampSensitivity(merged.sensitivity);
     merged.view = asView(merged.view);
     merged.brightness = clampBrightness(merged.brightness);
@@ -118,7 +178,7 @@ export function saveGfx(gfx) {
       resolution: gfx.resolution,
       glow: gfx.glow,
       antialias: gfx.antialias,
-      assist: gfx.assist !== false,
+      assist: assistMode(gfx.assist),
       fireEdit: !!gfx.fireEdit,
       sensitivity: clampSensitivity(gfx.sensitivity),
       view: asView(gfx.view),

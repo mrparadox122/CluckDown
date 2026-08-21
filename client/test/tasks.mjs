@@ -97,10 +97,12 @@ const heist = await until(page, () => {
   };
 });
 console.log('  ', JSON.stringify(heist));
-check('four nests exist in the sim', heist?.nests === 4, String(heist?.nests));
-check('four nests are rendered', heist?.nestViews === 4, String(heist?.nestViews));
+// One nest per ROOST since 4v4 — a shared nest is the thing four players can
+// actually defend together.
+check('two nests exist in the sim', heist?.nests === 2, String(heist?.nests));
+check('two nests are rendered', heist?.nestViews === 2, String(heist?.nestViews));
 check('the nests hold eggs', heist?.totalEggs > 0, String(heist?.totalEggs));
-check('the HUD shows a count per nest', heist?.cells === 4, String(heist?.cells));
+check('the HUD shows a count per nest', heist?.cells === 2, String(heist?.cells));
 
 // Bots should actually run the errand, not just shoot. Watch for the totals to
 // move — a steal, a bank or a drop all change what is where.
@@ -164,7 +166,7 @@ check('a bomb appears', !!bombSeen, bombSeen?.state ?? 'none within 40s');
 check('the bomb is rendered', !!bombSeen?.viewOn);
 check('the HUD reports the bomb', /bomb|BOMB|s\b/i.test(bombSeen?.objective ?? ''), bombSeen?.objective);
 check('nests exist to plant in',
-  (await page.evaluate(() => window.__cluckdown?.session?.nests?.length)) === 4);
+  (await page.evaluate(() => window.__cluckdown?.session?.nests?.length)) === 2);
 
 // Walk the local player onto it. Waiting for a bot to wander into a 1.5-unit
 // pickup radius is a coin flip inside a test window — and the path that matters

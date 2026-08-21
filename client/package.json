@@ -20,6 +20,7 @@
     "test:fps-touch": "node test/fps-touch.mjs",
     "test:controls": "node test/controls.mjs",
     "test:view": "node test/view.mjs",
+    "test:aim": "node test/aim.mjs",
     "test:tts": "node test/tts.mjs"
   },
   "dependencies": {

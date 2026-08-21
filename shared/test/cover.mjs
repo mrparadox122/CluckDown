@@ -179,6 +179,13 @@ console.log('\n--- it stops bullets ---');
 
 /** Fires one shot from `from` toward `to` and reports what happened. */
 function shoot(w, shooter, target, { pitch = 0 } = {}) {
+  // Down the MIDDLE of the movement cone. What is being asked here is whether a
+  // line from this spot at this angle reaches past a box, and the mid-jump
+  // cases below shoot from the widest cone in the game — so an untouched roll
+  // would answer a question about randomness instead. The deviation is
+  // `cone * sqrt(roll)`, so a roll of zero is an ordinary value meaning dead
+  // centre, not a hole punched in the simulation. See shared/test/spread.mjs.
+  w.rng = () => 0;
   const yaw = Math.atan2(target.x - shooter.x, target.z - shooter.z);
   const out = { hits: 0, ends: [] };
   for (let t = 0; t < 2 / TICK_DT; t++) {

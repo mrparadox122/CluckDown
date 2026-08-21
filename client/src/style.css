@@ -450,6 +450,18 @@ input[type="text"]:focus { border-color: var(--hot); box-shadow: 0 0 0 3px rgba(
 }
 .chat-input:focus { opacity: 1; }
 
+/* Two lists in a team game, so the header carries the roost colour. */
+.sb-team {
+  margin-top: 4px;
+  font-size: 9.5px;
+  font-weight: 800;
+  letter-spacing: 1.4px;
+  text-transform: uppercase;
+  opacity: .9;
+}
+.sb-team:first-child { margin-top: 0; }
+.chat-tag { color: var(--good); font-size: 10px; font-weight: 800; }
+
 .scoreboard {
   position: absolute;
   left: 10px;
@@ -1081,26 +1093,110 @@ input[type="text"]:focus { border-color: var(--hot); box-shadow: 0 0 0 3px rgba(
 /* Dead centre, and static. The shot goes exactly where the camera points now,
    so the middle of the screen IS the aim point — no per-frame projection, and
    nothing to keep in sync. */
+/* --- the crosshair ---
+   A zero-size anchor at the exact aim pixel; every part positions itself off
+   that point. The two bars this replaced crossed THROUGH the aim pixel and had
+   no gap at all, which is the one thing a competitive reticle never does —
+   the pixel you are aiming at is the pixel you most need to see.
+
+   `--gap` is written from JS every frame and IS the movement cone, converted
+   from radians to pixels through the camera's own field of view. It is not a
+   stylised approximation of inaccuracy: it is the radius the shot can land
+   inside. */
 .crosshair {
   position: absolute;
   left: 50%;
   top: 50%;
-  width: 22px;
-  height: 22px;
-  margin: -11px 0 0 -11px;
+  width: 0;
+  height: 0;
+  --gap: 5px;
+  --arm: 6px;
+  --thick: 1.5px;
+  --ch: rgba(255, 255, 255, 0.85);
   pointer-events: none;
+  transition: opacity 0.12s linear;
 }
-/* Two bars and a centre dot. Deliberately thin and slightly transparent — a
-   heavy reticle on a 375px-tall phone screen covers the target it is aiming at. */
-.crosshair::before,
-.crosshair::after {
-  content: "";
+.crosshair i {
   position: absolute;
-  background: rgba(255, 255, 255, 0.85);
+  display: block;
+  background: var(--ch);
   box-shadow: 0 0 4px #000;
 }
-.crosshair::before { left: 50%; top: 0; width: 1.5px; height: 100%; margin-left: -0.75px; }
-.crosshair::after { top: 50%; left: 0; height: 1.5px; width: 100%; margin-top: -0.75px; }
+/* The aim point itself. Small enough to sit inside a chicken at range. */
+.crosshair .ch-dot {
+  width: 2px;
+  height: 2px;
+  margin: -1px 0 0 -1px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.95);
+}
+.crosshair .ch-arm.up,
+.crosshair .ch-arm.down {
+  width: var(--thick);
+  height: var(--arm);
+  margin-left: calc(var(--thick) / -2);
+}
+.crosshair .ch-arm.up { top: calc(-1 * (var(--gap) + var(--arm))); }
+.crosshair .ch-arm.down { top: var(--gap); }
+.crosshair .ch-arm.left,
+.crosshair .ch-arm.right {
+  height: var(--thick);
+  width: var(--arm);
+  margin-top: calc(var(--thick) / -2);
+}
+.crosshair .ch-arm.left { left: calc(-1 * (var(--gap) + var(--arm))); }
+.crosshair .ch-arm.right { left: var(--gap); }
+
+/* Hit confirmation: four diagonal ticks, drawn as two bars with a gap punched
+   through the middle of each so the aim point stays clear even at the moment it
+   matters most. Invisible until a class is added, and the class is removed
+   again on animation end so the next hit can restart it. */
+.crosshair .ch-mark {
+  width: 20px;
+  height: 20px;
+  margin: -10px 0 0 -10px;
+  background: none;
+  box-shadow: none;
+  opacity: 0;
+}
+.crosshair .ch-mark::before,
+.crosshair .ch-mark::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 0;
+  width: 2px;
+  height: 100%;
+  margin-left: -1px;
+  background: linear-gradient(
+    to bottom,
+    var(--mark) 0 34%,
+    transparent 34% 66%,
+    var(--mark) 66% 100%
+  );
+  filter: drop-shadow(0 0 2px #000);
+}
+.crosshair .ch-mark::before { transform: rotate(45deg); }
+.crosshair .ch-mark::after { transform: rotate(-45deg); }
+.crosshair .ch-mark {
+  --mark: rgba(255, 255, 255, 0.95);
+}
+/* A headshot reads BIGGER, a kill reads RED. Both land alongside their own
+   sound, so the two channels agree rather than each carrying half the news. */
+.crosshair .ch-mark.is-head { --mark: var(--gold); }
+.crosshair .ch-mark.is-kill { --mark: var(--hot); }
+.crosshair .ch-mark.show { animation: hitmark 0.2s ease-out forwards; }
+.crosshair .ch-mark.is-head.show,
+.crosshair .ch-mark.is-kill.show { animation: hitmark-big 0.28s ease-out forwards; }
+@keyframes hitmark {
+  0% { opacity: 1; transform: scale(0.65); }
+  100% { opacity: 0; transform: scale(1.1); }
+}
+@keyframes hitmark-big {
+  0% { opacity: 1; transform: scale(0.7); }
+  60% { opacity: 1; transform: scale(1.25); }
+  100% { opacity: 0; transform: scale(1.5); }
+}
 
 /* The killfeed owns the top-left corner outright now that the minimap is gone,
    so it no longer steps down past it. It keeps its hard ceiling regardless: a
@@ -1189,6 +1285,80 @@ input[type="text"]:focus { border-color: var(--hot); box-shadow: 0 0 0 3px rgba(
 .jump-btn:active,
 .jump-btn.is-held { background: rgba(142, 202, 230, 0.46); transform: scale(0.94); }
 
+/* PING. Third button, and the only one that is a menu: a wheel is unusable
+   under pressure if it needs reading, so five wedges and no more. */
+.ping-btn {
+  position: absolute;
+  left: 93%;
+  top: 22%;
+  width: 58px;
+  height: 58px;
+  margin: -29px 0 0 -29px;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 204, 61, 0.75);
+  background: rgba(255, 204, 61, 0.18);
+  color: var(--ink);
+  font-family: inherit;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 1.5px;
+  pointer-events: auto;
+  touch-action: none;
+  z-index: 6;
+  transition: background .1s, transform .1s;
+}
+.ping-btn:active,
+.ping-btn.is-held { background: rgba(255, 204, 61, 0.46); transform: scale(0.94); }
+.ping-btn.hidden { display: none; }
+
+/* The wheel itself. Screen-centre in both input schemes, because that is where
+   the eyes already are — a wheel that opens under your thumb is a wheel you
+   look down at. */
+.ping-wheel {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+  z-index: 9;
+}
+.ping-wheel.hidden { display: none; }
+.pw-item {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  width: 84px;
+  padding: 6px 4px;
+  transform: translate(-50%, -50%);
+  border: 1px solid var(--edge);
+  border-radius: 10px;
+  background: rgba(6, 7, 14, 0.82);
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+  text-align: center;
+  transition: transform .08s, background .08s, color .08s;
+}
+.pw-icon { font-size: 18px; line-height: 1; }
+.pw-item.is-on {
+  color: var(--ink);
+  background: rgba(255, 204, 61, 0.26);
+  border-color: var(--pw, var(--gold));
+  transform: translate(-50%, -50%) scale(1.12);
+}
+
+/* A ping marker is a world marker wearing a name. */
+.marker.is-ping .mk-icon { font-size: 19px; }
+.mk-who {
+  font-size: 9px;
+  font-weight: 700;
+  color: var(--mk, #fff);
+  opacity: .85;
+}
+
 /* Layout edit mode: the buttons are draggable rather than active. Listed after
    the :active/.is-held rules so it wins while dragging. */
 .fire-btn.editing,
@@ -1201,7 +1371,7 @@ input[type="text"]:focus { border-color: var(--hot); box-shadow: 0 0 0 3px rgba(
 
 /* Desktop has a mouse and a spacebar; none of this belongs on it. */
 @media (hover: hover) {
-  .look-zone, .fire-btn, .jump-btn { display: none !important; }
+  .look-zone, .fire-btn, .jump-btn, .ping-btn { display: none !important; }
 }
 
 /* ======================= ACTION PROMPT =======================
@@ -1334,7 +1504,11 @@ input[type="text"]:focus { border-color: var(--hot); box-shadow: 0 0 0 3px rgba(
 
   /* Screen real estate is scarce on a phone. */
   #hud .killfeed { max-height: 20vh; }
-  .crosshair { width: 16px; height: 16px; }
+  /* The reticle is a zero-size anchor now; what shrinks is the arms, not a box.
+     The gap is not touched — it is the movement cone in real pixels, and
+     shrinking it would make the reticle understate the spread on exactly the
+     screens where a shot is hardest to place. */
+  .crosshair { --arm: 5px; --thick: 1.5px; }
   .fire-btn { width: 74px; height: 74px; margin: -37px 0 0 -37px; font-size: 10px; }
   .jump-btn { width: 58px; height: 58px; margin: -29px 0 0 -29px; font-size: 9px; }
 
@@ -1653,10 +1827,11 @@ input[type="text"]:focus { border-color: var(--hot); box-shadow: 0 0 0 3px rgba(
 /* The crosshair answers "can I shoot right now" without any eye travel at all.
    The vitals cluster is for planning; this is for the half-second before you
    pull the trigger. */
-.crosshair.dry::before,
-.crosshair.dry::after { background: var(--hot); }
-.crosshair.busy::before,
-.crosshair.busy::after { background: var(--gold); }
+/* "Can I shoot" is three questions — yes, no, and not yet — answered where the
+   player is already looking. Recolouring the token rather than each part keeps
+   the arms, the dot and any future piece in agreement. */
+.crosshair.dry { --ch: var(--hot); }
+.crosshair.busy { --ch: var(--gold); }
 
 @media (max-height: 460px) {
   .vitals { bottom: calc(58px + var(--safe-b)); gap: 3px; }

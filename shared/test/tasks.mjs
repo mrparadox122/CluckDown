@@ -175,10 +175,15 @@ console.log('\n--- Egg Heist ---');
   beginMatch(w, 'coop');
   toLive(w);
 
-  const home = w.nests.find((n) => n.seat === 0);
-  const rival = w.nests.find((n) => n.seat === 1);
-  console.log('  nests:', w.nests.map((n) => `s${n.seat}(${n.x.toFixed(0)},${n.z.toFixed(0)})=${n.eggs}`).join(' '));
-  check('every seat gets a nest on its spawn corner', w.nests.length === 4);
+  const home = w.nests.find((n) => n.team === 0);
+  const rival = w.nests.find((n) => n.team === 1);
+  console.log('  nests:', w.nests.map((n) => `T${n.team}(${n.x.toFixed(0)},${n.z.toFixed(0)})=${n.eggs}`).join(' '));
+  // One nest per ROOST, on the team's shared rally pad. Four private corners
+  // in a 4v4 would mean nobody ever defends anything together.
+  check('each roost gets one nest, on its rally pad', w.nests.length === 2);
+  check('the two nests face each other across the arena',
+    w.nests[0].x === -w.nests[1].x && w.nests[0].z === w.nests[1].z,
+    w.nests.map((n) => `(${n.x.toFixed(0)},${n.z.toFixed(0)})`).join(' '));
   check('nests start full', w.nests.every((n) => n.eggs === HEIST.eggsPerNest), String(HEIST.eggsPerNest));
 
   // Park A on the rival nest and steal.
@@ -221,7 +226,7 @@ console.log('\n--- Egg Heist ---');
   addPlayer(w, { id: 'b', name: 'B', seat: 1 });
   beginMatch(w, 'coop');
   toLive(w);
-  const rival = w.nests.find((n) => n.seat === 1);
+  const rival = w.nests.find((n) => n.team === 1);
   run(w, 3, () => { a.x = rival.x; a.z = rival.z; a.hp = PLAYER.maxHp; });
   const load = a.carrying;
 
@@ -249,11 +254,11 @@ console.log('\n--- Egg Heist ---');
   addPlayer(w, { id: 'a', name: 'A', seat: 0 });
   beginMatch(w, 'coop');
   toLive(w);
-  const rival = w.nests.find((n) => n.seat === 1);
-  w.looseEggs.push({ id: 9001, x: 0, z: 0, fromSeat: 1, returnAt: 1 });
+  const rival = w.nests.find((n) => n.team === 1);
+  w.looseEggs.push({ id: 9001, x: 0, z: 0, fromTeam: 1, returnAt: 1 });
   // Park the lone player on its OWN nest — anywhere near a rival's and it
   // starts stealing, which quietly changes the egg count being asserted on.
-  const own = w.nests.find((n) => n.seat === 0);
+  const own = w.nests.find((n) => n.team === 0);
   const solo = w.players.get('a');
   const returned = run(w, 2, () => { solo.x = own.x; solo.z = own.z; solo.hp = PLAYER.maxHp; });
   console.log(`  abandoned egg: ${w.looseEggs.length} loose, rival nest ${rival.eggs}`);
@@ -269,8 +274,8 @@ console.log('\n--- Egg Heist ---');
   addPlayer(w, { id: 'b', name: 'B', seat: 1 });
   beginMatch(w, 'coop');
   toLive(w);
-  w.nests.find((n) => n.seat === 0).eggs = 9;
-  w.nests.find((n) => n.seat === 1).eggs = 1;
+  w.nests.find((n) => n.team === 0).eggs = 9;
+  w.nests.find((n) => n.team === 1).eggs = 1;
   w.clock = 0.5;
   const end = firstOf(run(w, 3), 'matchEnd');
   console.log(`  winner ${end?.winner}, eggs A=${w.players.get('a').eggsHeld} B=${w.players.get('b').eggsHeld}`);
@@ -304,16 +309,16 @@ console.log('\n--- Plant & Defuse ---');
     `${w.bomb.x.toFixed(2)} vs ${a.x.toFixed(2)}`);
 
   // Standing on your OWN nest must not plant.
-  const own = w.nests.find((n) => n.seat === 0);
+  const own = w.nests.find((n) => n.team === 0);
   run(w, BOMB.plantTime + 1, () => { a.x = own.x; a.z = own.z; hold(a); b.x = 15; b.z = 15; hold(b); });
   check('you cannot plant in your own nest', w.bomb?.state === 'carried', String(w.bomb?.state));
 
   // The rival nest is the target.
-  const rival = w.nests.find((n) => n.seat === 1);
+  const rival = w.nests.find((n) => n.team === 1);
   const plantEvents = run(w, BOMB.plantTime + 1,
     () => { a.x = rival.x; a.z = rival.z; hold(a); b.x = 15; b.z = 15; hold(b); });
   const planted = firstOf(plantEvents, 'bombPlanted');
-  console.log(`  planted at seat ${planted?.seat} by ${planted?.by}, fuse ${w.bomb?.fuse.toFixed(1)}s`);
+  console.log(`  planted in T${planted?.team} nest by ${planted?.by}, fuse ${w.bomb?.fuse.toFixed(1)}s`);
   check('holding still on a rival nest plants it', !!planted, String(w.bomb?.state));
   check('the plant is credited', planted?.by === 'a' && a.score >= BOMB.plantScore, `score ${a.score}`);
   check('the fuse starts full', (w.bomb?.fuse ?? 0) > BOMB.fuse * 0.8,
@@ -334,10 +339,12 @@ console.log('\n--- Plant & Defuse ---');
   const w = createWorld({ mode: 'bomb', seed: 32 });
   const a = addPlayer(w, { id: 'a', name: 'A', seat: 0 });
   const b = addPlayer(w, { id: 'b', name: 'B', seat: 1 });
-  const c = addPlayer(w, { id: 'c', name: 'C', seat: 2 });
+  // Seat 3 is on A's side. Seat 2 would be B's team-mate, and a team-mate
+  // defusing their own nest is exactly what four-a-side is supposed to allow.
+  const c = addPlayer(w, { id: 'c', name: 'C', seat: 3 });
   beginMatch(w, 'coop');
   toLive(w);
-  const rival = w.nests.find((n) => n.seat === 1);
+  const rival = w.nests.find((n) => n.team === 1);
   const hold = (p) => { p.hp = PLAYER.maxHp; p.input = { ...p.input, mx: 0, mz: 0, shoot: false }; };
 
   run(w, w.bombAt + 1, () => { a.x = 0; a.z = 0; hold(a); b.x = 15; b.z = 15; hold(b); c.x = -15; c.z = -15; hold(c); });
@@ -347,7 +354,7 @@ console.log('\n--- Plant & Defuse ---');
   // C parks on it for longer than a defuse takes. It is not their nest.
   run(w, BOMB.defuseTime + 1,
     () => { c.x = rival.x; c.z = rival.z; hold(c); a.x = 15; a.z = 15; hold(a); b.x = -15; b.z = -15; hold(b); });
-  check('a third party cannot defuse someone else\'s bomb', w.bomb?.state === 'planted',
+  check('the planting side cannot defuse its own bomb', w.bomb?.state === 'planted',
     String(w.bomb?.state ?? 'gone'));
 
   // Nobody defuses: it goes off, and the owner standing on it is hurt.
