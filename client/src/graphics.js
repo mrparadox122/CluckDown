@@ -27,10 +27,130 @@ export const RESOLUTIONS = [
   { value: 0.5, label: 'Potato (50%)' },
 ];
 
+/**
+ * What kind of machine is this, in the only two categories that matter?
+ *
+ * The three levers that actually cost frames — render resolution, the glow
+ * layer's extra render target and blur, and MSAA — were all defaulted ON, and
+ * that is a defensible default for exactly one of the two devices this game
+ * runs on. Profiling a mid-range phone put the main thread at 99% saturation
+ * with those on; turning glow and MSAA off alone moved a 6x-throttled
+ * benchmark from 30.6fps to 36.9, and dropping the pixel ratio with them is
+ * most of the rest.
+ *
+ * So the DEFAULTS are per-tier now. Nothing is taken away from anybody: every
+ * one of these is still in the settings panel, and an explicit choice always
+ * outranks the guess (see loadGfx). This only decides what a player who never
+ * opens Settings gets handed on their first match — which is nearly all of
+ * them, and on a phone the current answer is "a slideshow".
+ *
+ * `(pointer: coarse)` is the honest question: not "is this Android" but "is the
+ * primary input a finger", which is true of exactly the devices with a mobile
+ * GPU and false of the desktops without one. deviceMemory and hardwareConcurrency
+ * catch the cheap laptops that answer `fine` and still cannot hold 60.
+ */
+export function deviceTier() {
+  try {
+    // The primary signal, and the only one that is really about the GPU:
+    // a coarse pointer means a finger, and a finger means a phone or tablet.
+    if (window.matchMedia?.('(pointer: coarse)')?.matches) return 'low';
+
+    const mem = navigator.deviceMemory;      // Chromium only; undefined elsewhere
+    const cores = navigator.hardwareConcurrency;
+
+    // Chromium reports deviceMemory rounded down to a power of two and capped
+    // at 8, so <=4 is "this is not a workstation" — cheap laptops and
+    // Chromebooks, which have integrated graphics and the same problem phones
+    // do.
+    if (typeof mem === 'number' && mem > 0 && mem <= 4) return 'low';
+
+    // Core count is the weakest signal and is only trusted where there is no
+    // memory reading to go on. On its own it demotes machines it should not:
+    // a modern quad-core laptop reports 8 with hyper-threading, and a browser
+    // with fingerprint resistance turned on reports 2 whatever it is running
+    // on. So this is the last resort, not the first.
+    if (typeof mem !== 'number' && typeof cores === 'number' && cores > 0 && cores <= 4) return 'low';
+
+    return 'high';
+  } catch {
+    // No matchMedia at all is an old or unusual browser. Guess low: a player on
+    // a fast machine sees a slightly softer picture until they open Settings,
+    // and a player on a slow one gets a game they can actually play.
+    return 'low';
+  }
+}
+
+/**
+ * The graphics knobs a fresh install gets, by tier.
+ *
+ * Only the three that cost frames differ. Everything else — sensitivity, view,
+ * brightness, assist — is a taste, and a taste does not change with the GPU.
+ */
+const TIER_GFX = {
+  high: { resolution: 1, glow: true, antialias: true, dynamicRes: true, fpsCap: 0 },
+  low: { resolution: 0.75, glow: false, antialias: false, dynamicRes: true, fpsCap: 0 },
+};
+
+/**
+ * The graphics defaults every build before tiering shipped with.
+ *
+ * Used to tell "never chose" from "chose these": saveGfx writes the whole
+ * object, so a player who once nudged the brightness slider has all three of
+ * these on disk without ever having thought about them. A blob still sitting on
+ * exactly this triple is one nobody decided, and is safe to re-default. Anything
+ * else is a choice and is left alone. See loadGfx.
+ */
+const LEGACY_GFX = { resolution: 1, glow: true, antialias: true };
+
+/** Effect budgets that scale with the tier, so a phone throws fewer particles. */
+export const EFFECT_BUDGETS = {
+  // Debris particles per colour. Four colours, so this is x4 in the worst case.
+  high: { debris: 90, tracers: 220, aura: true },
+  // 40 still reads as an explosion; it is the tail of a burst nobody counts.
+  // `aura` off is the one visible cut on this tier: the rung ring is worn
+  // constantly by every high-level player, so it is the effect most likely to
+  // be on screen several times at once.
+  low: { debris: 40, tracers: 96, aura: false },
+};
+
+export function effectBudget(gfx) {
+  return EFFECT_BUDGETS[gfx?.tier === 'high' ? 'high' : 'low'] ?? EFFECT_BUDGETS.high;
+}
+
 const DEFAULTS = {
   resolution: 1,
   glow: true,
   antialias: true,
+
+  /**
+   * Which tier the saved settings were written against.
+   *
+   * Present only so a player who installed before tiering existed gets the
+   * correction once — see loadGfx. After that it is just a record.
+   */
+  tier: 'high',
+
+  /**
+   * Dynamic resolution: hold the frame rate by softening the picture.
+   *
+   * A phone that cannot hold 60 has two ways to fail. It can stutter, which
+   * ruins aim, or it can render fewer pixels, which nobody notices while
+   * moving. Every mobile shooter picks the second and so does this. The floor
+   * is half the player's chosen resolution and the ceiling is exactly what they
+   * asked for, so this can only ever make the game faster than the setting,
+   * never blurrier than the floor. See game/adaptive.js.
+   */
+  dynamicRes: true,
+
+  /**
+   * Frame cap: 0 (uncapped), 30 or 60.
+   *
+   * Uncapped by default, because a cap is a preference rather than a fix — a
+   * locked 30 is steadier than a wandering 45 and less responsive than either.
+   * It exists for the players who would rather have the steadiness, and for
+   * anyone trying to make a phone battery last a bus ride.
+   */
+  fpsCap: 0,
   // Cluckdown is first person. There is no camera setting any more.
   //
   // Aim assist is 'auto' | 'on' | 'off' — three states, not a checkbox. See
@@ -152,14 +272,37 @@ export function assistOn(mode) {
 }
 
 export function loadGfx() {
+  const tier = deviceTier();
+  const base = { ...DEFAULTS, ...TIER_GFX[tier], tier };
   try {
     const raw = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? '{}');
-    const merged = { ...DEFAULTS, ...raw };
+    const merged = { ...base, ...raw };
+
+    // ONE-TIME CORRECTION for settings written before tiering existed.
+    //
+    // saveGfx writes every key, so a player who once nudged the brightness
+    // slider has `glow: true` on disk whether or not they ever thought about
+    // glow. Honouring that as an explicit choice would leave every existing
+    // phone player on the defaults this change exists to fix.
+    //
+    // But only for a blob still sitting on exactly the old shipped triple.
+    // Somebody who went and set Potato resolution with the glow off HAS decided,
+    // and re-defaulting them would be this change overriding the very preference
+    // it claims to respect. Everything that is genuinely a taste — sensitivity,
+    // view, brightness, assist, the announcer — is untouched either way.
+    //
+    // The tier is stamped on the way out, so this happens once and never again.
+    const untouched = !raw.tier && Object.entries(LEGACY_GFX).every(([k, v]) => raw[k] === v);
+    if (untouched) Object.assign(merged, TIER_GFX[tier]);
+    merged.tier = tier;
+
     // Guard against a hand-edited or stale value knocking out the renderer.
-    if (!RESOLUTIONS.some((r) => r.value === merged.resolution)) merged.resolution = DEFAULTS.resolution;
+    if (!RESOLUTIONS.some((r) => r.value === merged.resolution)) merged.resolution = base.resolution;
     merged.glow = !!merged.glow;
     merged.antialias = !!merged.antialias;
     merged.fireEdit = !!merged.fireEdit;
+    merged.dynamicRes = !!merged.dynamicRes;
+    merged.fpsCap = clampFpsCap(merged.fpsCap);
     merged.assist = assistMode(merged.assist);
     merged.sensitivity = clampSensitivity(merged.sensitivity);
     merged.view = asView(merged.view);
@@ -168,7 +311,7 @@ export function loadGfx() {
     merged.voice = typeof merged.voice === 'string' ? merged.voice : '';
     return merged;
   } catch {
-    return { ...DEFAULTS };
+    return { ...base };
   }
 }
 
@@ -180,6 +323,11 @@ export function saveGfx(gfx) {
       antialias: gfx.antialias,
       assist: assistMode(gfx.assist),
       fireEdit: !!gfx.fireEdit,
+      dynamicRes: !!gfx.dynamicRes,
+      fpsCap: clampFpsCap(gfx.fpsCap),
+      // Stamped so loadGfx knows these settings have seen a tier and must not
+      // be corrected a second time.
+      tier: gfx.tier === 'high' ? 'high' : 'low',
       sensitivity: clampSensitivity(gfx.sensitivity),
       view: asView(gfx.view),
       brightness: clampBrightness(gfx.brightness),
@@ -205,12 +353,31 @@ export function clampSensitivity(v) {
   return Math.min(SENSITIVITY_MAX, Math.max(SENSITIVITY_MIN, n));
 }
 
+/** The frame caps the panel offers. 0 means "as fast as the device likes". */
+export const FPS_CAPS = [
+  { value: 0, label: 'Uncapped' },
+  { value: 60, label: '60 fps' },
+  { value: 30, label: '30 fps (battery)' },
+];
+
+export function clampFpsCap(v) {
+  const n = Number(v);
+  return FPS_CAPS.some((c) => c.value === n) ? n : 0;
+}
+
 /**
  * Babylon's hardware scaling level is inverse resolution: higher means fewer
- * pixels. Device pixel ratio is capped at 1.5 first, because a 3x phone screen
- * asks for nine times the fill rate of a 1x one for no visible benefit.
+ * pixels.
+ *
+ * The device pixel ratio is capped BEFORE the resolution setting is applied,
+ * and the cap is the single highest-leverage number in the renderer: fill rate
+ * goes as its square. 1.5 was the cap for every device, which on a 3x phone
+ * screen is 2.25x the pixels of 1x — paid on a mobile GPU, every frame, for a
+ * difference nobody can see at arm's length while a chicken is shooting at
+ * them. Phones get 1.0 and desktops keep 1.5, where a still, close screen
+ * genuinely does show the difference.
  */
-export function hardwareScaling(resolution) {
-  const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+export function hardwareScaling(resolution, tier = deviceTier()) {
+  const dpr = Math.min(window.devicePixelRatio || 1, tier === 'low' ? 1 : 1.5);
   return 1 / (dpr * resolution);
 }

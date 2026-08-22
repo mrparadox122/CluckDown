@@ -2,6 +2,7 @@ import './style.css';
 import {
   MODE_LIST, MODES, makeRoomCode, cleanRoomCode, MAPS, MAP_VOTE,
   TEAM_NAMES, TEAM_COLORS, roleDef, ROLES, ROLE_LIST,
+  accountLevel, masteryTier, newMilestones, nextMilestone, shownCrest, shownTitle, PROGRESS,
 } from '@cluckdown/shared';
 import { findMatch, wakeServer, fetchServerStats, fetchRooms, joinRoomById, LocalSession } from './net.js';
 import { loadProfile, saveProfile, rankLabel, applyResult } from './profile.js';
@@ -12,6 +13,7 @@ import { tts } from './audio/index.js';
 import {
   loadGfx, saveGfx, RESOLUTIONS, SENSITIVITY_MIN, SENSITIVITY_MAX, clampSensitivity,
   BRIGHTNESS_MIN, BRIGHTNESS_MAX, clampBrightness, assistMode, assistOn,
+  FPS_CAPS, clampFpsCap,
 } from './graphics.js';
 import {
   blockZoomGestures, fullscreenSupported, isFullscreen, toggleFullscreen,
@@ -82,6 +84,7 @@ function renderMenu() {
   $('name-input').value = profile.name;
   $('rank-name').textContent = rankLabel(profile.rating);
   $('rank-elo').textContent = `${profile.rating} ELO`;
+  renderCareer();
 
   const grid = $('mode-grid');
   grid.replaceChildren(...MODE_LIST.map((id) => {
@@ -130,6 +133,62 @@ function renderMenu() {
     s.textContent = label;
     box.append(b, s);
     return box;
+  }));
+}
+
+/**
+ * The career, on the menu.
+ *
+ * The bar is here rather than only on the results screen for one reason: the
+ * results screen is where you SEE it move, and the menu is where you see that
+ * it is still there. A player opening the app to a bar 70% of the way to
+ * something named has already been given a reason to press PLAY, and the whole
+ * argument of the persistent track is that this moment used to be blank.
+ */
+function renderCareer() {
+  const lvl = accountLevel(profile.career.xp);
+  $('roost-level').textContent = String(lvl.level);
+  $('roost-fill').style.transform = `scaleX(${lvl.pct})`;
+  $('roost-xp').textContent = `${lvl.into} / ${lvl.need} XP`;
+
+  const crest = shownCrest(lvl.level);
+  const title = shownTitle(lvl.level);
+  const next = nextMilestone(lvl.level);
+  $('roost-crest').textContent = crest?.glyph ?? '';
+  $('roost-title').textContent = title?.name ?? 'Unranked chicken';
+  $('roost-next').textContent = next
+    ? `Next: ${next.name} at level ${next.level}`
+    : 'Every milestone earned.';
+
+  // Six bars, always all six, and the empty ones are the point. A role you
+  // have never touched showing Rookie 0/250 is a to-do list — and with roles
+  // rotating every round it is a to-do list that fills itself in.
+  $('mastery-grid').replaceChildren(...ROLE_LIST.map((id) => {
+    const def = roleDef(id);
+    const xp = profile.career.roleXp[id] ?? 0;
+    const m = masteryTier(xp);
+    const row = document.createElement('div');
+    row.className = 'mastery-row';
+    row.style.color = def.color;
+
+    const name = document.createElement('span');
+    name.className = 'mastery-name';
+    name.textContent = `${def.icon} ${def.name}`;
+
+    const bar = document.createElement('div');
+    bar.className = 'mastery-bar';
+    const fill = document.createElement('i');
+    fill.style.transform = `scaleX(${m.pct})`;
+    bar.append(fill);
+
+    const tier = document.createElement('small');
+    tier.className = 'mastery-tier';
+    // The crest a role hands over at Elite. Earned by PLAYING the role, which
+    // is the one reward rotation can hand you that picking never could.
+    tier.textContent = m.tier >= PROGRESS.mastery.crestAt ? `${def.icon} ${m.name}` : m.name;
+
+    row.append(name, bar, tier);
+    return row;
   }));
 }
 
@@ -363,7 +422,13 @@ function launch(newSession) {
     show('menu');
   });
 
-  game = new Game({ canvas, session, hud, gfx, onExit: endMatch });
+  // Career XP per role, snapshotted at kick-off. The picker draws mastery pips
+  // off it, and the Game adds this match's earnings on top as they happen — so
+  // a bar that fills mid-match is visible on the next respawn rather than at
+  // the whistle.
+  game = new Game({
+    canvas, session, hud, gfx, onExit: endMatch, career: profile.career.roleXp,
+  });
 }
 
 function endMatch() {
@@ -440,14 +505,123 @@ function playAgain() {
   else startOnline(privateCode); // keep the party together for a rematch
 }
 
+/**
+ * The persistent track, on the screen it has to work on.
+ *
+ * THIS IS THE PART THAT DECIDES WHETHER THERE IS A MATCH 2. Everything else on
+ * the results screen is a verdict on the four minutes that just ended — the
+ * podium, the table, the rating. This is the only thing on it that points
+ * forward, and it does three jobs in that order:
+ *
+ *   1. SHOW THE BAR MOVING. A number that is simply higher than it was is not
+ *      a reward; watching it fill is. The bar animates from where the match
+ *      started to where it ended, which is why applyResult hands back `before`.
+ *   2. ITEMISE IT. "+412 XP" says nothing about what to do next match.
+ *      "VICTORY 160" does.
+ *   3. NAME WHAT IS NEXT, always. The line under the bar is the hook, and it is
+ *      never blank until the very last milestone: a bar with no named thing at
+ *      the end of it is just a bar.
+ */
+function renderProgress(earned) {
+  const box = $('results-progress');
+  if (!box) return;
+  if (!earned) { box.classList.add('hidden'); return; }
+  box.classList.remove('hidden');
+
+  const { before, after, lines, total } = earned;
+  $('xp-level').textContent = String(after.level);
+  $('xp-total').textContent = `+${total} XP`;
+
+  $('xp-lines').replaceChildren(...lines.map(({ label, xp }) => {
+    const row = document.createElement('div');
+    row.className = 'xp-line';
+    row.append(
+      Object.assign(document.createElement('span'), { textContent: label }),
+      Object.assign(document.createElement('b'), { textContent: `+${xp}` }),
+    );
+    return row;
+  }));
+
+  // Levelling mid-animation would need the bar to empty and refill, and a bar
+  // that jumps backwards reads as a bug however correct it is. So a level-up
+  // simply runs the bar to full and the banner carries the news.
+  const levelled = after.level > before.level;
+  const fill = $('xp-fill');
+  fill.style.transition = 'none';
+  fill.style.transform = `scaleX(${before.level === after.level ? before.pct : before.pct})`;
+  // Reflow, or the browser coalesces both writes and nothing animates.
+  void fill.offsetWidth;
+  fill.style.transition = 'transform 1.1s cubic-bezier(.2,.9,.3,1)';
+  fill.style.transform = `scaleX(${levelled ? 1 : after.pct})`;
+
+  const nextUp = nextMilestone(after.level);
+  const gained = newMilestones(before.level, after.level);
+  const note = $('xp-next');
+  if (gained.length) {
+    const m = gained[gained.length - 1];
+    note.textContent = `UNLOCKED · ${m.glyph ? `${m.glyph} ` : ''}${m.name}`;
+    note.className = 'xp-next is-unlock';
+  } else if (nextUp) {
+    const away = nextUp.level - after.level;
+    note.textContent = away === 1
+      ? `NEXT LEVEL UNLOCKS ${nextUp.name.toUpperCase()}`
+      : `${nextUp.name.toUpperCase()} AT LEVEL ${nextUp.level}`;
+    note.className = 'xp-next';
+  } else {
+    note.textContent = `${after.need - after.into} XP TO LEVEL ${after.level + 1}`;
+    note.className = 'xp-next';
+  }
+
+  // Role mastery, but only for what was actually played. Six bars on a results
+  // screen is a wall; the two or three the rotation put you in is a story about
+  // this match.
+  const played = Object.entries(earned.roleXp ?? {})
+    .filter(([, xp]) => xp >= 1)
+    .sort((a, b) => b[1] - a[1]);
+  $('xp-mastery').replaceChildren(...played.map(([role, xp]) => {
+    const def = roleDef(role);
+    const m = masteryTier(profile.career.roleXp[role] ?? 0);
+    const row = document.createElement('div');
+    row.className = 'xp-role';
+    row.style.color = def.color;
+
+    const head = document.createElement('div');
+    head.className = 'xp-role-top';
+    head.append(
+      Object.assign(document.createElement('span'), { textContent: `${def.icon} ${def.name}` }),
+      Object.assign(document.createElement('b'), { textContent: `+${Math.round(xp)}` }),
+    );
+
+    const bar = document.createElement('div');
+    bar.className = 'xp-role-bar';
+    const fillEl = document.createElement('i');
+    fillEl.style.transform = `scaleX(${m.pct})`;
+    bar.append(fillEl);
+
+    const tier = document.createElement('small');
+    tier.textContent = m.max ? `${m.name} — mastered` : `${m.name} · ${m.into}/${m.need}`;
+
+    row.append(head, bar, tier);
+    return row;
+  }));
+}
+
 function showResults(result) {
   const selfId = session?.selfId;
   lastResult = result;
 
-  if (!result.offline) {
-    profile = applyResult(profile, { ...result, selfId });
-    saveProfile(profile);
-  }
+  // Offline practice moves the career too, and that is deliberate. The track is
+  // cosmetic, the point of it is that nothing you play is wasted, and "the
+  // twenty minutes you spent against bots counted for nothing" is exactly the
+  // sentence it exists to never say. Rating stays online-only — that one IS
+  // competitive, and applyResult still gates it on `ranked`.
+  const tally = game?.careerTally?.() ?? { roleXp: {}, contracts: 0 };
+  const folded = applyResult(profile, {
+    ...result, selfId, contracts: tally.contracts, roleXp: tally.roleXp,
+  });
+  profile = folded.profile;
+  saveProfile(profile);
+  renderProgress(folded.earned);
 
   const ranking = result.ranking ?? [];
   const me = ranking.find((r) => r.id === selfId);
@@ -555,7 +729,14 @@ function showResults(result) {
     nearEl.textContent = gap > 0 ? `Won by ${gap}. ${ranking[1].name} was breathing down your neck.` : '';
   }
 
-  sfx.play('matchEnd');
+  // Winning gets its own recorded fanfare; losing keeps the synth cadence.
+  // Two different sounds is the point — an end-of-match sting that plays
+  // whatever happened tells the player nothing, and the results screen is the
+  // one moment in the loop that decides whether they queue again.
+  const won = result.winnerTeam === 0 || result.winnerTeam === 1
+    ? me?.team === result.winnerTeam
+    : me?.place === 1;
+  if (!won || !sfx.sample('win')) sfx.play('matchEnd');
   endMatch();
 
   startRequeue();
@@ -660,6 +841,35 @@ function bindGraphics() {
   res.addEventListener('change', (e) => apply({ resolution: Number(e.target.value) }));
   $('gfx-glow').addEventListener('change', (e) => apply({ glow: e.target.checked }));
   $('gfx-antialias').addEventListener('change', (e) => apply({ antialias: e.target.checked }));
+
+  // Dynamic resolution and the frame cap are LIVE, unlike the three above.
+  // Nothing about them is fixed at engine construction — they are two numbers
+  // the render loop reads — so they take effect in the match you are in, which
+  // is also the only place you can judge either of them.
+  const cap = $('gfx-fps-cap');
+  cap.replaceChildren(...FPS_CAPS.map(({ value, label }) => {
+    const opt = document.createElement('option');
+    opt.value = String(value);
+    opt.textContent = label;
+    return opt;
+  }));
+  cap.value = String(clampFpsCap(gfx.fpsCap));
+  $('gfx-dynamic-res').checked = !!gfx.dynamicRes;
+
+  const applyLive = (patch) => {
+    gfx = { ...gfx, ...patch };
+    saveGfx(gfx);
+    sfx.play('uiClick');
+  };
+  cap.addEventListener('change', (e) => {
+    const fps = clampFpsCap(e.target.value);
+    applyLive({ fpsCap: fps });
+    game?.setFpsCap(fps);
+  });
+  $('gfx-dynamic-res').addEventListener('change', (e) => {
+    applyLive({ dynamicRes: e.target.checked });
+    game?.setDynamicRes(e.target.checked);
+  });
 
   // First / third person. A HUD button rather than a menu control, because the
   // reason to switch is usually "right now" — peeking round something, or
@@ -1043,6 +1253,10 @@ if (import.meta.env.DEV) {
     get session() { return session; },
     get game() { return game; },
     get profile() { return profile; },
+    // The resolved settings, including the device tier that decided the
+    // graphics defaults — which is the first thing to look at when someone
+    // reports the game looking softer or sharper than they expected.
+    get gfx() { return gfx; },
     sfx,
   };
 }

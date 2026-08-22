@@ -32,7 +32,7 @@
 // Dependency-free like the rest of shared/. This file is a tuning table with
 // helpers under it: the numbers at the top are the ones to move.
 
-import { PLAYER, BULLET, LEVELS } from './constants.js';
+import { PLAYER, BULLET, LEVELS, ROTATION } from './constants.js';
 import { clamp } from './math.js';
 
 /**
@@ -419,4 +419,40 @@ export function resolveRole(world, p, wanted) {
   if (wanted && free.includes(wanted)) return wanted;
   if (p.role && free.includes(p.role)) return p.role;
   return free[0] ?? DEFAULT_ROLE;
+}
+
+/**
+ * The role this player rotates into next round, or null for "stay put".
+ *
+ * Rolled at DEATH rather than at respawn, and that ordering is the whole UX of
+ * the feature: the answer exists while the picker is on screen, so the player
+ * is offered a choice rather than told about a change. See ROTATION.
+ *
+ * Two exclusions, in order of how much they matter. The current role, because a
+ * rotation that lands where it started reads as broken. The previous one,
+ * because at six roles and four slots a pure random walk really does produce
+ * Runner, Scout, Runner, Scout — which is indistinguishable from no rotation to
+ * the player living inside it. Both are dropped rather than enforced when the
+ * pool runs dry: a filter that can empty is a filter that returns null on a
+ * full team, which is the one case rotation is FOR.
+ *
+ * @param rng world.rng, so a seeded match replays identically
+ */
+export function rollRotation(world, p, rng = Math.random) {
+  if (!ROTATION.enabled) return null;
+  const free = freeRoles(world, p.team, p.id);
+  if (!free.length) return null;
+
+  const drop = (pool, id) => {
+    if (!id) return pool;
+    const kept = pool.filter((r) => r !== id);
+    return kept.length ? kept : pool;
+  };
+  let pool = free;
+  if (ROTATION.avoidCurrent) pool = drop(pool, p.role);
+  if (ROTATION.avoidPrevious) pool = drop(pool, p.lastRole);
+
+  const pick = pool[Math.floor(rng() * pool.length)] ?? pool[0];
+  // One entry left and it is what they are already playing: nothing to offer.
+  return pick && pick !== p.role ? pick : null;
 }

@@ -61,7 +61,7 @@ export function createStage(canvas, gfx = { resolution: 1, glow: true, antialias
     antialias: gfx.antialias,
     powerPreference: 'high-performance',
   });
-  engine.setHardwareScalingLevel(hardwareScaling(gfx.resolution));
+  engine.setHardwareScalingLevel(hardwareScaling(gfx.resolution, gfx.tier));
 
   const scene = new Scene(engine);
   scene.clearColor = new Color4(0.02, 0.02, 0.04, 1);
@@ -122,7 +122,19 @@ export function createStage(canvas, gfx = { resolution: 1, glow: true, antialias
   // The glow layer is the single most expensive effect here: an extra render
   // target plus a wide blur, every frame. When it's off, nothing else needs to
   // change — emissive materials still render bright, just without the bloom.
-  const glow = gfx.glow ? new GlowLayer('glow', scene, { blurKernelSize: 48 }) : null;
+  //
+  // The kernel came down from 48 to 32 (Babylon's own default) because 48 was
+  // never a look decision — it is a blur radius, and past a point a wider one
+  // is just more taps per pixel for a bloom that reads the same. On a
+  // tile-based mobile GPU those taps are the expensive part.
+  //
+  // mainTextureRatio is stated rather than left implicit: the glow target is
+  // half-res, which is where a bloom belongs anyway (it is a blur; resolving it
+  // at full res buys detail that the blur then destroys) and quarters the
+  // fill cost of the pass.
+  const glow = gfx.glow
+    ? new GlowLayer('glow', scene, { blurKernelSize: 32, mainTextureRatio: 0.5 })
+    : null;
   if (glow) glow.intensity = dark ? 1.5 : 1.15;
 
   return { engine, scene, camera, glow, key, hemi, gain };

@@ -19,6 +19,12 @@ const GRAVITY = -26;
  * GlowLayer turns it into the red streak.
  */
 export class BulletPool {
+  /**
+   * @param max how many tracers may be in flight at once, across everyone.
+   *            Scaled with the graphics tier — a phone gets a smaller pool, and
+   *            the overflow behaviour is to drop the visual rather than stall,
+   *            which at these speeds is a streak nobody was going to see.
+   */
   constructor(scene, glow, max = 220) {
     this.scene = scene;
     this.active = new Map(); // id -> tracer
@@ -147,6 +153,7 @@ export class BulletPool {
  * is the maths we genuinely need and nothing else.
  */
 export class DebrisPool {
+  /** @param perColour particles per colour, scaled with the graphics tier. */
   constructor(scene, glow, perColour = 90, gravityMul = 1) {
     this.kinds = {};
     this.gravity = GRAVITY * gravityMul;

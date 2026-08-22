@@ -83,8 +83,87 @@ function tint(mesh, hex) {
 }
 
 /** Per-player view: mesh, bob animation, hit flash, and spawn-shield bubble. */
+/**
+ * How each badge is built, called the first time a chicken actually wears one.
+ *
+ * A table rather than six blocks in the constructor because the point is that
+ * they are NOT built in the constructor — see PlayerView.badge. Position and
+ * look are unchanged from when they were; only the moment of creation moved.
+ */
+const BADGES = {
+  /** Spawn protection. */
+  shield(scene) {
+    const m = MeshBuilder.CreateSphere('shield', { diameter: 2.3, segments: 10 }, scene);
+    m.material = emissiveMat(scene, 'shieldMat', '#8ecae6', { intensity: 0.5, alpha: 0.22 });
+    m.position.y = 0.85;
+    return m;
+  },
+
+  // The rung aura. It was the rapid-fire pickup's; it now marks anyone high
+  // up the pecking order, which is a far better use of it — a ring at ground
+  // level is legible from across the arena and from any angle, and "that one
+  // is dangerous" is exactly what it should be saying.
+  aura(scene) {
+    const m = MeshBuilder.CreateTorus('aura', { diameter: 2.0, thickness: 0.09, tessellation: 18 }, scene);
+    // cache:false — recoloured per wearer by rung, so a shared material would
+    // repaint everyone else's ring to the last one set.
+    m.material = emissiveMat(scene, 'auraMat', '#ffcc3d', { intensity: 1.0, cache: false });
+    m.position.y = 0.12;
+    return m;
+  },
+
+  // Second Wind and Feeding Frenzy both flare this. Kept from the old fire
+  // ammo, recoloured per burst: it is the only "something is happening to
+  // that chicken RIGHT NOW" shape the renderer has.
+  flame(scene) {
+    const m = MeshBuilder.CreateSphere('flame', { diameter: 1.5, segments: 8 }, scene);
+    m.material = emissiveMat(scene, 'flameMat', '#ff8a3d', { intensity: 1.0, alpha: 0.5, cache: false });
+    m.position.y = 1.0;
+    return m;
+  },
+
+  // SPOTTED, by a Scout sweep. A chevron above the head that draws THROUGH
+  // walls, which is the whole point of the ability.
+  //
+  // The trick is renderingGroupId, not a depth hack: Babylon clears the depth
+  // buffer between rendering groups, so anything in a later group is drawn on
+  // top of everything in an earlier one. That is one property instead of a
+  // custom material with depthFunction ALWAYS, and it survives the glow layer.
+  spot(scene) {
+    const m = MeshBuilder.CreatePolyhedron('spot', { type: 0, size: 0.19 }, scene);
+    m.material = emissiveMat(scene, 'spotMat', '#c77dff', { intensity: 1.0 });
+    m.position.y = 2.5;
+    m.renderingGroupId = 2;
+    return m;
+  },
+
+  // Bounty crown. A gold bar above the head reads instantly at this camera
+  // angle, and it doubles as "shoot this one".
+  crown(scene) {
+    const m = MeshBuilder.CreateBox('crown', { width: 0.62, height: 0.2, depth: 0.5 }, scene);
+    m.material = emissiveMat(scene, 'crownMat', '#ffcc3d', { intensity: 1.0 });
+    m.position.y = 2.15;
+    return m;
+  },
+
+  // Nemesis ring: whoever killed you last. Deliberately at ground level and
+  // in a colour nothing else uses, so "that one owes me" is legible from
+  // across the arena without competing with the crown above their head.
+  grudge(scene) {
+    const m = MeshBuilder.CreateTorus('grudge', {
+      diameter: 2.4, thickness: 0.11, tessellation: 22,
+    }, scene);
+    m.material = emissiveMat(scene, 'grudgeMat', '#ff4df0', { intensity: 1.0 });
+    m.position.y = 0.06;
+    return m;
+  },
+};
+
+/** The two badges above that mint their own material and must clean it up. */
+const OWNED_MATERIALS = ['aura', 'flame'];
+
 export class PlayerView {
-  constructor(scene, player) {
+  constructor(scene, player, opts = {}) {
     this.scene = scene;
     this.id = player.id;
     this.color = player.color;
@@ -111,69 +190,60 @@ export class PlayerView {
     this.flash = 0;
     this.visible = true;
 
-    this.shield = MeshBuilder.CreateSphere('shield', { diameter: 2.3, segments: 10 }, scene);
-    this.shield.material = emissiveMat(scene, 'shieldMat', '#8ecae6', { intensity: 0.5, alpha: 0.22 });
-    this.shield.parent = this.root;
-    this.shield.position.y = 0.85;
-    this.shield.isPickable = false;
-    this.shield.setEnabled(false);
-
-    // The rung aura. It was the rapid-fire pickup's; it now marks anyone high
-    // up the pecking order, which is a far better use of it — a ring at ground
-    // level is legible from across the arena and from any angle, and "that one
-    // is dangerous" is exactly what it should be saying.
-    this.aura = MeshBuilder.CreateTorus('aura', { diameter: 2.0, thickness: 0.09, tessellation: 18 }, scene);
-    this.aura.material = emissiveMat(scene, 'auraMat', '#ffcc3d', { intensity: 1.0, cache: false });
-    this.aura.parent = this.root;
-    this.aura.position.y = 0.12;
-    this.aura.isPickable = false;
-    this.aura.setEnabled(false);
-
-    // Second Wind and Feeding Frenzy both flare this. Kept from the old fire
-    // ammo, recoloured per burst: it is the only "something is happening to
-    // that chicken RIGHT NOW" shape the renderer has.
-    this.flame = MeshBuilder.CreateSphere('flame', { diameter: 1.5, segments: 8 }, scene);
-    this.flame.material = emissiveMat(scene, 'flameMat', '#ff8a3d', { intensity: 1.0, alpha: 0.5, cache: false });
-    this.flame.parent = this.root;
-    this.flame.position.y = 1.0;
-    this.flame.isPickable = false;
-    this.flame.setEnabled(false);
-
-    // SPOTTED, by a Scout sweep. A chevron above the head that draws THROUGH
-    // walls, which is the whole point of the ability.
+    // --- the six badges, and why none of them is built yet.
     //
-    // The trick is renderingGroupId, not a depth hack: Babylon clears the depth
-    // buffer between rendering groups, so anything in a later group is drawn on
-    // top of everything in an earlier one. That is one property instead of a
-    // custom material with depthFunction ALWAYS, and it survives the glow layer.
-    this.spot = MeshBuilder.CreatePolyhedron('spot', { type: 0, size: 0.19 }, scene);
-    this.spot.material = emissiveMat(scene, 'spotMat', '#c77dff', { intensity: 1.0 });
-    this.spot.parent = this.root;
-    this.spot.position.y = 2.5;
-    this.spot.renderingGroupId = 2;
-    this.spot.isPickable = false;
-    this.spot.setEnabled(false);
+    // A chicken can wear a spawn shield, a rung aura, a perk flame, a Scout
+    // chevron, a bounty crown and a nemesis ring. Building all six per player
+    // meant 48 meshes and ~30 materials standing in an eight-player scene, and
+    // Babylon walks every mesh in the scene each frame to decide what is
+    // active — disabled or not. It measured as the third-largest single entry
+    // in the renderer's own profile.
+    //
+    // Almost none of them are ever worn. Most players are below the aura's
+    // rung, one player at a time carries the bounty, a nemesis ring needs
+    // somebody to have killed you, and a Scout chevron needs a Scout. So each
+    // one is built the first time it is actually switched on, and from then on
+    // it belongs to that chicken. Nothing about how they look or behave
+    // changes; the ones nobody wears simply never come into existence.
+    //
+    // `badges` holds what has been built so dispose and the enable path do not
+    // have to know the list twice.
+    this.badges = {};
+    this.wearsAura = opts.aura !== false;
+  }
 
-    // Bounty crown. A gold bar above the head reads instantly at this camera
-    // angle, and it doubles as "shoot this one".
-    this.crown = MeshBuilder.CreateBox('crown', { width: 0.62, height: 0.2, depth: 0.5 }, scene);
-    this.crown.material = emissiveMat(scene, 'crownMat', '#ffcc3d', { intensity: 1.0 });
-    this.crown.parent = this.root;
-    this.crown.position.y = 2.15;
-    this.crown.isPickable = false;
-    this.crown.setEnabled(false);
+  /**
+   * Builds a badge on first use and returns it, or returns the built one.
+   *
+   * @param want false to leave it unbuilt — asking for a badge that is off is
+   *             the common case, and the whole point is that it costs nothing.
+   */
+  badge(name, want) {
+    const have = this.badges[name];
+    if (have) return have;
+    if (!want) return null;
+    const m = BADGES[name](this.scene);
+    m.parent = this.root;
+    m.isPickable = false;
+    this.badges[name] = m;
+    return m;
+  }
 
-    // Nemesis ring: whoever killed you last. Deliberately at ground level and
-    // in a colour nothing else uses, so "that one owes me" is legible from
-    // across the arena without competing with the crown above their head.
-    this.grudge = MeshBuilder.CreateTorus('grudge', {
-      diameter: 2.4, thickness: 0.11, tessellation: 22,
-    }, scene);
-    this.grudge.material = emissiveMat(scene, 'grudgeMat', '#ff4df0', { intensity: 1.0 });
-    this.grudge.parent = this.root;
-    this.grudge.position.y = 0.06;
-    this.grudge.isPickable = false;
-    this.grudge.setEnabled(false);
+  /**
+   * Enable/disable a badge, building it only when something wants it on.
+   *
+   * `isEnabled(false)` — do NOT check ancestors. A badge is parented to the
+   * chicken, and the chicken is disabled while dead and while it is your own
+   * body in first person, so the inherited answer is "off" even when this
+   * badge's own flag says on. Comparing against the inherited value would set
+   * the flag it already holds, every frame, for the whole time you are alive
+   * and looking down your own beak.
+   */
+  setBadge(name, on) {
+    const m = this.badge(name, on);
+    if (!m) return null;
+    if (m.isEnabled(false) !== !!on) m.setEnabled(!!on);
+    return on ? m : null;
   }
 
   setVisible(v) {
@@ -257,69 +327,69 @@ export class PlayerView {
       );
     }
 
-    this.shield.setEnabled(!!target.invuln);
-    if (target.invuln) this.shield.rotation.y += dt * 2;
+    const shield = this.setBadge('shield', !!target.invuln);
+    if (shield) shield.rotation.y += dt * 2;
 
     // Fire damage keeps ticking after the shot, so it needs to be visible on
     // the victim rather than only in the damage numbers.
-    if (this.flame) {
-      // A burst perk is running: Second Wind (orange) or Feeding Frenzy (pink).
-      const burst = target.frenzy ? '#ff4df0' : (target.wind ? '#ff8a3d' : null);
-      this.flame.setEnabled(!!burst);
-      if (burst) {
-        if (this.flameHex !== burst) {
-          this.flameHex = burst;
-          this.flame.material.emissiveColor.copyFrom(Color3.FromHexString(burst));
-        }
-        this.flame.rotation.y += dt * 7;
-        this.flame.scaling.setAll(0.9 + Math.abs(Math.sin(this.bob * 1.7)) * 0.35);
+    //
+    // A burst perk is running: Second Wind (orange) or Feeding Frenzy (pink).
+    const burst = target.frenzy ? '#ff4df0' : (target.wind ? '#ff8a3d' : null);
+    const flame = this.setBadge('flame', !!burst);
+    if (flame) {
+      if (this.flameHex !== burst) {
+        this.flameHex = burst;
+        flame.material.emissiveColor.copyFrom(Color3.FromHexString(burst));
       }
+      flame.rotation.y += dt * 7;
+      flame.scaling.setAll(0.9 + Math.abs(Math.sin(this.bob * 1.7)) * 0.35);
     }
 
-    if (this.crown) {
-      this.crown.setEnabled(!!target.bounty);
-      if (target.bounty) {
-        this.crown.rotation.y += dt * 1.6;
-        this.crown.position.y = 2.15 + Math.sin(this.bob * 0.8) * 0.06;
-      }
+    const crown = this.setBadge('crown', !!target.bounty);
+    if (crown) {
+      crown.rotation.y += dt * 1.6;
+      crown.position.y = 2.15 + Math.sin(this.bob * 0.8) * 0.06;
     }
 
-    if (this.spot) {
-      this.spot.setEnabled(!!target.spotted);
-      if (target.spotted) {
-        this.spot.rotation.y += dt * 3;
-        this.spot.position.y = 2.5 + Math.sin(this.bob * 1.4) * 0.09;
-      }
+    const spot = this.setBadge('spot', !!target.spotted);
+    if (spot) {
+      spot.rotation.y += dt * 3;
+      spot.position.y = 2.5 + Math.sin(this.bob * 1.4) * 0.09;
     }
 
-    if (this.grudge) {
-      this.grudge.setEnabled(!!target.nemesis);
-      if (target.nemesis) {
-        this.grudge.rotation.y -= dt * 2.2;
-        this.grudge.scaling.setAll(1 + Math.abs(Math.sin(this.bob * 1.1)) * 0.07);
-      }
+    const grudge = this.setBadge('grudge', !!target.nemesis);
+    if (grudge) {
+      grudge.rotation.y -= dt * 2.2;
+      grudge.scaling.setAll(1 + Math.abs(Math.sin(this.bob * 1.1)) * 0.07);
     }
 
     // Rung 4 and up wear the ring, tinted by rung. Below that the ladder is
     // still readable off the nameplate — an aura on everyone is an aura on
     // nobody.
+    //
+    // `wearsAura` is also the low-graphics cut. It is the one badge a whole
+    // lobby can be wearing at once late in a match, which makes it the only
+    // one whose cost scales with how well the match is going.
     const lvl = target.level ?? 1;
-    const wearsAura = lvl >= 4;
-    this.aura.setEnabled(wearsAura);
-    if (wearsAura) {
+    const aura = this.setBadge('aura', this.wearsAura && lvl >= 4);
+    if (aura) {
       if (this.auraLevel !== lvl) {
         this.auraLevel = lvl;
-        this.aura.material.emissiveColor.copyFrom(Color3.FromHexString(rungOf(lvl).color));
+        aura.material.emissiveColor.copyFrom(Color3.FromHexString(rungOf(lvl).color));
       }
-    }
-    if (wearsAura) {
-      this.aura.rotation.y += dt * 5;
-      this.aura.position.y = 0.12 + Math.sin(this.bob * 0.6) * 0.06;
+      aura.rotation.y += dt * 5;
+      aura.position.y = 0.12 + Math.sin(this.bob * 0.6) * 0.06;
     }
   }
 
   dispose() {
-    this.root.dispose(false, true);
+    // Materials are NOT swept up with the mesh: emissiveMat hands out a shared,
+    // per-scene instance for everything except the two badges that recolour
+    // themselves, so disposing them here would take the crown off every other
+    // chicken the moment one player left mid-match. The scene owns the shared
+    // ones and drops them all when the match ends.
+    for (const name of OWNED_MATERIALS) this.badges[name]?.material?.dispose();
+    this.root.dispose(false, false);
   }
 }
 

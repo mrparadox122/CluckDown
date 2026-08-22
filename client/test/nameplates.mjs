@@ -72,7 +72,10 @@ const measure = () => page.evaluate(() => {
   const out = [];
   for (const plate of document.querySelectorAll('.nameplate')) {
     if (plate.style.display === 'none') continue;
-    const name = plate.querySelector('.np-name').textContent;
+    // The LAST child, not the whole row. `.np-name` holds the rung badge and
+    // then the name, so its textContent is "3Beaky" — which matches nobody, and
+    // silently emptied every sample this test takes.
+    const name = plate.querySelector('.np-name').lastChild?.textContent ?? '';
     // The inline transform is where the plate is actually drawn.
     const m = /translate\(([-\d.]+)px,\s*([-\d.]+)px\)/.exec(plate.style.transform);
     if (!m) continue;
@@ -107,13 +110,21 @@ const measure = () => page.evaluate(() => {
 // the correction settles — so a single reading can legitimately catch a frame
 // where mesh and server agree, which would make the meaningfulness guard below
 // fail for no real reason.
-let rows = await measure();
-let peakSpread = Math.max(0, ...rows.map((r) => r.meshVsServer ?? 0));
-for (let i = 0; i < 12; i++) {
-  await page.waitForTimeout(120);
+//
+// EMPTY SAMPLES ARE NOW NORMAL and must be skipped rather than measured. Enemy
+// plates are gated on line of sight (see PlateVision) — an enemy behind a box
+// is not drawn at all — so a frame with nothing on screen is the feature
+// working, not a plate that failed to render. This measures the frames that
+// HAVE plates; whether the gating itself is right is phase4.mjs's job.
+let rows = [];
+let peakSpread = 0;
+for (let i = 0; i < 40 && (rows.length === 0 || i < 12); i++) {
   const sample = await measure();
-  const spreadNow = Math.max(0, ...sample.map((r) => r.meshVsServer ?? 0));
-  if (spreadNow > peakSpread) { peakSpread = spreadNow; rows = sample; }
+  if (sample.length) {
+    const spreadNow = Math.max(0, ...sample.map((r) => r.meshVsServer ?? 0));
+    if (!rows.length || spreadNow > peakSpread) { peakSpread = spreadNow; rows = sample; }
+  }
+  await page.waitForTimeout(120);
 }
 await page.keyboard.up('KeyD');
 

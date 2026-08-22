@@ -20,6 +20,8 @@
     "test:crop": "node test/crop.mjs",
     "test:levels": "node test/levels.mjs",
     "test:roles": "node test/roles.mjs",
-    "measure:density": "node test/density.mjs"
+    "measure:density": "node test/density.mjs",
+    "test:rotation": "node test/rotation.mjs",
+    "test:progress": "node test/progress.mjs"
   }
 }

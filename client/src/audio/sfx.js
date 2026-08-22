@@ -1,5 +1,7 @@
-// Every sound in the game, synthesised at runtime. No audio files, no
-// loading, no licensing — just oscillators, filtered noise and gain envelopes.
+// Every sound in the game. Almost all of it is synthesised at runtime — just
+// oscillators, filtered noise and gain envelopes — and three cues are recorded
+// files, because dying, landing a head and winning are punctuation rather than
+// texture. See clips.js for where that line is drawn.
 //
 // Two rules kept throughout:
 //   1. Nothing is created until the player makes a gesture. Browsers refuse to
@@ -7,6 +9,8 @@
 //      "suspended" forever.
 //   2. Every voice disconnects itself when it finishes. A shooter fires
 //      hundreds of sounds a minute and orphaned nodes would pile up.
+
+import { CLIPS, CLIP_GAIN, CLIP_THROTTLE } from './clips.js';
 
 const STORAGE_KEY = 'cluckdown.audio.v1';
 
@@ -49,6 +53,13 @@ export class Sfx {
 
     this.fuse = { active: false, nextBeep: 0 };
     this.noiseBuffer = null;
+
+    // Decoded mp3s, by family. Empty until the first gesture — decoding needs
+    // an AudioContext, and an AudioContext built before one gets stuck
+    // suspended forever.
+    this.clips = new Map();
+    this.lastClip = new Map();
+    this.clipsLoading = false;
   }
 
   // ------------------------------------------------------------- lifecycle
@@ -68,6 +79,73 @@ export class Sfx {
       this.noiseBuffer = this.buildNoise();
     }
     if (this.ctx.state === 'suspended') this.ctx.resume().catch(() => {});
+    // Fetched on the same gesture, not on the first death. A sting that arrives
+    // half a second after the thing it is punctuating is worse than no sting.
+    this.loadClips();
+    return true;
+  }
+
+  /**
+   * Fetches and decodes every recorded clip, once.
+   *
+   * Deliberately fire-and-forget: nothing waits on it and every failure is
+   * swallowed per file. A blocked request or an mp3 a browser will not decode
+   * has to cost that one variant, never the sound engine — and `sample()`
+   * reports back whether anything actually played so callers can fall back to
+   * the synth kit.
+   */
+  loadClips() {
+    if (this.clipsLoading || !this.ctx) return;
+    this.clipsLoading = true;
+    for (const [family, urls] of Object.entries(CLIPS)) {
+      const bank = [];
+      this.clips.set(family, bank);
+      for (const url of urls) {
+        fetch(url)
+          .then((r) => (r.ok ? r.arrayBuffer() : Promise.reject(new Error(String(r.status)))))
+          .then((buf) => this.ctx.decodeAudioData(buf))
+          .then((audio) => { bank.push(audio); })
+          .catch(() => { /* one variant short; the others still play */ });
+      }
+    }
+  }
+
+  /**
+   * Plays one recorded clip from a family, at random.
+   *
+   * NEVER THE SAME ONE TWICE RUNNING while there is an alternative. A death
+   * sting is heard a dozen times a match and repetition is what kills a sample
+   * — the whole reason to ship five of them is that the fifth still lands.
+   *
+   * Bypasses MAX_VOICES on purpose. That cap exists so a four-way firefight
+   * cannot turn into white noise, and it counts shots; these are one-at-a-time
+   * punctuation, and dropping the sound of your own death because the room was
+   * loud is exactly backwards.
+   *
+   * @returns true if something was actually scheduled.
+   */
+  sample(family, { gain = 1 } = {}) {
+    if (!this.ready || this.muted) return false;
+    const bank = this.clips.get(family);
+    if (!bank?.length) return false;
+
+    const min = CLIP_THROTTLE[family];
+    const now = this.ctx.currentTime;
+    const key = `clip:${family}`;
+    if (min && now - (this.lastAt.get(key) ?? -1) < min) return false;
+    this.lastAt.set(key, now);
+
+    let i = Math.floor(Math.random() * bank.length);
+    if (bank.length > 1 && i === this.lastClip.get(family)) i = (i + 1) % bank.length;
+    this.lastClip.set(family, i);
+
+    const src = this.ctx.createBufferSource();
+    const g = this.ctx.createGain();
+    src.buffer = bank[i];
+    g.gain.value = (CLIP_GAIN[family] ?? 0.8) * gain;
+    src.connect(g).connect(this.master);
+    src.start(now);
+    src.onended = () => { try { src.disconnect(); g.disconnect(); } catch { /* gone */ } };
     return true;
   }
 

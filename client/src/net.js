@@ -208,6 +208,9 @@ export class OnlineSession extends BaseSession {
         // and the client has both — so they are worked out here rather than
         // taking up room on the wire.
         role: p.role || null,
+        // Next round's role, or null. Only ever set on your own record while
+        // dead — see ROTATION.
+        rotateTo: p.rotateTo || null,
         // Guarded on `role` rather than trusting the fallback: an unset role
         // resolves to the Runner, and a 100 HP chicken drawn against 75 shows
         // an overflowing bar for whatever tick the first patch lands on.
@@ -412,6 +415,7 @@ export class LocalSession extends BaseSession {
       crop: Math.floor(p.crop), pecking: p.pecking, feeding: p.feeding, dry: p.dry,
       level: p.level, xp: p.xp, nextXp: xpForLevel(p.level + 1),
       role: p.role,
+      rotateTo: p.rotateTo ?? null,
       maxHp: maxHpOf(p),
       abilityCharges: p.abilityCharges,
       abilityMax: abilityMax(p),

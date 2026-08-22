@@ -149,6 +149,142 @@ input[type="text"]:focus { border-color: var(--hot); box-shadow: 0 0 0 3px rgba(
 #rank-name { color: var(--gold); }
 .rank-elo { margin-left: auto; color: var(--muted); font-variant-numeric: tabular-nums; }
 
+/* ===================== THE PERSISTENT TRACK =====================
+   Cosmetic by rule (see shared/src/progress.js). Sits directly under the rank
+   row on purpose: one line for the ladder that resets, one card for the one
+   that does not. */
+.roost-card {
+  padding: 10px 12px 11px;
+  margin-bottom: 16px;
+  background: linear-gradient(180deg, rgba(255, 204, 61, 0.07), rgba(255, 255, 255, 0.03));
+  border: 1px solid var(--edge);
+  border-radius: 10px;
+}
+.roost-top { display: flex; align-items: center; gap: 7px; }
+.roost-crest { color: var(--gold); font-size: 15px; line-height: 1; }
+.roost-crest:empty { display: none; }
+.roost-badge {
+  padding: 2px 6px;
+  border-radius: 5px;
+  background: var(--gold);
+  color: #100c02;
+  font-size: 9.5px;
+  font-weight: 900;
+  letter-spacing: 1px;
+}
+.roost-badge b { font-size: 11px; }
+.roost-title {
+  font-size: 12.5px;
+  letter-spacing: .3px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.roost-xp {
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* The bar itself. scaleX on a child rather than a width, so the results screen
+   can animate it on the compositor instead of relaying out the card. */
+.roost-bar {
+  position: relative;
+  height: 7px;
+  margin-top: 8px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.09);
+  overflow: hidden;
+}
+.roost-bar > i {
+  display: block;
+  height: 100%;
+  border-radius: 4px;
+  background: linear-gradient(90deg, var(--gold), #ffe89a);
+  transform-origin: left center;
+  transform: scaleX(0);
+}
+.roost-next {
+  margin-top: 6px;
+  font-size: 10px;
+  color: var(--muted);
+  letter-spacing: .6px;
+}
+
+.mastery-box { margin-top: 9px; }
+.mastery-box > summary {
+  font-size: 10px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 1.2px;
+  cursor: pointer;
+}
+.mastery-grid { display: grid; gap: 6px; margin-top: 8px; }
+.mastery-row {
+  display: grid;
+  grid-template-columns: 92px 1fr 62px;
+  align-items: center;
+  gap: 8px;
+}
+.mastery-name {
+  font-size: 10.5px;
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mastery-bar {
+  height: 5px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.09);
+  overflow: hidden;
+}
+.mastery-bar > i {
+  display: block;
+  height: 100%;
+  background: currentColor;
+  transform-origin: left center;
+  transform: scaleX(0);
+}
+.mastery-tier { font-size: 9px; color: var(--muted); text-align: right; }
+
+/* --- the same track, on the results screen --- */
+.results-progress {
+  padding: 11px 12px 12px;
+  margin-bottom: 12px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--edge);
+  border-radius: 10px;
+  text-align: left;
+}
+.xp-head { display: flex; align-items: center; gap: 8px; }
+.xp-total { margin-left: auto; color: var(--gold); font-size: 15px; font-variant-numeric: tabular-nums; }
+.xp-next { margin-top: 7px; font-size: 10.5px; color: var(--muted); letter-spacing: .8px; }
+.xp-next.is-unlock { color: var(--gold); font-weight: 800; }
+.xp-lines { display: grid; gap: 3px; margin-top: 9px; }
+.xp-line { display: flex; font-size: 11px; color: var(--muted); }
+.xp-line b { margin-left: auto; color: var(--ink); font-variant-numeric: tabular-nums; }
+.xp-mastery { display: grid; gap: 7px; margin-top: 10px; }
+.xp-mastery:empty { margin-top: 0; }
+.xp-role-top { display: flex; font-size: 10.5px; font-weight: 700; }
+.xp-role-top b { margin-left: auto; font-variant-numeric: tabular-nums; }
+.xp-role-bar {
+  height: 5px;
+  margin-top: 4px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.09);
+  overflow: hidden;
+}
+.xp-role-bar > i {
+  display: block;
+  height: 100%;
+  background: currentColor;
+  transform-origin: left center;
+}
+.xp-role small { display: block; margin-top: 3px; font-size: 9px; color: var(--muted); }
+
 .mode-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -267,9 +403,35 @@ input[type="text"]:focus { border-color: var(--hot); box-shadow: 0 0 0 3px rgba(
 
 /* ============================== HUD ============================== */
 
-#hud { position: fixed; inset: 0; z-index: 10; pointer-events: none; }
+/* CSS CONTAINMENT, and what it is worth.
+   The HUD writes to itself constantly — nameplates move, meters fill, the
+   killfeed grows. Without `contain`, each of those invalidates layout for the
+   WHOLE document, and the browser re-lays-out every node on the page to find
+   out that only a health bar moved. Profiling put that at ~150ms of layout per
+   second on a mid-range phone, one full document layout per frame.
+   `layout` says "nothing inside me can change anything outside me", which for
+   a fixed, full-screen, absolutely-positioned overlay is simply true. `style`
+   says the same for counters and quotes. Both are free correctness statements
+   about markup that already behaves this way; they just let the browser stop
+   proving it sixty times a second. */
+#hud {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  pointer-events: none;
+  contain: layout style;
+}
 
-#world-overlay { position: absolute; inset: 0; overflow: hidden; }
+/* `strict` = layout + style + paint + size. The overlay is exactly inset:0 of
+   a fixed parent, so its size never depends on its contents — which is what
+   lets the size half of it be claimed, and what stops a nameplate near the
+   edge from being able to influence anything at all. */
+#world-overlay {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  contain: layout style paint;
+}
 
 /* Floating nameplate + health bar, positioned by projecting world space. */
 .nameplate {
@@ -370,7 +532,7 @@ input[type="text"]:focus { border-color: var(--hot); box-shadow: 0 0 0 3px rgba(
   padding: 10px;
 }
 
-.killfeed { width: min(30vw, 230px); display: flex; flex-direction: column; gap: 4px; }
+.killfeed { width: min(30vw, 230px); display: flex; flex-direction: column; gap: 4px; contain: layout style; }
 .kf-row {
   padding: 5px 8px;
   font-size: 11px;
@@ -419,6 +581,7 @@ input[type="text"]:focus { border-color: var(--hot); box-shadow: 0 0 0 3px rgba(
   max-height: 26vh;
   overflow: hidden;
   font-size: 11.5px;
+  contain: layout style;
 }
 .chat-row {
   padding: 4px 8px;
@@ -462,14 +625,28 @@ input[type="text"]:focus { border-color: var(--hot); box-shadow: 0 0 0 3px rgba(
 .sb-team:first-child { margin-top: 0; }
 .chat-tag { color: var(--good); font-size: 10px; font-weight: 800; }
 
+/* HELD, not permanent — see Hud.setScoreboardOpen. Hidden by default, and
+   emptied rather than merely hidden, so a closed board is not a subtree the
+   browser is carrying around. */
 .scoreboard {
   position: absolute;
   left: 10px;
   bottom: calc(38vh + var(--safe-b));
-  display: flex;
+  display: none;
   flex-direction: column;
   gap: 3px;
   font-size: 11.5px;
+  contain: layout style;
+}
+.scoreboard.is-open {
+  display: flex;
+  /* No transition on the way in. The board is up for as long as a thumb is
+     down on a button, and an animation would spend a third of that arriving. */
+  animation: sb-in .09s ease-out;
+}
+@keyframes sb-in {
+  from { opacity: 0; transform: translateX(-6px); }
+  to { opacity: 1; transform: none; }
 }
 .sb-row {
   display: flex;
@@ -509,13 +686,20 @@ input[type="text"]:focus { border-color: var(--hot); box-shadow: 0 0 0 3px rgba(
   100% { opacity: 0; transform: translateX(-50%) scale(1.05); }
 }
 
+/* NO backdrop-filter. A full-screen backdrop blur is one of the most expensive
+   things a mobile compositor can be asked for, and this one was up for the
+   whole three-second respawn — several times a minute, every minute. The blur
+   was doing the work of separating the panel from the arena behind it, so the
+   ground it was standing on gets darker instead and the panel keeps its
+   contrast for none of the cost. (`.picking` below already turned it off,
+   which is most of the argument that it was never load-bearing.) */
 .respawn-overlay {
   position: absolute;
   inset: 0;
   display: grid;
   place-items: center;
-  background: rgba(4, 4, 9, 0.55);
-  backdrop-filter: blur(2px);
+  background: rgba(4, 4, 9, 0.72);
+  contain: layout style;
 }
 .respawn-inner { text-align: center; }
 .respawn-label { font-size: 15px; letter-spacing: 3px; text-transform: uppercase; color: var(--hot); }
@@ -982,6 +1166,7 @@ input[type="text"]:focus { border-color: var(--hot); box-shadow: 0 0 0 3px rgba(
   font-size: 13px;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
+  contain: layout style;
 }
 .objective .team-score {
   min-width: 34px;
@@ -1059,6 +1244,7 @@ input[type="text"]:focus { border-color: var(--hot); box-shadow: 0 0 0 3px rgba(
   font-size: 12px;
   white-space: nowrap;
   pointer-events: none;
+  contain: layout style;
 }
 .contract-tag {
   font-size: 8.5px;
@@ -1394,6 +1580,7 @@ input[type="text"]:focus { border-color: var(--hot); box-shadow: 0 0 0 3px rgba(
   border: 1px solid var(--edge);
   pointer-events: none;
   white-space: nowrap;
+  contain: layout style;
 }
 .prompt-text {
   font-size: 13px;
@@ -1559,6 +1746,12 @@ input[type="text"]:focus { border-color: var(--hot); box-shadow: 0 0 0 3px rgba(
   .field span { font-size: 9.5px; margin-bottom: 3px; }
   input[type="text"] { padding: 9px 11px; }
   .server-status, .rank-row { padding: 6px 10px; margin-bottom: 8px; font-size: 11px; }
+  .roost-card { padding: 7px 10px 8px; margin-bottom: 9px; }
+  .roost-title { font-size: 11px; }
+  .roost-bar { height: 6px; margin-top: 6px; }
+  .mastery-row { grid-template-columns: 78px 1fr 54px; }
+  .results-progress { padding: 8px 10px 9px; }
+  .xp-total { font-size: 13px; }
   .mode-grid { grid-template-columns: repeat(3, 1fr); gap: 6px; margin-bottom: 10px; }
   .mode-btn { padding: 8px 9px; }
   .mode-btn strong { font-size: 12px; margin-bottom: 1px; }
@@ -1748,6 +1941,7 @@ input[type="text"]:focus { border-color: var(--hot); box-shadow: 0 0 0 3px rgba(
   gap: 5px;
   pointer-events: none;
   user-select: none;
+  contain: layout style;
 }
 
 .vitals-hp { display: flex; align-items: center; gap: 8px; }
@@ -2006,12 +2200,36 @@ input[type="text"]:focus { border-color: var(--hot); box-shadow: 0 0 0 3px rgba(
 /* Taken by a team-mate. Still drawn, because seeing that your roost already
    has a Medic is itself the information the picker exists to give. */
 .role-card.taken { opacity: 0.34; cursor: not-allowed; }
+/* Where the rotation is about to put you. Pulsing rather than static: it is a
+   thing that is going to HAPPEN, and the whole point of showing it early is
+   that the player gets to disagree with it before it does. */
+.role-card.rotating {
+  border-color: currentColor;
+  border-style: dashed;
+  animation: rotate-offer 1.05s ease-in-out infinite;
+}
+.role-card.rotating .role-card-by { color: currentColor; font-weight: 900; }
+@keyframes rotate-offer {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(255, 255, 255, 0); }
+  50% { box-shadow: 0 0 10px 1px currentColor; }
+}
 .role-card-top { display: flex; align-items: center; gap: 6px; }
 .role-card-icon { font-size: 15px; line-height: 1; }
 .role-card-name { font-size: 11.5px; font-weight: 800; letter-spacing: 1.2px; text-transform: uppercase; }
 .role-card-what { margin-top: 3px; font-size: 9.5px; color: var(--muted); letter-spacing: .4px; }
 .role-card-perk { margin-top: 5px; font-size: 9px; color: rgba(255, 255, 255, 0.72); }
 .role-card-by { position: absolute; top: 6px; right: 7px; font-size: 8px; color: var(--muted); letter-spacing: .6px; }
+/* Mastery, on the card. Pips rather than a bar: the picker is a three-second
+   screen and a lit-vs-unlit count is readable at a glance in a way a fill
+   percentage is not. */
+.role-card-mastery { display: flex; gap: 3px; margin-top: 6px; }
+.role-card-mastery i {
+  flex: 1 1 0;
+  height: 3px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.16);
+}
+.role-card-mastery i.on { background: currentColor; }
 .role-hint { width: 100%; text-align: center; font-size: 10px; color: var(--muted); letter-spacing: 1.4px; }
 
 /* What you are, in the vitals cluster. */
@@ -2065,6 +2283,13 @@ input[type="text"]:focus { border-color: var(--hot); box-shadow: 0 0 0 3px rgba(
   height: 0%;
   background: rgba(255, 255, 255, 0.16);
   pointer-events: none;
+  /* The countdown behind this arrives quantised to a tenth of a second — it is
+     a float that used to change every server tick, which meant it was dirty in
+     every single state patch for the sake of a sweep nobody watches that
+     closely. Ten steps a second with a transition across them is indis-
+     tinguishable from sixty, and it is the difference between this field
+     costing bandwidth constantly and costing it occasionally. */
+  transition: height .12s linear;
 }
 
 /* Scout sweep: the screen edge lights up for the team that has vision. */
@@ -2083,6 +2308,7 @@ input[type="text"]:focus { border-color: var(--hot); box-shadow: 0 0 0 3px rgba(
   .role-card-name { font-size: 10px; }
   .role-card-what { font-size: 8.5px; }
   .role-card-perk { display: none; }
+  .role-card-mastery { margin-top: 4px; }
   .ability-btn { width: 54px; height: 54px; margin: -27px 0 0 -27px; font-size: 9px; }
 }
 
@@ -2091,7 +2317,7 @@ input[type="text"]:focus { border-color: var(--hot); box-shadow: 0 0 0 3px rgba(
 /* The picker in WARMUP, before anyone has died. Same overlay, different dress:
    there is a live arena behind it that people are already moving around in, so
    it must not black the screen out or announce a death that has not happened. */
-.respawn-overlay.picking { background: rgba(4, 4, 9, 0.28); backdrop-filter: none; }
+.respawn-overlay.picking { background: rgba(4, 4, 9, 0.28); }
 .respawn-overlay.picking .respawn-label,
 .respawn-overlay.picking .respawn-count,
 .respawn-overlay.picking .respawn-sub { display: none; }

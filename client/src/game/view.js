@@ -370,6 +370,148 @@ export function convergeDistance(origin, basis, targets = [], half = Infinity, o
  * @param targets everyone worth converging on, as {x, y, z, alive}
  * @param half    arena half-extent, matching what the camera was given
  */
+/**
+ * Enemy nameplates: when you are allowed to see one.
+ *
+ * *** THIS IS A WALLHACK FIX. ***
+ *
+ * A nameplate is HTML floating over the world, and HTML has no depth buffer —
+ * so every enemy health bar was drawn through cover, and the reported symptom
+ * was players tracking each other through solid boxes off the bars alone. That
+ * is not a cosmetic bug: cover is the entire reason the arena has boxes in it,
+ * and an information channel that ignores them deletes the mechanic.
+ *
+ * The rule is the shot's own geometry, which is why it is in this file: a bar
+ * appears when you COULD SHOOT THEM. Same origin `fire()` uses (the eye), same
+ * boxes `traceShot` clips against, so "I can see their health" and "my round
+ * would arrive" are the same sentence. Nothing view-dependent goes into it —
+ * first and third person answer identically, exactly like the crosshair.
+ *
+ * Two gates, and they linger differently on purpose:
+ *
+ *   LOS   is the wallhack. It gets almost no linger — 0.15s smooths a single
+ *         frame of clipping a pillar edge and is useless as a peek.
+ *   CONE  is "are you actually looking at them", and it gets a real one. A bar
+ *         that strobed as the crosshair drifted off a moving target would be
+ *         worse than no bar at all: flicker reads as a rendering fault, and
+ *         nobody can hold a dot inside 0.6 radians while strafing.
+ */
+export const PLATES = {
+  /**
+   * Half-angle from the crosshair, in radians. ~26 degrees.
+   *
+   * Sized against the camera rather than picked: the field of view is 1.15rad,
+   * so a half-vertical of ~0.575 — this is a bit under 80% of that, which is
+   * "in the middle of the screen" rather than "under the reticle". Tighter is
+   * tempting and wrong. At ten units a chicken is 0.06rad wide, so a cone that
+   * actually required the crosshair ON them would need pixel-perfect aim to
+   * read a health bar, and the bar is most wanted in exactly the moments aim
+   * is worst.
+   */
+  cone: 0.45,
+
+  /**
+   * Inside this many units, LOS alone is enough — the cone is dropped.
+   *
+   * Someone this close fills a quarter of the screen and is a sound, a shape
+   * and a shove already. Hiding their bar mid-flick loses information without
+   * protecting anything, because there is no wall in the way to protect.
+   */
+  near: 6,
+
+  /** Seconds a plate survives losing line of sight. Deliberately tiny. */
+  losLinger: 0.15,
+
+  /** ...and losing the cone. Long enough that tracking is not a strobe light. */
+  coneLinger: 0.7,
+};
+
+/**
+ * Is the line from one point to another clear of cover?
+ *
+ * The same slab test `traceShot` clips a round against, asked as a yes/no. Only
+ * the boxes: two points inside the arena cannot have a perimeter wall between
+ * them, and the floor is under both of them.
+ */
+export function losClear(ox, oy, oz, tx, ty, tz, obstacles = []) {
+  for (const box of obstacles) {
+    if (segBoxEntry(ox, oy, oz, tx, ty, tz, box, 0) >= 0) return false;
+  }
+  return true;
+}
+
+/**
+ * Which enemy plates may be drawn this frame.
+ *
+ * Stateful because of the linger, and the state is two timestamps per player —
+ * see PLATES for why they are two and not one. Team-mates and anyone lit by a
+ * Scout sweep skip the whole test: neither is an exploit. The sweep especially
+ * is the Scout's entire job, and it is EARNED, which is the difference between
+ * information and a wallhack.
+ */
+export class PlateVision {
+  constructor() {
+    this.los = new Map();  // id -> time LOS expires
+    this.aim = new Map();  // id -> time the cone expires
+    this.t = 0;
+  }
+
+  /**
+   * @param self     the local player, with predicted x/y/z
+   * @param yaw/pitch the LOCAL look angles — the ones the shot is built from
+   * @param revealed true while our side's Scout sweep is live
+   * @returns a Set of player ids whose plate may be drawn
+   */
+  update(dt, { self, players, x, y, z, yaw, pitch, obstacles = [], revealed = false }) {
+    this.t += dt;
+    const out = new Set();
+    if (!self) return out;
+
+    const basis = lookBasis(yaw, pitch);
+    const ox = x;
+    const oy = y + PLAYER.eyeHeight;
+    const oz = z;
+    const live = new Set();
+
+    for (const p of players) {
+      if (p.id === self.id || !p.alive) continue;
+      const friend = self.team !== null && p.team !== null && p.team === self.team;
+      // Your own roost, and anyone your Scout is lighting up. Neither is a
+      // thing the player got for free.
+      if (friend || (revealed && !friend)) { out.add(p.id); continue; }
+      live.add(p.id);
+
+      // Chest, not head and not feet: the plate is about the body, and a head
+      // point pops in over cover the target is properly hidden behind.
+      const tx = p.x;
+      const ty = (p.y ?? 0) + PLAYER.hitHeight * 0.55;
+      const tz = p.z;
+
+      if (losClear(ox, oy, oz, tx, ty, tz, obstacles)) {
+        this.los.set(p.id, this.t + PLATES.losLinger);
+      }
+
+      const dx = tx - ox;
+      const dy = ty - oy;
+      const dz = tz - oz;
+      const dist = Math.hypot(dx, dy, dz) || 1e-6;
+      const cos = (dx * basis.fx + dy * basis.fy + dz * basis.fz) / dist;
+      if (dist <= PLATES.near || cos >= Math.cos(PLATES.cone)) {
+        this.aim.set(p.id, this.t + PLATES.coneLinger);
+      }
+
+      if ((this.los.get(p.id) ?? 0) > this.t && (this.aim.get(p.id) ?? 0) > this.t) {
+        out.add(p.id);
+      }
+    }
+
+    // Anyone who left the match keeps a stale timer alive forever otherwise.
+    for (const id of this.los.keys()) if (!live.has(id)) this.los.delete(id);
+    for (const id of this.aim.keys()) if (!live.has(id)) this.aim.delete(id);
+    return out;
+  }
+}
+
 export function convergeAim(px, py, pz, yaw, pitch, targets = [], half = Infinity, obstacles = []) {
   const basis = lookBasis(yaw, pitch);
   const o = rayOrigin(px, py, pz, basis, half);

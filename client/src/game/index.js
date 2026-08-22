@@ -8,19 +8,30 @@ import {
 } from './entities.js';
 import { BulletPool, DebrisPool, BlastRings, MuzzleFlash, RoleRings } from './fx.js';
 import { Controls } from './controls.js';
-import { asView, lookBasis, rayOrigin, convergeDistance } from './view.js';
-import { assistOn } from '../graphics.js';
+import { asView, lookBasis, rayOrigin, convergeDistance, PlateVision } from './view.js';
+import { assistOn, effectBudget } from '../graphics.js';
+import { Adaptive } from './adaptive.js';
 import { sfx } from '../audio/sfx.js';
 import { tts, SAY } from '../audio/index.js';
 import {
   PLAYER, BULLET, BOMBER, MODIFIERS, MODES, HILL, BOMB, HEIST, SEAT_COLORS,
   GRAVITY, coverFor, cropCapacity, MULTIKILL_NAMES, modValue, clampUnit, clamp,
-  spreadPixels, TEAM_COLORS, PING, pingDef, roleDef, ROLE_LIST,
+  spreadPixels, TEAM_COLORS, PING, pingDef, roleDef, ROLE_LIST, PROGRESS,
 } from '@cluckdown/shared';
 
-// Matches the server's simulation rate: sending slower would leave most ticks
-// with no new input to act on, wasting the responsiveness a 60Hz sim buys.
-const INPUT_HZ = 60;
+// How often the local input struct goes on the wire.
+//
+// This said 60 while its own comment at the send site said 20, which is how a
+// constant ends up at three times the rate anybody decided on. 30 is the number
+// to have: the server simulates at 60 but it holds the last input it was given
+// between ticks, so the only thing a second sample inside one 33ms window buys
+// is one tick of freshness — against a doubled upstream packet rate, which on a
+// phone means a radio that never idles and a battery that notices.
+//
+// It is also a ceiling, not a floor: the loop can only sample what the player
+// is doing once per rendered frame, so a 24fps device sends 24 times a second.
+// That is the correct behaviour and not worth padding with duplicates.
+const INPUT_HZ = 30;
 const INPUT_DT = 1 / INPUT_HZ;
 
 // Prediction error above this means something real happened (a blast, a wall,
@@ -38,7 +49,7 @@ const MODE_OPENERS = {
 };
 
 export class Game {
-  constructor({ canvas, session, hud, gfx, onExit }) {
+  constructor({ canvas, session, hud, gfx, onExit, career = null }) {
     this.canvas = canvas;
     this.session = session;
     this.hud = hud;
@@ -80,8 +91,14 @@ export class Game {
     this.looseEggs = new Map();
     this.bombView = rules.bomb ? new BombView(this.scene) : null;
 
-    this.bullets = new BulletPool(this.scene, this.glow);
-    this.debris = new DebrisPool(this.scene, this.glow, 90, modValue(this.modifier, 'debrisGravityMul'));
+    // Effect volume scales with the graphics tier. A phone still gets an
+    // explosion; it gets one made of forty cubes instead of ninety, which is
+    // the tail of a burst nobody has ever counted. See EFFECT_BUDGETS.
+    this.budget = effectBudget(gfx);
+    this.bullets = new BulletPool(this.scene, this.glow, this.budget.tracers);
+    this.debris = new DebrisPool(
+      this.scene, this.glow, this.budget.debris, modValue(this.modifier, 'debrisGravityMul'),
+    );
     this.blasts = new BlastRings(this.scene, this.glow);
     this.rings = new RoleRings(this.scene, this.glow);
     this.muzzle = new MuzzleFlash(this.scene, this.glow);
@@ -91,7 +108,44 @@ export class Game {
     // Your own beak, in first person. See BEAK in view.js.
     this.beak = new BeakView(this.scene, this.camera);
 
+    // The career tally. Roles rotate every round, so "what did you finish as"
+    // is not the question mastery asks — this is what was actually played, by
+    // role, kept here because the Game is the only thing that sees every
+    // second of it. Read once at the whistle. See shared/src/progress.js.
+    this.roleXp = Object.create(null);
+    this.contractsDone = 0;
+    // Where each bar stood at kick-off. Added to `roleXp` for display only —
+    // what gets banked at the whistle is the earnings, never this.
+    this.careerRoleXp = career ?? {};
+
+    /**
+     * One read of the world per frame, shared by everything that draws it.
+     *
+     * `session.players` and its neighbours are GETTERS that rebuild their
+     * answer on every access — for the online session that means walking the
+     * Colyseus schema and minting eight ~45-field objects, plus a maxHpOf and
+     * an abilityMax per player. The frame path was touching `players` six
+     * times a frame, `bomb` four, `nests` three, and so on down: roughly forty
+     * fresh allocations per frame, all of them identical to each other, all of
+     * them garbage by the next one.
+     *
+     * So the frame reads the world exactly once, here, and everything
+     * downstream is handed the same snapshot. Event handlers still go straight
+     * to the session — they run on a kill or a chat line, not sixty times a
+     * second, and a stale snapshot is the one thing this must never hand out.
+     */
+    this.snap = {
+      players: [], self: null, phase: 'lobby', clock: 0, safeHalf: 0,
+      pickups: [], nests: [], looseEggs: [], pads: [], bomb: null, hill: null,
+      bomber: null, potato: null, teamScores: null, takenRoles: [], revealLeft: 0,
+      bounty: null,
+    };
+
     this.views = new Map();
+    // Who is allowed a health bar. Nameplates are HTML with no depth buffer,
+    // so this is what stops them being a wallhack — see PlateVision.
+    this.plateVision = new PlateVision();
+    this.visiblePlates = null;
     this.pickups = new Map();
     this.bomberView = new BomberView(this.scene);
     this.potatoView = new PotatoView(this.scene);
@@ -118,6 +172,11 @@ export class Game {
     this.controls.setArenaHalf(session.arenaSize / 2);
     this.controls.setCover(this.cover);
     this.setView(gfx?.view);
+
+    // Holds the frame rate by trading pixels for it, and honours a manual cap
+    // if the player set one. Built after the engine has its scaling level, so
+    // the setting from the panel becomes the ceiling. See game/adaptive.js.
+    this.adaptive = new Adaptive(this.engine, gfx ?? {});
 
     // Who to watch while dead — set from the kill event, cleared on respawn.
     this.killedBy = null;
@@ -155,6 +214,9 @@ export class Game {
       this.engine.resize();
       // Aspect ratio changed, so the camera's follow limits changed with it.
       this.rig.recomputeLimits();
+      // ...and a different pixel count means the resolution the player asked
+      // for is a different scaling level. Re-anchor before adapting again.
+      this.adaptive.onResize(this.engine.getHardwareScalingLevel());
     };
     window.addEventListener('resize', this.onResize);
 
@@ -166,6 +228,11 @@ export class Game {
   setAssist(on) { this.controls.setAssist(on); }
 
   setSensitivity(mul) { this.controls.setSensitivity(mul); }
+
+  /** Both are live: neither needs the renderer rebuilt to take effect. */
+  setDynamicRes(on) { this.adaptive.setEnabled(on); }
+
+  setFpsCap(fps) { this.adaptive.setFpsCap(fps); }
 
   /** Live brightness, as a multiplier over whatever the scene was built with. */
   setBrightness(mul) {
@@ -380,6 +447,12 @@ export class Game {
           } else if (self && e.by === self.id) {
             // Only your own hits get a hit-marker; other people's are noise.
             sfx.play(e.head ? 'headshot' : 'hit');
+            // The recorded sting rides ON TOP of the synth ping rather than
+            // replacing it. The ping is the confirmation — instant, and it
+            // arrives on the same frame as the hit marker; the sample is the
+            // celebration behind it. Swapping one for the other would trade a
+            // tight confirm for a slower, prettier one.
+            if (e.head) sfx.sample('headshot');
             // ...and now a visible one as well. The sound was carrying this
             // alone, which fails exactly when it matters: a phone on silent, a
             // busy round, or the moment three other things are also making
@@ -402,6 +475,10 @@ export class Game {
           if (self && e.target === self.id) {
             this.rig.addShake(0.75);
             sfx.play('death');
+            // Your own death only. Eight chickens dying every twenty seconds
+            // would make this the most-heard sound in the game, and a sting
+            // you hear constantly stops being one.
+            sfx.sample('death');
             // Stash it for the respawn overlay — by the time that renders, the
             // event is long gone.
             this.killedBy = e.by
@@ -416,6 +493,7 @@ export class Game {
             // and "that landed" are different pieces of news, and a fight you
             // have already won is a fight you should stop spending grain on.
             this.hud.hitMarker('kill');
+            this.earnRole(self.role, PROGRESS.mastery.perKill);
             if (e.multi > 1) sfx.streak(e.multi);
             if (e.revenge) {
               this.hud.announce('REVENGE!');
@@ -506,6 +584,8 @@ export class Game {
         }
         case 'contractDone': {
           if (self && e.target === self.id) {
+            this.contractsDone++;
+            this.earnRole(self.role, PROGRESS.mastery.perContract);
             this.hud.announce(`TASK COMPLETE  +${e.reward}`);
             sfx.play('pickupHealth');
             this.debris.emit('gold', self.x, 1.2, self.z, 14, {
@@ -705,7 +785,17 @@ export class Game {
           break;
         }
         case 'role': {
-          if (self && e.target === self.id) this.hud.setRole(e.role);
+          if (!self || e.target !== self.id) break;
+          this.hud.setRole(e.role);
+          // A rotation you asked for needs no announcement — you just tapped
+          // it. One you were handed does: respawning as a Bruiser with 180 HP
+          // and a falloff you did not choose is a different chicken, and it has
+          // to say so before the first fight rather than after it.
+          if (e.rotated) {
+            const def = roleDef(e.role);
+            this.hud.announce(`ROTATED · ${def.name.toUpperCase()}`);
+            tts.say(`You are ${def.name}`, { priority: SAY.event, key: 'role' });
+          }
           break;
         }
         case 'frenzy': {
@@ -792,6 +882,24 @@ export class Game {
     this.debris.feathers(x, y + 1.4, z, 14);
   }
 
+  /** Adds mastery XP to whichever role earned it. */
+  earnRole(role, xp) {
+    if (!role || !(xp > 0)) return;
+    this.roleXp[role] = (this.roleXp[role] ?? 0) + xp;
+  }
+
+  /** The match's mastery tally, for the results screen. */
+  careerTally() {
+    return { roleXp: { ...this.roleXp }, contracts: this.contractsDone };
+  }
+
+  /** Career mastery INCLUDING this match so far, for the picker's pips. */
+  liveMastery() {
+    const out = { ...this.careerRoleXp };
+    for (const [role, xp] of Object.entries(this.roleXp)) out[role] = (out[role] ?? 0) + xp;
+    return out;
+  }
+
   flashHurt() {
     document.body.animate(
       [{ boxShadow: 'inset 0 0 90px 20px rgba(255,45,75,0.55)' }, { boxShadow: 'inset 0 0 0 0 rgba(255,45,75,0)' }],
@@ -801,14 +909,81 @@ export class Game {
 
   // ----------------------------------------------------------------- frame
 
+  /**
+   * Reads the world once, into `this.snap`. See the field for why.
+   *
+   * Ordered cheapest-last on purpose: `players` is by far the most expensive
+   * of these and everything else is a handful of field reads.
+   */
+  sample() {
+    const s = this.session;
+    const snap = this.snap;
+    snap.players = s.players;
+    snap.self = snap.players.find((p) => p.isSelf) ?? null;
+    snap.phase = s.phase;
+    snap.clock = s.clock;
+    snap.safeHalf = s.safeHalf;
+    snap.pickups = s.pickups;
+    snap.nests = s.nests ?? [];
+    snap.looseEggs = s.looseEggs ?? [];
+    snap.pads = s.pads ?? [];
+    snap.bomb = s.bomb;
+    snap.hill = s.hill;
+    snap.bomber = s.bomber;
+    snap.potato = s.potato;
+    snap.teamScores = s.teamScores;
+    snap.takenRoles = s.takenRoles ?? [];
+    snap.revealLeft = s.revealLeft ?? 0;
+    snap.bounty = s.bounty;
+    return snap;
+  }
+
   frame() {
     if (this.disposed) return;
-    const dt = Math.min(this.engine.getDeltaTime() / 1000, 0.1);
+
+    // The frame cap, checked before anything else — a skipped frame has to
+    // cost a comparison, or capping to 30 would mean doing the work twice and
+    // showing it once. Babylon drives this off requestAnimationFrame, so the
+    // display still paces us and we simply decline some of the slots.
+    const now = performance.now();
+    if (!this.adaptive.shouldRender(now)) return;
+
+    // Timed OFF THE WALL CLOCK, not off engine.getDeltaTime().
+    //
+    // Babylon updates its own delta inside beginFrame, which runs on every
+    // animation frame whether or not our render callback does anything. So with
+    // a frame cap set, the frames we actually run would each be told 16ms had
+    // passed when 33ms really had — and every time-based thing in the game
+    // would quietly halve: the offline sim would run the match at half speed,
+    // prediction would drift behind the server, and the camera and the waddle
+    // would move at the wrong rate. A cap has to change how often we draw and
+    // nothing else.
+    //
+    // Clamped the same way the old path was, so one long stall (a tab returning
+    // to the foreground) still cannot fast-forward the world.
+    const deltaMs = this.lastFrameAt ? Math.min(now - this.lastFrameAt, 250) : this.engine.getDeltaTime();
+    this.lastFrameAt = now;
+    const dt = Math.min(deltaMs / 1000, 0.1);
+    // Our own frame rate, which with a cap set is NOT the display's — and the
+    // display's is what engine.getFps() measures. Reported rather than that so
+    // the readout says what the player is seeing.
+    this.fps = this.fps ? this.fps + (1000 / Math.max(1, deltaMs) - this.fps) * 0.08 : 1000 / Math.max(1, deltaMs);
+    // Both halves of the frame, from the frame before this one: the whole
+    // elapsed time says whether the device is keeping up, and our own share of
+    // it says whether giving up pixels could possibly help. See Adaptive.update.
+    this.adaptive.update(deltaMs, this.lastCpuMs ?? 0);
 
     this.session.update(dt);
 
-    const players = this.session.players;
-    const self = players.find((p) => p.isSelf) ?? null;
+    const snap = this.sample();
+    const players = snap.players;
+    const self = snap.self;
+
+    // Time served, in whatever role you are currently holding. Alive only —
+    // a respawn screen is not practice.
+    if (self?.alive && this.snap.phase === 'live') {
+      this.earnRole(self.role, dt * PROGRESS.mastery.perSecond);
+    }
 
     this.pumpInput(dt, self);
     this.predict(dt, self);
@@ -818,7 +993,7 @@ export class Game {
 
     this.syncObjectives(dt, players);
     this.stepPings(dt);
-    this.potatoView.sync(this.session.potato, dt);
+    this.potatoView.sync(this.snap.potato, dt);
     this.bullets.update(dt);
     this.debris.update(dt);
     this.blasts.update(dt);
@@ -856,6 +1031,19 @@ export class Game {
       killer ? { x: killer.x, z: killer.z } : null,
     );
 
+    // Who has earned a health bar this frame. Off the LOCAL look angles and
+    // the PREDICTED position — the same pair fire() builds a round from, so a
+    // bar appears exactly when a shot would arrive. See PlateVision.
+    this.visiblePlates = this.plateVision.update(dt, {
+      self,
+      players,
+      x: focusX, y: focusY, z: focusZ,
+      yaw: this.controls.yaw,
+      pitch: this.controls.pitch,
+      obstacles: this.cover,
+      revealed: (this.snap.revealLeft ?? 0) > 0,
+    });
+
     // Render BEFORE projecting the HUD. projectFn reads scene.getTransformMatrix(),
     // which is only recomputed during render — projecting first would place every
     // nameplate using the previous frame's camera.
@@ -865,15 +1053,19 @@ export class Game {
     // server position: our own chicken is drawn at the predicted spot and
     // everyone else's is interpolated, so using server coordinates here left
     // every plate floating away from the bird it belongs to.
-    this.hud.syncNameplates(players, this.projectFn, this.session.selfId, (id) => this.views.get(id));
-    this.hud.syncBomberFuse(this.session.bomber, this.projectFn, this.bomberView);
+    this.hud.syncNameplates(
+      players, this.projectFn, this.session.selfId, (id) => this.views.get(id),
+      this.visiblePlates,
+    );
+    this.hud.syncBomberFuse(this.snap.bomber, this.projectFn, this.bomberView);
+    // Only does anything while the board is held open — see setScoreboardOpen.
     this.hud.syncScoreboard(players, this.session.selfId);
-    this.hud.setClock(this.session.clock);
+    this.hud.setClock(this.snap.clock);
     this.hud.setObjective({
-      teamScores: this.session.teamScores,
-      hill: this.session.hill,
-      nests: MODES[this.session.mode]?.heist ? this.session.nests : null,
-      bomb: this.session.bomb,
+      teamScores: this.snap.teamScores,
+      hill: this.snap.hill,
+      nests: MODES[this.session.mode]?.heist ? this.snap.nests : null,
+      bomb: this.snap.bomb,
       self,
       players,
     });
@@ -882,7 +1074,7 @@ export class Game {
     this.hud.setAbility(self);
     // Scout vision. Held as seconds left rather than a flag so the edge glow
     // can be driven off the same number that decides who is drawn through walls.
-    const revealLeft = this.session.revealLeft ?? 0;
+    const revealLeft = this.snap.revealLeft ?? 0;
     this.hud.setSweep(revealLeft);
     this.hud.setContract(self?.contract ?? null);
     this.hud.setActionPrompt(this.actionPrompt(self));
@@ -941,15 +1133,21 @@ export class Game {
     this.statsAt -= dt;
     if (this.statsAt <= 0) {
       this.statsAt = 0.25;
-      this.hud.setNetStats(this.session.netStats(), this.engine.getFps());
+      this.hud.setNetStats(this.session.netStats(), this.fps ?? this.engine.getFps());
     }
+
+    // Our own share of the frame, handed to the resolution scaler on the next
+    // one. Measured here at the very end rather than by wrapping frame(),
+    // because a wrapper would be one more call in the hottest path in the game
+    // to measure the cost of the hottest path in the game.
+    this.lastCpuMs = performance.now() - now;
   }
 
   pumpInput(dt, self) {
     const src = this.pred.has ? this.pred : self;
     // Aim assist runs client-side, so it needs the roster. See
     // shared/src/aim.js for why it is on this side of the wire.
-    const players = this.session.players;
+    const players = this.snap.players;
     const me = players.find((p) => p.isSelf);
     // `y` rides along because assist is vertical now too: pulling onto someone
     // standing on the floor and pulling onto someone mid-jump are different
@@ -1013,7 +1211,7 @@ export class Game {
 
     const inp = this.controls.input;
     const [mx, mz] = clampUnit(inp.mx, inp.mz);
-    const half = this.session.safeHalf;
+    const half = this.snap.safeHalf;
 
     // Everything stepPlayers does to velocity has to be mirrored here, or the
     // prediction and the server disagree permanently and the correction fights
@@ -1023,11 +1221,11 @@ export class Game {
     // client that ignores it predicts you walking forward while the server has
     // you flying backwards. That mismatch is what made being shot feel like the
     // controls had come loose.
-    let moveScale = this.session.phase === 'live' ? 1 : 0.35;
+    let moveScale = this.snap.phase === 'live' ? 1 : 0.35;
     if (self.carrying > 0) {
       moveScale *= 1 - Math.min(HEIST.maxCarrySlow, HEIST.carrySlow * self.carrying);
     }
-    if (this.session.bomb?.carriedBy === self.id) moveScale *= 1 - BOMB.carrySlow;
+    if (this.snap.bomb?.carriedBy === self.id) moveScale *= 1 - BOMB.carrySlow;
 
     const vx = mx * PLAYER.speed * moveScale + (self.kx ?? 0);
     const vz = mz * PLAYER.speed * moveScale + (self.kz ?? 0);
@@ -1070,13 +1268,13 @@ export class Game {
 
   syncPlayers(dt, players, self) {
     const seen = new Set();
-    const reveal = this.session.revealLeft ?? 0;
+    const reveal = this.snap.revealLeft ?? 0;
 
     for (const p of players) {
       seen.add(p.id);
       let view = this.views.get(p.id);
       if (!view) {
-        view = new PlayerView(this.scene, p);
+        view = new PlayerView(this.scene, p, { aura: this.budget.aura });
         this.views.set(p.id, view);
       }
 
@@ -1090,7 +1288,7 @@ export class Game {
       const isSelf = p.isSelf;
       // Our own chicken uses the predicted transform; everyone else is
       // smoothed toward the last server position.
-      const crowned = this.session.bounty === p.id;
+      const crowned = this.snap.bounty === p.id;
       // Whoever killed you last is outlined, so a grudge has somewhere to go.
       const nemesis = !!self && !p.isSelf && self.nemesis === p.id;
       // Lit up by our Scout. Decided per FRAME from our own side's clock, never
@@ -1141,7 +1339,7 @@ export class Game {
   /** Keeps the hill marker and closing boundary in step with the rules. */
   syncObjectives(dt, players) {
     if (this.hillZone) {
-      const hill = this.session.hill;
+      const hill = this.snap.hill;
       const holder = hill?.holder ? players.find((p) => p.id === hill.holder) : null;
       this.hillZone.update(
         dt, holder?.color ?? null, !!hill?.contested,
@@ -1151,10 +1349,10 @@ export class Game {
 
     this.syncNests(dt, players);
     this.syncEggs(dt);
-    if (this.bombView) this.bombView.sync(this.session.bomb, dt);
+    if (this.bombView) this.bombView.sync(this.snap.bomb, dt);
 
     if (this.safeZone) {
-      const half = this.session.safeHalf;
+      const half = this.snap.safeHalf;
       const closing = half < this.lastSafeHalf - 0.0005;
       this.safeZone.update(dt, half, closing);
       this.lastSafeHalf = half;
@@ -1163,10 +1361,10 @@ export class Game {
 
   /** Nests are keyed by team and coloured by the roost that owns them. */
   syncNests(dt, players) {
-    const nests = this.session.nests ?? [];
+    const nests = this.snap.nests ?? [];
     const self = players.find((p) => p.isSelf);
     const rules = MODES[this.session.mode] ?? {};
-    const bomb = this.session.bomb;
+    const bomb = this.snap.bomb;
 
     // Which nests the player is currently supposed to be running at. Lighting
     // these up is what turns "carry it to a rival nest" from instructions into
@@ -1191,7 +1389,7 @@ export class Game {
 
   syncEggs(dt) {
     const seen = new Set();
-    for (const egg of this.session.looseEggs ?? []) {
+    for (const egg of this.snap.looseEggs ?? []) {
       seen.add(egg.id);
       let view = this.looseEggs.get(egg.id);
       if (!view) {
@@ -1217,7 +1415,7 @@ export class Game {
    * the one case worth saying out loud, which is what `forced` is for.
    */
   syncRolePicker(self, dead) {
-    const warmup = this.session.phase === 'warmup';
+    const warmup = this.snap.phase === 'warmup';
     const visible = !!self && (dead || warmup);
     if (!visible) {
       this.hud.setRolePicker({ visible: false });
@@ -1226,16 +1424,18 @@ export class Game {
     this.hud.setRolePicker({
       visible: true,
       mine: self.role ?? null,
-      taken: this.session.takenRoles ?? [],
+      taken: this.snap.takenRoles ?? [],
       level: self.level ?? 1,
       teamed: !!MODES[this.session.mode]?.teams,
+      rotateTo: self.rotateTo ?? null,
+      mastery: this.liveMastery(),
     });
   }
 
   /** Engineer feeders, built and torn down like every other transient object. */
   syncPads(dt) {
     const seen = new Set();
-    for (const pad of this.session.pads ?? []) {
+    for (const pad of this.snap.pads ?? []) {
       seen.add(pad.id);
       let view = this.pads.get(pad.id);
       if (!view) {
@@ -1266,13 +1466,13 @@ export class Game {
     const rules = MODES[this.session.mode] ?? {};
     const px = this.pred.has ? this.pred.x : self.x;
     const pz = this.pred.has ? this.pred.z : self.z;
-    const nests = this.session.nests ?? [];
+    const nests = this.snap.nests ?? [];
     const inp = this.controls.input;
     const still = Math.hypot(inp.mx, inp.mz) < 0.2;
     const near = (n, r) => Math.hypot(px - n.x, pz - n.z) <= r;
 
     if (rules.bomb) {
-      const bomb = this.session.bomb;
+      const bomb = this.snap.bomb;
       if (!bomb) return null;
 
       if (bomb.state === 'planted') {
@@ -1359,7 +1559,7 @@ export class Game {
     }
 
     // --- the bomber. The one thing that can kill you from behind.
-    const b = this.session.bomber;
+    const b = this.snap.bomber;
     if (b) {
       const armed = b.state === 'arm';
       const d = Math.hypot(b.x - px, b.z - pz);
@@ -1370,7 +1570,7 @@ export class Game {
 
     // --- Egg Heist: where the eggs go, and where to get more.
     if (rules.heist) {
-      const nests = this.session.nests ?? [];
+      const nests = this.snap.nests ?? [];
       const home = nests.find((n) => n.team === self.team);
       if (self.carrying > 0 && home) {
         add('home', home.x, home.z, '🏠', self.color, false);
@@ -1384,12 +1584,12 @@ export class Game {
 
     // --- Plant & Defuse: the bomb, or the nest it is in.
     if (rules.bomb) {
-      const bomb = this.session.bomb;
+      const bomb = this.snap.bomb;
       if (bomb?.state === 'planted') {
         const mine = bomb.plantTeam === self.team;
         add('bomb', bomb.x, bomb.z, mine ? '🛠' : '💥', mine ? '#ff2d4b' : '#ffcc3d', mine);
       } else if (bomb?.carriedBy === self.id) {
-        const nests = this.session.nests ?? [];
+        const nests = this.snap.nests ?? [];
         const target = nests
           .filter((n) => n.team !== self.team && players.some((p) => p.team === n.team))
           .sort((a, c) => Math.hypot(a.x - px, a.z - pz) - Math.hypot(c.x - px, c.z - pz))[0];
@@ -1400,14 +1600,14 @@ export class Game {
     }
 
     // --- King of the Coop: the zone moves, so it has to be findable.
-    const hill = this.session.hill;
+    const hill = this.snap.hill;
     if (hill) {
       const inside = Math.hypot(hill.x - px, hill.z - pz) <= HILL.radius;
       if (!inside) add('hill', hill.x, hill.z, '⬢', '#ffcc3d', false);
     }
 
     // --- Hot Potato: whoever has it wants to give it to you.
-    const pot = this.session.potato;
+    const pot = this.snap.potato;
     if (pot) {
       const mine = pot.holder === self.id;
       add('potato', pot.x, pot.z, mine ? '🔥' : '🥔', '#ff8a3d', mine);
@@ -1418,7 +1618,7 @@ export class Game {
 
   syncPickups(dt) {
     const seen = new Set();
-    for (const pk of this.session.pickups) {
+    for (const pk of this.snap.pickups) {
       seen.add(pk.id);
       let view = this.pickups.get(pk.id);
       if (!view) {
@@ -1435,7 +1635,7 @@ export class Game {
   }
 
   syncBomber(dt) {
-    const b = this.session.bomber;
+    const b = this.snap.bomber;
     if (!b) {
       this.bomberView.setActive(false);
       this.tickFuse();
@@ -1459,7 +1659,7 @@ export class Game {
       sfx.fuseTick(bomber.fuse, BOMBER.fuse);
       return;
     }
-    const bomb = this.session.bomb;
+    const bomb = this.snap.bomb;
     if (bomb?.state === 'planted') {
       sfx.fuseTick(bomb.fuse, BOMB.fuse);
       return;

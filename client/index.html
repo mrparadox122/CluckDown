@@ -33,6 +33,23 @@
         <span id="rank-elo" class="rank-elo">1000</span>
       </div>
 
+      <!-- The persistent track. Rank above is this match's ladder; this is the
+           one that is still here tomorrow, and it is why there is a match 2. -->
+      <div class="roost-card">
+        <div class="roost-top">
+          <span id="roost-crest" class="roost-crest"></span>
+          <span class="roost-badge">LVL <b id="roost-level">1</b></span>
+          <strong id="roost-title" class="roost-title">Unranked chicken</strong>
+          <span id="roost-xp" class="roost-xp">0 / 320 XP</span>
+        </div>
+        <div class="roost-bar"><i id="roost-fill"></i></div>
+        <div id="roost-next" class="roost-next"></div>
+        <details class="mastery-box">
+          <summary>Role mastery</summary>
+          <div id="mastery-grid" class="mastery-grid"></div>
+        </details>
+      </div>
+
       <div id="mode-grid" class="mode-grid"></div>
 
       <button id="play-btn" class="play-btn">PLAY</button>
@@ -88,6 +105,19 @@
             <span>Antialiasing</span>
             <input id="gfx-antialias" type="checkbox" />
           </label>
+          <!-- The two that hold the frame rate rather than set the picture.
+               Both are live: neither needs the renderer rebuilt, so unlike the
+               three above they take effect in the match you are already in. -->
+          <label class="setting toggle">
+            <span>Dynamic resolution</span>
+            <input id="gfx-dynamic-res" type="checkbox" />
+          </label>
+          <p class="settings-hint">Softens the picture instead of dropping frames when the arena gets busy. Never goes above the resolution you picked, and never below half of it.</p>
+          <label class="setting">
+            <span>Frame limit</span>
+            <select id="gfx-fps-cap"></select>
+          </label>
+          <p class="settings-hint">A locked <strong>30</strong> is steadier than a wandering 45 and kinder to a battery &mdash; but 60 is where aiming feels best. Uncapped is the default.</p>
           <!-- ids and the stored keys still say "gfx" because they predate this
                panel growing beyond graphics. Renaming them would reset every
                existing player's saved settings for no benefit. -->
@@ -289,6 +319,13 @@
                is a thing you flip mid-match to see round a corner or admire
                your own hat, not a preference you configure once. -->
           <button id="hud-view" class="icon-btn hud-mute" type="button" aria-label="Camera view" title="First / third person (V)">1P</button>
+          <!-- HOLD for the standings. The board used to be permanently on
+               screen and was rebuilt from scratch every frame, which measured
+               as the single most expensive thing the client did. Held, it costs
+               nothing when nobody is reading it — and it hands a phone back the
+               corner of the screen it was occupying. Tab does the same on a
+               keyboard. -->
+          <button id="score-btn" class="icon-btn hud-mute" type="button" aria-label="Scores" title="Hold for scores (Tab)">&#128202;</button>
           <button id="hud-fullscreen" class="icon-btn hud-mute" type="button" aria-label="Fullscreen" title="Fullscreen">&#9974;</button>
         </div>
         <button id="netstats" class="netstats" type="button" title="Network stats (N)"></button>
@@ -350,6 +387,19 @@
         <thead><tr><th>#</th><th>Chicken</th><th>Role</th><th>K</th><th>D</th><th>DMG</th><th>HEAL</th><th>Score</th></tr></thead>
         <tbody id="results-rows"></tbody>
       </table>
+      <!-- The bar, moving. Everything else on this screen is a verdict on the
+           match that ended; this is the only part that points at the next one. -->
+      <div id="results-progress" class="results-progress hidden">
+        <div class="xp-head">
+          <span class="roost-badge">LVL <b id="xp-level">1</b></span>
+          <strong id="xp-total" class="xp-total">+0 XP</strong>
+        </div>
+        <div class="roost-bar"><i id="xp-fill"></i></div>
+        <div id="xp-next" class="xp-next"></div>
+        <div id="xp-lines" class="xp-lines"></div>
+        <div id="xp-mastery" class="xp-mastery"></div>
+      </div>
+
       <div id="results-rating" class="results-rating"></div>
       <!-- How close you came. Placement alone reads as "you lost"; the gap to
            the chicken above you reads as "next time". -->

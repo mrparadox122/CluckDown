@@ -563,6 +563,31 @@ export class ArenaRoom extends Room {
 
   // ------------------------------------------------------------ state sync
 
+  /**
+   * Rounds a countdown to a tenth of a second before it goes into state.
+   *
+   * COLYSEUS SENDS WHAT CHANGED. A float that is recomputed from `world.time`
+   * every tick therefore changes every tick, which means it is dirty in every
+   * single patch — and this schema is full of them: respawnIn, abilityIn,
+   * contractAt, the two reveal clocks, the bomb and potato fuses, the hill's
+   * relocation timer, every pad's lifetime and every loose egg's. Between them
+   * they were a permanent floor under the patch size, paid thirty times a
+   * second, per client, forever.
+   *
+   * Every one of them is DISPLAYED at a resolution far coarser than it is sent
+   * at: most go through Math.ceil to become a whole number of seconds, and the
+   * one that does not — the ability sweep — is a bar with a CSS transition
+   * across it. So a tenth of a second is not a compromise on any of them, and
+   * it takes a field that changes 60 times a second down to 10, against a patch
+   * rate of 30. Two patches in three now carry nothing for it at all.
+   *
+   * Positions are NOT run through this and must not be: x/y/z/aim/pitch are the
+   * things interpolation is built on, and quantising them is visible instantly.
+   */
+  static tenths(seconds) {
+    return Math.round(Math.max(0, seconds) * 10) / 10;
+  }
+
   syncPlayer(ps, p) {
     ps.name = p.name;
     ps.seat = p.seat;
@@ -582,10 +607,11 @@ export class ArenaRoom extends Room {
     ps.wind = p.windUntil > this.world.time;
     ps.frenzy = p.frenzyUntil > this.world.time;
     ps.role = p.role ?? '';
+    ps.rotateTo = p.rotateTo ?? '';
     ps.abilityCharges = Math.max(0, Math.min(255, p.abilityCharges | 0));
     ps.abilityIn = p.abilityCharges >= abilityMax(p)
       ? 0
-      : Math.max(0, p.abilityAt - this.world.time);
+      : ArenaRoom.tenths(p.abilityAt - this.world.time);
     ps.bulwark = p.bulwarkUntil > this.world.time;
     ps.dashing = p.dashUntil > this.world.time;
     ps.healGiven = Math.max(0, Math.min(65535, Math.round(p.healGiven ?? 0)));
@@ -596,7 +622,7 @@ export class ArenaRoom extends Room {
     ps.kills = p.kills;
     ps.deaths = p.deaths;
     ps.score = p.score;
-    ps.respawnIn = p.alive ? 0 : Math.max(0, p.respawnAt - this.world.time);
+    ps.respawnIn = p.alive ? 0 : ArenaRoom.tenths(p.respawnAt - this.world.time);
     ps.kx = p.kx;
     ps.kz = p.kz;
     ps.nemesis = this.world.time < p.nemesisUntil ? (p.nemesis ?? '') : '';
@@ -607,7 +633,7 @@ export class ArenaRoom extends Room {
     const contract = contractInfo(p);
     ps.contract = contract?.id ?? '';
     ps.contractLabel = contract?.label ?? '';
-    ps.contractAt = contract?.secondsLeft ?? 0;
+    ps.contractAt = ArenaRoom.tenths(contract?.secondsLeft ?? 0);
     ps.contractGoal = contract?.target ?? 0;
     ps.contractDone = contract?.progress ?? 0;
   }
@@ -615,7 +641,7 @@ export class ArenaRoom extends Room {
   syncState() {
     const s = this.state;
     s.phase = this.world.phase;
-    s.clock = this.world.clock;
+    s.clock = ArenaRoom.tenths(this.world.clock);
     s.safeHalf = this.world.safeHalf;
     // Set every tick, not just at creation: the voted map changes it.
     s.arenaSize = this.world.arena.size;
@@ -628,7 +654,7 @@ export class ArenaRoom extends Room {
     if (pot) {
       s.potatoX = pot.x;
       s.potatoZ = pot.z;
-      s.potatoFuse = Math.max(0, pot.fuse);
+      s.potatoFuse = ArenaRoom.tenths(pot.fuse);
       s.potatoHolder = pot.holder ?? '';
     }
     if (this.world.teamScores) {
@@ -639,13 +665,13 @@ export class ArenaRoom extends Room {
       s.hillContested = this.world.hill.contested;
       s.hillX = this.world.hill.x;
       s.hillZ = this.world.hill.z;
-      s.hillMoveAt = Math.max(0, this.world.hill.moveAt);
+      s.hillMoveAt = ArenaRoom.tenths(this.world.hill.moveAt);
     }
 
     // Sweeps, as seconds remaining rather than an absolute time — clients have
     // no shared clock with the server, and this is a countdown either way.
-    s.revealBlue = Math.max(0, (this.world.reveal?.[0] ?? 0) - this.world.time);
-    s.revealRed = Math.max(0, (this.world.reveal?.[1] ?? 0) - this.world.time);
+    s.revealBlue = ArenaRoom.tenths((this.world.reveal?.[0] ?? 0) - this.world.time);
+    s.revealRed = ArenaRoom.tenths((this.world.reveal?.[1] ?? 0) - this.world.time);
 
     this.syncNests();
     this.syncEggs();
@@ -733,7 +759,7 @@ export class ArenaRoom extends Room {
         ps.radius = pad.radius;
         this.state.pads.set(key, ps);
       }
-      ps.until = Math.max(0, pad.until - this.world.time);
+      ps.until = ArenaRoom.tenths(pad.until - this.world.time);
     }
     for (const key of [...this.state.pads.keys()]) {
       if (!live.has(key)) this.state.pads.delete(key);
@@ -768,7 +794,7 @@ export class ArenaRoom extends Room {
         es.team = egg.fromTeam;
         this.state.eggs.set(key, es);
       }
-      es.returnAt = Math.max(0, egg.returnAt);
+      es.returnAt = ArenaRoom.tenths(egg.returnAt);
     }
     for (const key of [...this.state.eggs.keys()]) {
       if (!live.has(key)) this.state.eggs.delete(key);
@@ -793,7 +819,7 @@ export class ArenaRoom extends Room {
     s.bombZ = bomb.z;
     s.bombCarrier = bomb.carriedBy ?? '';
     s.bombTeam = bomb.state === 'planted' ? bomb.plantTeam : -1;
-    s.bombFuse = Math.max(0, bomb.fuse);
+    s.bombFuse = ArenaRoom.tenths(bomb.fuse);
     // Sent as a 0..1 share so the client can draw a ring without knowing the
     // hold durations.
     s.bombPlant = Math.min(1, bomb.plant / BOMB.plantTime);

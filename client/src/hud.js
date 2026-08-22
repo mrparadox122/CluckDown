@@ -1,7 +1,7 @@
 import {
   QUICK_CHAT, PLAYER, MODES, MULTIKILL_NAMES, MODIFIERS, TEAM_NAMES, TEAM_COLORS, HILL,
   LEVELS, rungOf, xpForLevel, PINGS, pingDef, pingWedge, pingAngle,
-  ROLES, ROLE_LIST, roleDef, roleTier,
+  ROLES, ROLE_LIST, roleDef, roleTier, masteryTier, PROGRESS,
 } from '@cluckdown/shared';
 
 const $ = (id) => document.getElementById(id);
@@ -25,6 +25,44 @@ function el2(tag, cls, text) {
   if (cls) n.className = cls;
   if (text != null) n.textContent = text;
   return n;
+}
+
+/**
+ * Restart a CSS animation without forcing the browser to lay the page out.
+ *
+ * The idiom for this is `el.classList.remove(c); void el.offsetWidth;
+ * el.classList.add(c)` — and reading offsetWidth is a synchronous layout
+ * flush. That is fine once. It is not fine in `hitMarker`, which fires on
+ * every landed shot: at this fire rate a firefight was flushing layout ten
+ * times a second, and because the HUD had dirtied the DOM earlier in the same
+ * frame each flush had the whole document to redo. Measured at ~150ms of
+ * layout per second on a mid-range phone.
+ *
+ * The Web Animations API can rewind the same animation directly, which is what
+ * the reflow was standing in for all along. The offsetWidth path stays as a
+ * fallback for anything that does not implement getAnimations.
+ */
+function restartAnim(node, ...classes) {
+  node.classList.remove(...classes);
+  const running = node.getAnimations?.();
+  if (running?.length) {
+    for (const a of running) a.cancel();
+  } else {
+    void node.offsetWidth;
+  }
+}
+
+/**
+ * A cheap change key for a block of HUD text.
+ *
+ * Several HUD panels are handed the whole world every frame and only need to
+ * redraw when something a player could actually see has moved. Joining the few
+ * values that matter into a string and comparing it to last frame's is far
+ * cheaper than the DOM write it avoids — and much cheaper than the layout that
+ * DOM write would have triggered.
+ */
+function key(...parts) {
+  return parts.join('\u0001');
 }
 
 export class Hud {
@@ -69,8 +107,12 @@ export class Hud {
     this.announceQueue = [];
     this.announceUntil = 0;
 
+    this.scoreBtn = $('score-btn');
+    this.scoreboardOpen = false;
+
     this.buildQuickChat();
     this.buildPingWheel();
+    this.bindScoreboard();
     this.bindChatInput();
     this.buildRolePicker();
     this.bindAbility();
@@ -88,8 +130,13 @@ export class Hud {
     this.killfeed.replaceChildren();
     this.chatLog.replaceChildren();
     this.scoreboard.replaceChildren();
-    for (const p of this.plates.values()) p.remove();
+    for (const p of this.plates.values()) p.node.remove();
     this.plates.clear();
+    this.scoreboardSig = null;
+    this.objectiveSig = null;
+    this.crosshairSig = null;
+    this.netSig = null;
+    this.setScoreboardOpen(false);
     if (this.fuseRing) { this.fuseRing.remove(); this.fuseRing = null; }
     this.respawnLeft = 0;
     this.pickerUp = false;
@@ -142,6 +189,31 @@ export class Hud {
    */
   setObjective({ teamScores, hill, nests, bomb, self, players }) {
     const el = this.objectiveEl;
+
+    // GATE FIRST, and gate on everything the body below can draw.
+    //
+    // This runs every frame and every branch of it ended in replaceChildren,
+    // so the objective strip was minting a handful of elements sixty times a
+    // second to say the same thing it said last frame. Together with the
+    // scoreboard that was most of the HUD's layout cost. The contract strip
+    // right below already had the right shape — build on change, mutate in
+    // place — and this is the same treatment.
+    //
+    // The two continuous values (the hill meter and the plant ring) are folded
+    // in at the resolution they are drawn: a bar 200px wide cannot show more
+    // than a few hundred steps, so quantising to 1/200 is not an approximation
+    // anyone can see, and it turns a float that changes every tick into one
+    // that changes when the bar actually moves.
+    const q = (v) => Math.round((v ?? 0) * 200);
+    const sig = key(
+      nests?.length ? nests.map((n) => `${n.team}:${n.eggs}`).join(',') : '',
+      self?.carrying ?? 0, self?.team ?? -1,
+      teamScores ? teamScores.join(',') : '',
+      hill ? `${hill.holder ?? ''}|${hill.contested}|${Math.ceil(hill.moveAt ?? 0)}|${q(self?.hillPct)}` : '',
+      bomb ? `${bomb.state}|${bomb.carriedBy ?? ''}|${bomb.plantTeam}|${Math.ceil(bomb.fuse ?? 0)}|${q(bomb.plant)}` : '',
+    );
+    if (sig === this.objectiveSig) return;
+    this.objectiveSig = sig;
 
     // Egg Heist: the standings ARE the nests, so show both counts. Nothing
     // else in the mode tells you whether you are winning.
@@ -255,8 +327,7 @@ export class Hud {
       this.contractTime = el2('span', 'contract-time');
       el.append(this.contractLabel, this.contractMeter, this.contractTime);
       // Fresh contract: flash once so it is noticed without an announcement.
-      el.classList.remove('flash');
-      void el.offsetWidth; // restart the animation
+      restartAnim(el, 'flash');
       el.classList.add('flash');
     }
 
@@ -363,11 +434,19 @@ export class Hud {
    * Hidden while dead, where there is nothing to aim.
    */
   setCrosshair(visible, state = '', gap = 0) {
-    const el = $('crosshair');
+    const el = (this.crosshairEl ??= $('crosshair'));
+    // Written only on a real change. Every one of these is a style invalidation
+    // and this runs sixty times a second, where the gap moves on maybe one
+    // frame in ten — it only changes when the movement cone does.
+    const px = `${Math.max(4, gap).toFixed(1)}px`;
+    const sig = key(visible ? 1 : 0, state, px);
+    if (sig === this.crosshairSig) return;
+    this.crosshairSig = sig;
+
     el.style.opacity = visible ? '1' : '0';
     // A floor, so the reticle never closes into an unreadable blob at rest —
     // and never smaller than the dot it has to stay clear of.
-    el.style.setProperty('--gap', `${Math.max(4, gap).toFixed(1)}px`);
+    el.style.setProperty('--gap', px);
     // 'dry' = nothing to fire, 'busy' = refilling. Both are answers to the one
     // question a player asks in the instant before pulling the trigger, put
     // where they are already looking.
@@ -391,13 +470,14 @@ export class Hud {
    * @param kind 'hit' | 'head' | 'kill'
    */
   hitMarker(kind = 'hit') {
-    const el = $('crosshair')?.querySelector('.ch-mark');
+    // Cached: this is looked up on every landed shot, and getElementById plus
+    // a querySelector per hit is work with a known answer.
+    const el = (this.hitMark ??= $('crosshair')?.querySelector('.ch-mark'));
     if (!el) return;
-    el.classList.remove('show', 'is-head', 'is-kill');
-    // Forcing layout is what makes the restart happen. It is one element, once
-    // per landed shot, and the alternative is a hitmarker that stops confirming
-    // hits precisely when they are coming fastest.
-    void el.offsetWidth;
+    // Rewinds the running animation instead of flushing layout to restart it —
+    // see restartAnim. Three hits inside one animation is normal at this fire
+    // rate, and without the restart the second and third silently do nothing.
+    restartAnim(el, 'show', 'is-head', 'is-kill');
     if (kind === 'kill') el.classList.add('is-kill');
     else if (kind === 'head') el.classList.add('is-head');
     el.classList.add('show');
@@ -437,8 +517,7 @@ export class Hud {
       // that pops when you join reads as a level-up that did not happen.
       if (this.shownLevel != null) {
         const climbed = level > this.shownLevel;
-        badge.classList.remove('climbed', 'fell');
-        void badge.offsetWidth; // restart the animation
+        restartAnim(badge, 'climbed', 'fell');
         badge.classList.add(climbed ? 'climbed' : 'fell');
       }
       this.shownLevel = level;
@@ -574,6 +653,46 @@ export class Hud {
     }
   }
 
+  /**
+   * Hold to see the standings: Tab on a keyboard, the HUD button on a phone.
+   *
+   * Held rather than toggled on both, and for the same reason a scoreboard is
+   * held in every other shooter: it covers the arena, and the moment you want
+   * it is a moment you are not shooting. A toggle is a thing you leave on by
+   * accident, which is how it ends up costing frames again.
+   *
+   * Tab has to be preventDefault'd or the browser walks focus to the chat box
+   * behind the HUD — and then the next keypress goes into a text field instead
+   * of the game.
+   */
+  bindScoreboard() {
+    const set = (on) => this.setScoreboardOpen(on);
+
+    if (this.scoreBtn) {
+      const down = (e) => { e.preventDefault(); this.scoreBtn.setPointerCapture?.(e.pointerId); set(true); };
+      const up = () => set(false);
+      this.scoreBtn.addEventListener('pointerdown', down);
+      this.scoreBtn.addEventListener('pointerup', up);
+      this.scoreBtn.addEventListener('pointercancel', up);
+      this.scoreBtn.addEventListener('pointerleave', up);
+    }
+
+    window.addEventListener('keydown', (e) => {
+      if (e.code !== 'Tab' || this.root.classList.contains('hidden')) return;
+      if (e.target instanceof HTMLInputElement) return;
+      e.preventDefault();
+      if (!e.repeat) set(true);
+    });
+    window.addEventListener('keyup', (e) => {
+      if (e.code !== 'Tab') return;
+      set(false);
+    });
+    // A window that loses focus never delivers the keyup, which would leave the
+    // board stuck open — and stuck open is the state this whole change exists
+    // to avoid paying for.
+    window.addEventListener('blur', () => set(false));
+  }
+
   // ------------------------------------------------------------ net stats
 
   bindNetStats() {
@@ -599,6 +718,17 @@ export class Hud {
 
   setNetStats(stats, fps) {
     const el = this.netStatsEl;
+    // Runs at 4Hz, but three of those four ticks usually say the same thing:
+    // ping and fps are both already rounded to integers by the time they are
+    // drawn. Rebuilding the readout to print the number it is already printing
+    // is the cheapest kind of waste to delete.
+    const sig = key(
+      stats.online ? 1 : 0, stats.ping ?? '', Math.round(fps),
+      this.netExpanded ? 1 : 0, stats.jitter ?? '',
+      Math.round(stats.patchRate ?? 0), stats.loss ?? 0,
+    );
+    if (sig === this.netSig) return;
+    this.netSig = sig;
     el.replaceChildren();
 
     const add = (text, cls) => {
@@ -845,8 +975,7 @@ export class Hud {
 
   announce(text) {
     this.announcer.textContent = text;
-    this.announcer.classList.remove('show');
-    void this.announcer.offsetWidth; // force reflow so the animation restarts
+    restartAnim(this.announcer, 'show');
     this.announcer.classList.add('show');
   }
 
@@ -862,8 +991,11 @@ export class Hud {
    *                Plates must follow the mesh that's actually on screen, not
    *                the server position, or they lag behind by the prediction
    *                and interpolation error.
+   * @param visible ids allowed a plate this frame, or null for "everyone".
+   *                A nameplate has no depth buffer, so without this an enemy
+   *                health bar draws straight through cover — see PlateVision.
    */
-  syncNameplates(players, projectFn, selfId, getView) {
+  syncNameplates(players, projectFn, selfId, getView, visible = null) {
     const seen = new Set();
 
     for (const p of players) {
@@ -875,26 +1007,41 @@ export class Hud {
       seen.add(p.id);
       let plate = this.plates.get(p.id);
       if (!plate) {
-        plate = el('div', 'nameplate');
-        plate.append(
-          (() => {
-            // The rung, in front of the name. This one line is what makes the
-            // ladder a social object instead of a private stat: you can see who
-            // the threat in the room is, and they can see you seeing it.
-            const row = el('div', 'np-name');
-            row.append(el('span', 'np-lvl'), document.createTextNode(p.name));
-            return row;
-          })(),
-          (() => { const bar = el('div', 'np-bar'); bar.append(el('div', 'np-fill')); return bar; })(),
-          el('div', 'np-tag'),
-        );
-        plate.querySelector('.np-name').lastChild.textContent = p.name;
-        plate.querySelector('.np-name').style.color = p.color;
-        this.overlay.append(plate);
+        // The rung, in front of the name. This one line is what makes the
+        // ladder a social object instead of a private stat: you can see who
+        // the threat in the room is, and they can see you seeing it.
+        const node = el('div', 'nameplate');
+        const nameRow = el('div', 'np-name');
+        const lvlEl = el('span', 'np-lvl');
+        nameRow.append(lvlEl, document.createTextNode(p.name));
+        nameRow.style.color = p.color;
+        const bar = el('div', 'np-bar');
+        const fill = el('div', 'np-fill');
+        bar.append(fill);
+        const tagEl = el('div', 'np-tag');
+        node.append(nameRow, bar, tagEl);
+        this.overlay.append(node);
+
+        // The children are kept as references rather than looked up.
+        // querySelector three times per plate per frame is ~1,500 tree walks a
+        // second in a full room, all of them re-finding nodes this function
+        // just created.
+        plate = { node, fill, lvlEl, tagEl, shown: null, lvl: null, tag: null, hp: null };
         this.plates.set(p.id, plate);
       }
 
-      if (!p.alive) { plate.style.display = 'none'; continue; }
+      const node = plate.node;
+      // `shown` mirrors the display property so hiding an already-hidden plate
+      // — the common case, since most of a 4v4 is behind cover — writes nothing.
+      const hide = () => {
+        if (plate.shown !== false) { plate.shown = false; node.style.display = 'none'; }
+      };
+
+      if (!p.alive) { hide(); continue; }
+      // Not seen this frame. Hidden BEFORE any projection work, because the
+      // overwhelmingly common case in a 4v4 is that most of the arena is
+      // behind something.
+      if (visible && !visible.has(p.id)) { hide(); continue; }
 
       const view = getView?.(p.id);
       const wx = view ? view.x : p.x;
@@ -911,34 +1058,42 @@ export class Hud {
       const off = !pos
         || pos.x < -MARGIN || pos.x > window.innerWidth + MARGIN
         || pos.y < -MARGIN || pos.y > window.innerHeight + MARGIN;
-      if (off) { plate.style.display = 'none'; continue; }
+      if (off) { hide(); continue; }
 
-      plate.style.display = '';
-      plate.style.transform = `translate(${pos.x}px, ${pos.y}px) translate(-50%, -100%)`;
+      if (plate.shown !== true) { plate.shown = true; node.style.display = ''; }
+      // Rounded to the pixel it lands on. A sub-pixel transform is a repaint
+      // for a difference that does not exist on screen.
+      node.style.transform = `translate(${Math.round(pos.x)}px, ${Math.round(pos.y)}px) translate(-50%, -100%)`;
 
+      // Quantised to the width of the bar. It is 46px wide, so a health change
+      // smaller than 1/64th of it cannot move a pixel, and the CSS transition
+      // covers the steps.
       const ratio = Math.max(0, Math.min(1, p.hp / Math.max(1, p.maxHp ?? PLAYER.maxHp)));
-      plate.querySelector('.np-fill').style.transform = `scaleX(${ratio})`;
-      plate.classList.toggle('is-hurt', ratio <= 0.6 && ratio > 0.3);
-      plate.classList.toggle('is-critical', ratio <= 0.3);
-      plate.classList.toggle('is-self', p.id === selfId);
-
-      const tag = p.rapid ? '⚡ RAPID' : p.invuln ? '🛡 SAFE' : '';
-      // Rebuilt only on change: this runs per plate per frame.
-      const lvlEl = plate.querySelector('.np-lvl');
-      const lvl = p.level ?? 1;
-      if (lvlEl && lvlEl.dataset.lvl !== String(lvl)) {
-        lvlEl.dataset.lvl = String(lvl);
-        lvlEl.textContent = String(lvl);
-        lvlEl.style.background = rungOf(lvl).color;
+      const hp = Math.round(ratio * 64);
+      if (hp !== plate.hp) {
+        plate.hp = hp;
+        plate.fill.style.transform = `scaleX(${hp / 64})`;
+        node.classList.toggle('is-hurt', ratio <= 0.6 && ratio > 0.3);
+        node.classList.toggle('is-critical', ratio <= 0.3);
       }
 
-      const tagEl = plate.querySelector('.np-tag');
-      if (tagEl.textContent !== tag) tagEl.textContent = tag;
+      const lvl = p.level ?? 1;
+      if (lvl !== plate.lvl) {
+        plate.lvl = lvl;
+        plate.lvlEl.textContent = String(lvl);
+        plate.lvlEl.style.background = rungOf(lvl).color;
+      }
+
+      const tag = p.rapid ? '⚡ RAPID' : p.invuln ? '🛡 SAFE' : '';
+      if (tag !== plate.tag) {
+        plate.tag = tag;
+        plate.tagEl.textContent = tag;
+      }
     }
 
     for (const [id, plate] of this.plates) {
       if (seen.has(id)) continue;
-      plate.remove();
+      plate.node.remove();
       this.plates.delete(id);
     }
   }
@@ -989,7 +1144,61 @@ export class Hud {
     this.clockEl.classList.toggle('urgent', s <= 30);
   }
 
+  /**
+   * THE SCOREBOARD, and why it is no longer always on screen.
+   *
+   * It used to be, and it was rebuilt from scratch every single frame:
+   * `replaceChildren` over eight rows of five elements each, sixty times a
+   * second. That is ~2,900 DOM nodes per second created and immediately
+   * orphaned — the browser's own node count sat above 40,000 in a ten-second
+   * match window against 622 actually attached. It was, by a wide margin, the
+   * most expensive thing the client did: throttling this one function alone
+   * took a 6x-throttled benchmark from 30.6fps to 49.1, and dropped document
+   * layout from 167ms per second to 68.
+   *
+   * Two changes, and the second is the one that makes it free:
+   *
+   *   IT IS HELD, not permanent. Tab on a keyboard, the button on a phone.
+   *   Every shooter does this, it hands a phone back a corner of its screen,
+   *   and a board nobody is looking at costs nothing to not draw.
+   *
+   *   IT IS DIFFED. Even while held, the rows are rebuilt only when something
+   *   a reader could notice has changed — which is a kill, a death or a role
+   *   swap, not a frame. So holding it open is not a way to make the game
+   *   stutter.
+   *
+   * What is NOT done is throttling it to a few hertz. A scoreboard that
+   * updates late is a scoreboard that lies for a moment, and this way it never
+   * does: the diff is exact, so it redraws on the exact frame the number
+   * changes and on no other.
+   */
+  setScoreboardOpen(open) {
+    const want = !!open;
+    if (this.scoreboardOpen === want) return;
+    this.scoreboardOpen = want;
+    this.scoreboard.classList.toggle('is-open', want);
+    if (!want) {
+      // Emptied rather than merely hidden: a hidden subtree is still a subtree
+      // the browser carries around, and nothing in it is worth keeping — the
+      // next open rebuilds from live state anyway.
+      this.scoreboard.replaceChildren();
+      this.scoreboardSig = null;
+    }
+  }
+
   syncScoreboard(players, selfId) {
+    if (!this.scoreboardOpen) return;
+
+    // Everything a row can draw. Positions, health and ammo are deliberately
+    // absent: none of them appear on this board, so none of them should be able
+    // to make it redraw.
+    let sig = '';
+    for (const p of players) {
+      sig += `${p.id}|${p.kills}|${p.deaths}|${p.score}|${p.alive ? 1 : 0}|${p.role ?? ''}|${p.team ?? -1}|${p.name}\u0001`;
+    }
+    if (sig === this.scoreboardSig) return;
+    this.scoreboardSig = sig;
+
     const byScore = (a, b) => b.score - a.score || b.kills - a.kills;
     const row = (p) => {
       const r = el('div', `sb-row${p.id === selfId ? ' is-self' : ''}${p.alive ? '' : ' is-dead'}`);
@@ -1051,7 +1260,13 @@ export class Hud {
       const top = el('div', 'role-card-top');
       top.append(el('span', 'role-card-icon', def.icon), el('span', 'role-card-name', def.name));
       const perk = el('div', 'role-card-perk');
-      card.append(top, el('div', 'role-card-what', def.what), perk, el('span', 'role-card-by'));
+      // Mastery pips. The picker is where a rotation is offered, so it is also
+      // the one screen where "you are two hundred XP off Veteran on this one"
+      // is worth saying — it turns the swap you did not ask for into the swap
+      // that fills the bar closest to done.
+      const pips = el('div', 'role-card-mastery');
+      for (let i = 0; i < PROGRESS.mastery.tiers.length; i++) pips.append(el('i'));
+      card.append(top, el('div', 'role-card-what', def.what), perk, pips, el('span', 'role-card-by'));
       card.addEventListener('click', () => this.pickRole(id));
       // The slot number, so the keyboard shortcut is discoverable rather than
       // documented — a key nobody knows about is a key nobody presses.
@@ -1069,8 +1284,11 @@ export class Hud {
    * @param mine    the role in effect (or queued) for this player
    * @param taken   roles a team-mate is holding
    * @param level   this player's rung, so each card can name what it buys NOW
+   * @param rotateTo next round's role if they do nothing, or null
    */
-  setRolePicker({ visible, mine, taken = [], level = 1, teamed = true }) {
+  setRolePicker({
+    visible, mine, taken = [], level = 1, teamed = true, rotateTo = null, mastery = null,
+  }) {
     this.pickerUp = !!visible;
     this.syncDeathScreen();
     if (!visible) {
@@ -1083,7 +1301,15 @@ export class Hud {
     // opened this screen is not reported as having been denied anything.
     this.wantedRole ??= mine;
     const forced = !!this.wantedRole && this.wantedRole !== mine && taken.includes(this.wantedRole);
-    const key = `${mine}|${taken.join(',')}|${level}|${forced}|${teamed}`;
+    // Rotation is only ever an OFFER. It is drawn on the card it is going to,
+    // it is named in the hint, and one tap anywhere cancels it — which is the
+    // difference between a screen that gives you a choice and one that tells
+    // you what happened to you.
+    const next = rotateTo && rotateTo !== mine ? rotateTo : null;
+    // Mastery only moves at the whistle, so it is keyed by tier rather than by
+    // XP — this runs on every frame the picker is up.
+    const tiers = ROLE_LIST.map((id) => masteryTier(mastery?.[id] ?? 0).tier).join('');
+    const key = `${mine}|${taken.join(',')}|${level}|${forced}|${teamed}|${next}|${tiers}`;
     if (this.pickerShown === key) return;
     this.pickerShown = key;
 
@@ -1095,13 +1321,22 @@ export class Hud {
       const isTaken = (taken.includes(id) && id !== mine) || soloBlocked;
       card.classList.toggle('picked', id === mine);
       card.classList.toggle('taken', isTaken);
+      card.classList.toggle('rotating', id === next);
       card.disabled = isTaken;
       card.querySelector('.role-card-perk').textContent = roleTier(id, level).perk;
-      card.querySelector('.role-card-by').textContent = soloBlocked ? 'TEAMS ONLY' : (isTaken ? 'TAKEN' : '');
+      const tier = masteryTier(mastery?.[id] ?? 0).tier;
+      card.querySelectorAll('.role-card-mastery i').forEach((pip, i) => {
+        pip.classList.toggle('on', i < tier);
+      });
+      card.querySelector('.role-card-by').textContent = soloBlocked ? 'TEAMS ONLY'
+        : isTaken ? 'TAKEN'
+          : id === next ? 'NEXT' : '';
     }
     this.roleHint.textContent = forced
       ? 'YOUR ROLE WAS TAKEN — PICK ANOTHER'
-      : 'PICK ANY TIME — YOU RESPAWN IN WHAT YOU HAVE';
+      : next
+        ? `ROTATING TO ${ROLES[next].name.toUpperCase()} — TAP ANY ROLE TO OVERRIDE`
+        : 'PICK ANY TIME — YOU RESPAWN IN WHAT YOU HAVE';
   }
 
   /**

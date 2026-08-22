@@ -57,13 +57,24 @@ if (MODE === 'online') {
 // Let the match run so bots fight, bomber spawns, pickups appear.
 await page.waitForTimeout(4000);
 await shot(page, `${OUT}/03-game-early.png`);
+// The standings are HELD open now, not permanent — see Hud.setScoreboardOpen —
+// so reading `.sb-row` cold reports an empty board whether the scoreboard works
+// or not. Hold Tab the way a player would, read, let go.
+async function scoreboardRows(page) {
+  await page.keyboard.down('Tab');
+  await page.waitForTimeout(250);
+  const rows = await page.$$eval('.sb-row', (n) => n.map((x) => x.textContent.trim()));
+  await page.keyboard.up('Tab');
+  return rows;
+}
+
 
 console.log('\n== in game ==');
 console.log('hud visible:', !(await page.getAttribute('#hud', 'class'))?.includes('hidden'));
 console.log('clock:', await page.textContent('#match-clock'));
 console.log('mode pill:', await page.textContent('#mode-pill'));
 console.log('nameplates:', await page.$$eval('.nameplate', (n) => n.length));
-console.log('scoreboard rows:', await page.$$eval('.sb-row', (n) => n.map((x) => x.textContent.trim())));
+console.log('scoreboard rows (Tab held):', await scoreboardRows(page));
 
 // Drive the player around and shoot with keyboard+mouse.
 await page.mouse.move(700, 250);
@@ -99,7 +110,7 @@ console.log('\n== after 18s ==');
 console.log('clock:', await page.textContent('#match-clock'));
 console.log('killfeed:', await page.$$eval('.kf-row', (n) => n.map((x) => x.textContent.trim())));
 console.log('chat:', await page.$$eval('.chat-row', (n) => n.map((x) => x.textContent.trim())));
-console.log('scoreboard:', await page.$$eval('.sb-row', (n) => n.map((x) => x.textContent.trim())));
+console.log('scoreboard (Tab held):', await scoreboardRows(page));
 console.log('fuse ring present:', await page.$$eval('.fuse-ring', (n) => n.length));
 console.log('canvas size:', await page.$eval('#stage', (c) => `${c.width}x${c.height}`));
 

@@ -43,8 +43,12 @@ await page.evaluate(() => {
     clearInterval(wait);
     const play = s.play.bind(s);
     const streak = s.streak.bind(s);
+    const sample = s.sample.bind(s);
     s.play = (n, o) => { window.__sfxLog.push(n); return play(n, o); };
     s.streak = (m) => { window.__sfxLog.push(`streak${m}`); return streak(m); };
+    // Logged as "clip:death" so it can never be confused with the synth cue of
+    // the same name — the two fire together on purpose and both must land.
+    s.sample = (n, o) => { window.__sfxLog.push(`clip:${n}`); return sample(n, o); };
   }, 50);
 });
 await page.waitForTimeout(400);
@@ -111,6 +115,17 @@ console.log('  ', JSON.stringify(counts));
 
 check('shots make a sound', (counts.shot ?? 0) + (counts.rapidShot ?? 0) > 0, `${counts.shot ?? 0}`);
 check('the bomber fuse beeps', (counts.fuseBeep ?? 0) > 0, `${counts.fuseBeep ?? 0} beeps`);
+// The synth cue and the recorded one are a PAIR — the ping is the confirm and
+// the sample is the celebration behind it. If a death happened, both fired.
+if ((counts.death ?? 0) > 0) {
+  check('your own death fires the synth cue and the recorded sting together',
+    (counts['clip:death'] ?? 0) > 0, `${counts.death} deaths, ${counts['clip:death'] ?? 0} stings`);
+}
+if ((counts.headshot ?? 0) > 0) {
+  check('a headshot confirm fires both halves',
+    (counts['clip:headshot'] ?? 0) > 0,
+    `${counts.headshot} headshots, ${counts['clip:headshot'] ?? 0} stings`);
+}
 check('at least one combat cue fired',
   ['hit', 'hurt', 'kill', 'death', 'blast', 'bomberDown', 'bomberSpawn'].some((k) => counts[k] > 0),
   Object.keys(counts).join(', '));
@@ -157,6 +172,57 @@ if (gaps.length >= 4) {
 } else {
   check('fuse beeps accelerate as the timer runs out', false, `only ${gaps.length} beeps`);
 }
+
+// --- recorded clips -------------------------------------------------------
+// Three cues ship as mp3s (see clips.js) because they are punctuation rather
+// than texture. What is checked is that they are DISCOVERED, DECODED and
+// VARIED — a bank that silently ends up with one clip in it sounds fine the
+// first time and awful by the tenth, which is the failure mode a sample layer
+// actually has.
+console.log('');
+console.log('--- recorded clips ---');
+const bank = await page.evaluate(() => {
+  const s = window.__cluckdown.sfx;
+  return Object.fromEntries([...s.clips].map(([k, v]) => [k, v.length]));
+});
+console.log('  decoded:', JSON.stringify(bank));
+check('the death, headshot and win banks all exist',
+  ['death', 'headshot', 'win'].every((k) => k in bank), Object.keys(bank).join(', '));
+check('every bank decoded at least one clip',
+  Object.values(bank).every((n) => n > 0), JSON.stringify(bank));
+check('the death bank has variants, so it does not wear out',
+  (bank.death ?? 0) > 1, `${bank.death} clips`);
+
+// Never the same clip twice running. Fifty forced plays with the throttle
+// cleared: if the picker ever repeats, this catches it.
+const repeats = await page.evaluate(() => {
+  const s = window.__cluckdown.sfx;
+  const seen = [];
+  let doubled = 0;
+  for (let i = 0; i < 50; i++) {
+    s.lastAt.delete('clip:death');
+    const before = s.lastClip.get('death');
+    if (!s.sample('death', { gain: 0.0001 })) continue;
+    const after = s.lastClip.get('death');
+    if (before !== undefined && before === after) doubled++;
+    seen.push(after);
+  }
+  return { doubled, distinct: new Set(seen).size, played: seen.length };
+});
+console.log(`  ${repeats.played} forced plays, ${repeats.distinct} distinct clips`);
+check('a clip never repeats back to back', repeats.doubled === 0, `${repeats.doubled} repeats`);
+check('...and the whole bank gets used', repeats.distinct === bank.death,
+  `${repeats.distinct} of ${bank.death}`);
+
+check('a missing bank fails quietly rather than throwing',
+  await page.evaluate(() => window.__cluckdown.sfx.sample('nope') === false));
+check('muting silences the recorded half too', await page.evaluate(() => {
+  const s = window.__cluckdown.sfx;
+  s.setMuted(true);
+  const played = s.sample('win');
+  s.setMuted(false);
+  return played === false;
+}));
 
 // --- mute + volume --------------------------------------------------------
 console.log('\n--- mute & volume ---');

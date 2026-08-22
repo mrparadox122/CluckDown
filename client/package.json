@@ -21,7 +21,8 @@
     "test:controls": "node test/controls.mjs",
     "test:view": "node test/view.mjs",
     "test:aim": "node test/aim.mjs",
-    "test:tts": "node test/tts.mjs"
+    "test:tts": "node test/tts.mjs",
+    "test:phase4": "node test/phase4.mjs"
   },
   "dependencies": {
     "@babylonjs/core": "^9.21.0",

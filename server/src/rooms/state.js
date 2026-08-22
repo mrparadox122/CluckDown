@@ -48,6 +48,10 @@ defineTypes(PlayerState, {
   // The two ability fields are the exception, because they are STATE rather
   // than tuning: how many charges are in hand, and how long until the next one.
   role: 'string',
+  // Next round's role, rolled at death so the picker can OFFER the rotation
+  // instead of announcing it afterwards. '' means nothing pending — a live
+  // player, or one who has already picked. See ROTATION in constants.js.
+  rotateTo: 'string',
   abilityCharges: 'uint8',
   abilityIn: 'float32',
   bulwark: 'boolean',  // Bruiser's brace is up

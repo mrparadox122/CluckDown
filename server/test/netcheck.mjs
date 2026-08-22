@@ -28,10 +28,20 @@ async function main() {
   const chats = [];
   let stateChanges = 0;
   let matchEnd = null;
+  let resolvedShots = 0;
 
   // Attach listeners before the second client joins, otherwise Bob's join
   // broadcast lands before there's anything listening for it.
-  r1.onMessage('fx', (evs) => { for (const e of evs) fx[e.type] = (fx[e.type] || 0) + 1; });
+  r1.onMessage('fx', (evs) => {
+    for (const e of evs) {
+      fx[e.type] = (fx[e.type] || 0) + 1;
+      // Shooting is hitscan: the server resolves the whole shot on the tick it
+      // is fired and puts the impact point in the event, and the client draws a
+      // tracer between the two. So "the round went somewhere" is a property of
+      // the shot event itself rather than a later message.
+      if (e.type === 'shot' && Number.isFinite(e.hx) && Number.isFinite(e.hz)) resolvedShots++;
+    }
+  });
   r1.onMessage('feed', (f) => feed.push(f.kind));
   r1.onMessage('chat', (m) => chats.push(`${m.name}: ${m.text}`));
   r1.onMessage('matchEnd', (m) => { matchEnd = m; });
@@ -131,7 +141,12 @@ async function main() {
   check('jumping reaches other clients as height', peakY > 0.4, `${peakY.toFixed(2)}u`);
   check('vertical aim reaches other clients as pitch', peakPitch > 0.3, `${peakPitch.toFixed(2)}rad`);
   check('shots were fired', (fx.shot ?? 0) > 0, `${fx.shot ?? 0} shots`);
-  check('bullets resolved (hit or expired)', (fx.bulletEnd ?? 0) > 0, `${fx.bulletEnd ?? 0}`);
+  // Was `fx.bulletEnd > 0`, which had been failing quietly since shooting became
+  // hitscan: there are no travelling bullets left to end, so that event stopped
+  // being emitted and the check could never pass again. What it was really
+  // guarding is that a shot resolves to a point, and that is now in the shot.
+  check('shots resolve to an impact point', resolvedShots > 0,
+    `${resolvedShots} of ${fx.shot ?? 0}`);
   check('damage was dealt', (fx.hit ?? 0) > 0, `${fx.hit ?? 0} hits`);
   check('pickups spawned', (fx.pickupSpawn ?? 0) > 0, `${fx.pickupSpawn ?? 0}`);
   check('bomber spawned', (fx.bomberSpawn ?? 0) > 0, `${fx.bomberSpawn ?? 0}`);

@@ -8,7 +8,14 @@ export const TICK_DT = 1 / TICK_HZ;
 // responsive; broadcasting often mostly makes clients decode more, and
 // interpolation already covers the gaps — so the two rates are deliberately
 // decoupled rather than tied together.
-export const PATCH_HZ = 40;
+//
+// 30, not 40, and the reason is that it DIVIDES the tick rate. At 40 against a
+// 60Hz sim the two never line up: a patch lands after one tick, then after two,
+// then one, so remote chickens arrive at the interpolator on an uneven beat and
+// wobble slightly no matter how good the smoothing is. 30 is exactly every
+// second tick, forever. (Windows timer granularity was already delivering ~30
+// in practice, so this is also the rate the game was actually tested at.)
+export const PATCH_HZ = 30;
 export const PATCH_MS = 1000 / PATCH_HZ;
 
 // Most seconds of simulation a single frame may catch up on. The offline
@@ -685,6 +692,59 @@ export const LEVELS = {
     { level: 5, name: 'Ironfeather', color: '#ff8a3d' },
     { level: 6, name: 'Cock of the Walk', color: '#ff4df0' },
   ],
+};
+
+// ------------------------------------------------------------ ROLE ROTATION
+//
+// Six roles, four slots, unique per team — which is the rule that makes a pick
+// a composition, and also the rule that hands the last player to arrive the
+// leftovers. Left alone it settles: the same three people take Sniper, Medic
+// and Bruiser every match, everyone else plays whatever is left, and a picker
+// with one real option is not a picker.
+//
+// So a role is a LEASE, not a title. Every round you are moved to a different
+// free one unless you say otherwise, which flips the default from "whatever I
+// grabbed first" to "something else" — nobody hoards, nobody is stuck, and the
+// composition changes shape inside a single match.
+//
+// A ROUND HERE IS A LIFE. Cluckdown has no round timer; the recurring boundary
+// is the respawn, and that is also where the picker already lives and where a
+// role swap is already safe to apply (see applyRole).
+//
+// THE PICKER STAYS NOT-A-TOLL-GATE, and that took one design rule: the roll
+// happens at DEATH, not at respawn, so the next role is decided and shown while
+// the player is looking at the screen anyway. Doing nothing rotates you and
+// costs no time; one tap keeps what you had and also costs no time. Rolling it
+// at respawn would have been the same feature with the player finding out
+// afterwards, which is the version that feels like the game taking the wheel.
+export const ROTATION = {
+  enabled: true,
+
+  /**
+   * Lives between rotations. 1 is every round, which is the point.
+   *
+   * Higher numbers are the knob to turn if variety ever starts costing more
+   * than it buys — the counter is per player, so it is a cadence rather than
+   * a schedule everybody shares.
+   */
+  everyLives: 1,
+
+  /**
+   * Never roll the role they are already playing.
+   *
+   * A "rotation" that lands you back where you were is a rotation that did not
+   * happen, and it reads as the feature being broken rather than as luck.
+   */
+  avoidCurrent: true,
+
+  /**
+   * ...and never the one before that either, while there is anything else.
+   *
+   * Two roles ping-ponging is the failure mode a pure random walk actually
+   * produces at six roles and four slots — Runner, Scout, Runner, Scout — and
+   * it is indistinguishable from no rotation to the player living it.
+   */
+  avoidPrevious: true,
 };
 
 /** The rung definition for a level, clamped into range. */

@@ -105,7 +105,12 @@ const marked = await until(page, () => {
   // Wait for the ring to actually be ON. Returning the object either way made
   // this resolve on the first poll — before a frame had rendered, and before
   // the nemesis had respawned if we caught them mid-death.
-  if (!view?.grudge?.isEnabled()) return null;
+  // `badges.grudge`, not `view.grudge`: the six effect meshes a chicken can
+  // wear are built on first use rather than all at once per player, so the ring
+  // does not exist as a property until somebody is actually somebody's nemesis.
+  // Which makes its presence here a stronger check than it was, not a weaker
+  // one — before, the mesh existed whether or not the feature worked.
+  if (!view?.badges?.grudge?.isEnabled()) return null;
   return { enabled: true, who: me.nemesis };
 }, 25000);
 console.log('  ', JSON.stringify(marked));

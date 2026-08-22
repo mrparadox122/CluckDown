@@ -18,6 +18,7 @@
 import { PLAYER, BULLET, WALL_HEIGHT, segSegDist2 } from '@cluckdown/shared';
 import {
   TPP, asView, lookBasis, rayOrigin, boomLength, tppCamera, convergeAim, convergeDistance,
+  PLATES, losClear, PlateVision,
 } from '../src/game/view.js';
 
 const failures = [];
@@ -425,6 +426,99 @@ check('anything else falls back to first person',
   check('the shoulder offset is squeezed to stay inside the arena',
     Math.abs(corner.x) <= 24 - TPP.wallGap + 1e-9 && Math.abs(corner.z) <= 24 - TPP.wallGap + 1e-9,
     `(${corner.x.toFixed(2)}, ${corner.z.toFixed(2)})`);
+}
+
+// ------------------------------------------------- nameplates and cover
+//
+// The wallhack fix. A nameplate is HTML and HTML has no depth buffer, so every
+// enemy health bar used to draw through solid cover and players tracked each
+// other off the bars alone. What is checked here is that the bar now answers
+// the same question a bullet does.
+{
+  console.log(String.fromCharCode(10) + '--- enemy health bars vs cover ---');
+
+  // One box, dead ahead, between us and them.
+  const box = { x: 0, y: 0, z: 8, w: 4, d: 4, h: 3 };
+  const eye = PLAYER.eyeHeight;
+
+  check('a wall between you and them blocks the line',
+    !losClear(0, eye, 0, 0, eye, 16, [box]));
+  check('an empty line is clear',
+    losClear(0, eye, 0, 0, eye, 16, []));
+  check('a box off to the side does not block',
+    losClear(0, eye, 0, 0, eye, 16, [{ x: 9, y: 0, z: 8, w: 4, d: 4, h: 3 }]));
+
+  const self = { id: 'me', team: 0, x: 0, y: 0, z: 0, alive: true };
+  const foe = (z, x = 0) => ({ id: 'foe', team: 1, x, y: 0, z, alive: true });
+  const mate = { id: 'mate', team: 0, x: 2, y: 0, z: 8, alive: true };
+
+  // Facing +z is yaw 0 — the same construction fire() uses.
+  const run = (vision, players, opts = {}) => vision.update(0.016, {
+    self, players, x: 0, y: 0, z: 0, yaw: 0, pitch: 0,
+    obstacles: [box], ...opts,
+  });
+
+  {
+    const v = new PlateVision();
+    check('an enemy behind cover gets no plate', !run(v, [self, foe(16)]).has('foe'));
+  }
+  {
+    const v = new PlateVision();
+    check('an enemy in the open, under the crosshair, gets one',
+      run(v, [self, foe(16)], { obstacles: [] }).has('foe'));
+  }
+  {
+    const v = new PlateVision();
+    check('a team-mate is plated through cover', run(v, [self, mate]).has('mate'));
+  }
+  {
+    const v = new PlateVision();
+    check('a Scout sweep plates them through cover anyway',
+      run(v, [self, foe(16)], { revealed: true }).has('foe'));
+  }
+  {
+    const v = new PlateVision();
+    check('an enemy behind you gets no plate',
+      !run(v, [self, foe(-16)], { obstacles: [] }).has('foe'));
+  }
+  {
+    // Point blank beats the cone: they are already filling the screen.
+    const v = new PlateVision();
+    const close = { id: 'foe', team: 1, x: PLATES.near - 2, y: 0, z: 0, alive: true };
+    check('a chicken in your face is plated whatever you are looking at',
+      run(v, [self, close], { obstacles: [] }).has('foe'));
+  }
+  {
+    // The linger split: losing the cone holds, losing the wall does not.
+    const v = new PlateVision();
+    run(v, [self, foe(16)], { obstacles: [] });
+    const held = v.update(0.3, {
+      self, players: [self, foe(-16)], x: 0, y: 0, z: 0, yaw: 0, pitch: 0, obstacles: [],
+    });
+    check('a plate survives the crosshair drifting off for a moment', held.has('foe'));
+
+    const v2 = new PlateVision();
+    run(v2, [self, foe(16)], { obstacles: [] });
+    const gone = v2.update(0.3, {
+      self, players: [self, foe(16)], x: 0, y: 0, z: 0, yaw: 0, pitch: 0, obstacles: [box],
+    });
+    check('...but not them stepping behind a box', !gone.has('foe'),
+      `${PLATES.losLinger}s of linger, far under a peek`);
+  }
+  {
+    // Leaving the match must not leave a timer behind.
+    const v = new PlateVision();
+    run(v, [self, foe(16)], { obstacles: [] });
+    run(v, [self], { obstacles: [] });
+    check('a departed player leaves no stale timers', v.los.size === 0 && v.aim.size === 0);
+  }
+
+  // The cone has to be wide enough to hold a moving target. At 12 units it
+  // covers this much lateral slack either side of the crosshair.
+  const slack = Math.tan(PLATES.cone) * 12;
+  console.log(`  the cone is ${(PLATES.cone * 180 / Math.PI).toFixed(0)}deg - ${slack.toFixed(1)} units either side at 12 units out`);
+  check('the cone is wide enough to track a strafing chicken', slack > PLAYER.radius * 4,
+    `${slack.toFixed(1)} units vs a ${(PLAYER.radius * 2).toFixed(1)}-unit chicken`);
 }
 
 console.log(failures.length ? `\n✗ ${failures.length} check(s) failed\n` : '\n✓ all checks passed\n');

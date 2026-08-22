@@ -10,7 +10,7 @@ import {
   MULTIKILL_WINDOW, SEAT_COLORS, MODIFIER_POOL, modValue,
   TEAM_COLORS, teamForSeat, teamShade, spawnLayout, feederPoints, HILL, SHRINK, rollPickup,
   PING, pingDef,
-  LEVELS, levelFromXp, xpForLevel, rungOf,
+  LEVELS, levelFromXp, xpForLevel, rungOf, ROTATION,
   MAPS, DEFAULT_MAP, pickMapCandidates, BOUNTY, POTATO,
   CONTRACT, CONTRACTS, CONTRACT_LIST, HEIST, BOMB, REVENGE, GRAVITY, WALL_HEIGHT,
   coverFor, CROP, cropCapacity, SPREAD,
@@ -18,7 +18,7 @@ import {
 import { nextSpread, coneDeviate } from './accuracy.js';
 import {
   ROLES, ROLE_LIST, DEFAULT_ROLE, roleDef, roleTier, roleValue, perkOf,
-  maxHpOf, roleDamage, freeRoles, resolveRole,
+  maxHpOf, roleDamage, freeRoles, resolveRole, rollRotation,
 } from './roles.js';
 import {
   clamp, clampUnit, norm, len, dist2, segHitsCapsule, mulberry32, angleDelta,
@@ -261,6 +261,13 @@ export function addPlayer(world, { id, name, seat, isBot = false, role = null })
     // fight that was already happening.
     role: null,
     wantRole: null,
+    // ROTATION. `rotateTo` is next round's role, rolled the moment you die so
+    // the picker can offer it rather than announce it; `lastRole` keeps the
+    // roll off a two-role ping-pong; `livesSinceRotate` is the cadence counter.
+    // See ROTATION in constants.js.
+    rotateTo: null,
+    lastRole: null,
+    livesSinceRotate: 0,
     abilityAt: 0,      // next time the active ability may be used
     abilityCharges: 0, // dash charges in hand
     dashUntil: 0,      // Runner burst
@@ -338,6 +345,10 @@ export function setRole(world, id, wanted) {
   if (!freeRoles(world, p.team, p.id).includes(want)) return null;
 
   p.wantRole = want;
+  // A tap cancels the rotation outright rather than just losing to it in
+  // applyRole. It is synced, and the picker reads it: leaving it set would
+  // keep advertising a swap that is no longer going to happen.
+  p.rotateTo = null;
   // Between lives, or before the match starts: no fight to interrupt.
   if (!p.alive || world.phase === 'lobby' || world.phase === 'warmup') applyRole(world, p);
   // The role that is now in effect, or the one queued for the next respawn —
@@ -346,18 +357,30 @@ export function setRole(world, id, wanted) {
   return p.wantRole ?? p.role;
 }
 
-/** Commits a queued role. Called on respawn and by setRole when it is safe. */
+/**
+ * Commits a queued role. Called on respawn and by setRole when it is safe.
+ *
+ * `wantRole` wins over `rotateTo` and that ordering IS the opt-out: a tap
+ * anywhere in the picker is the player saying what they want, and the rotation
+ * is only ever the answer to nobody having said anything.
+ */
 function applyRole(world, p) {
-  const next = resolveRole(world, p, p.wantRole);
+  const rotated = !p.wantRole && !!p.rotateTo;
+  const next = resolveRole(world, p, p.wantRole ?? p.rotateTo);
   const changed = next !== p.role;
+  if (changed) p.lastRole = p.role;
   p.role = next;
   p.wantRole = null;
+  p.rotateTo = null;
+  // Counts LIVES, not rotations: a player who keeps picking their own role is
+  // still owed a roll on the ROTATION.everyLives cadence.
+  if (rotated || changed) p.livesSinceRotate = 0;
   // Health is a role stat, so a swap re-bases it rather than carrying a number
   // that belonged to a different chicken.
   p.hp = Math.min(p.hp, maxHpOf(p));
   if (changed) {
     p.hp = maxHpOf(p);
-    emit(world, { type: 'role', target: p.id, role: p.role, level: p.level });
+    emit(world, { type: 'role', target: p.id, role: p.role, level: p.level, rotated });
   }
   armAbilities(world, p);
   return p.role;
@@ -1297,6 +1320,12 @@ function killPlayer(world, target, byId, kind) {
   target.score += SCORE.death;
   target.streak = 0;
   target.respawnAt = world.time + PLAYER.respawnDelay;
+  // Next round's role, decided NOW so the picker that is about to open can
+  // offer it. A pick overrides it; doing nothing takes it. See ROTATION.
+  target.livesSinceRotate++;
+  target.rotateTo = target.livesSinceRotate >= ROTATION.everyLives
+    ? rollRotation(world, target, world.rng)
+    : null;
   dropEggs(world, target);
   target.input = {
     mx: 0, mz: 0, ax: 0, az: 0, pitch: 0, jump: false, shoot: false, seq: target.input.seq,
@@ -2379,6 +2408,9 @@ export function snapshot(world) {
       // drawn against a hardcoded 100 would show a Bruiser permanently
       // overflowing and a Sniper permanently nearly dead.
       role: p.role, maxHp: maxHpOf(p),
+      // Next round's role. Empty for a live player and for anyone who has
+      // already picked — it is an offer, and it expires the moment it is taken.
+      rotateTo: p.rotateTo,
       ability: roleDef(p.role).ability,
       abilityCharges: p.abilityCharges, abilityMax: abilityMax(p),
       abilityIn: p.abilityCharges >= abilityMax(p) ? 0 : Math.max(0, p.abilityAt - world.time),
